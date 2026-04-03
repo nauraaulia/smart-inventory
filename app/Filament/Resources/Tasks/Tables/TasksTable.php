@@ -7,6 +7,7 @@ use App\Services\AI\TaskApprovalService;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
+use Filament\Forms\Components\Toggle;
 use Filament\Tables\Columns\BadgeColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Forms\Components\Textarea;
@@ -87,9 +88,17 @@ class TasksTable
                     ->color('success')
                     ->icon('heroicon-o-check-circle')
                     ->visible(fn (Task $record) => $record->status === 'pending' && self::canHandleTask($record))
-                    ->action(function (Task $record) {
+                    ->form([
+                        Toggle::make('generate_pr')
+                            ->label('Jika ada kekurangan stok, generate PR otomatis')
+                            ->default(true)
+                            ->inline(false),
+                    ])
+                    ->action(function (Task $record, array $data) {
                         $service = new TaskApprovalService();
-                        $service->approve($record, auth()->user());
+                        $service->approve($record, auth()->user(), [
+                            'generate_pr' => (bool) ($data['generate_pr'] ?? true),
+                        ]);
                     }),
 
                 Action::make('reject')

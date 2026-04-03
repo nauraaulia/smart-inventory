@@ -2,6 +2,7 @@
 
 namespace App\Services\AI;
 
+use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Project;
 use App\Models\PurchaseRequest;
@@ -11,11 +12,11 @@ use Illuminate\Support\Facades\DB;
 
 class TaskApprovalService
 {
-    public function approve(Task $task, User $actor): void
+    public function approve(Task $task, User $actor, array $options = []): void
     {
-        DB::transaction(function () use ($task, $actor) {
+        DB::transaction(function () use ($task, $actor, $options) {
             match ($task->type) {
-                'ai_booking_suggestion' => $this->approveAiBookingSuggestion($task, $actor),
+                'ai_booking_suggestion' => $this->approveAiBookingSuggestion($task, $actor, $options),
                 'pr_manager_approval' => $this->approveManagerPr($task, $actor),
                 'pr_finance_approval' => $this->approveFinancePr($task, $actor),
                 'pr_revision' => $this->approvePrRevision($task, $actor),
@@ -34,14 +35,17 @@ class TaskApprovalService
         });
     }
 
-    private function approveAiBookingSuggestion(Task $task, User $actor): void
+    private function approveAiBookingSuggestion(Task $task, User $actor, array $options = []): void
     {
         $payload = $task->payload ?? [];
         $projectId = (int) data_get($payload, 'project_id');
         $projectCode = $this->projectCodeFromPayload($payload, $projectId);
         $detail = data_get($payload, 'detail', []);
+        $generatePr = (bool) ($options['generate_pr'] ?? true);
 
         $createdPrIds = [];
+        $pendingShortages = [];
+        $touchedMaterialIds = [];
 
         foreach ($detail as $item) {
             $materialId = (int) ($item['material_id'] ?? 0);
@@ -50,6 +54,8 @@ class TaskApprovalService
             if ($materialId <= 0 || $dibutuhkan <= 0) {
                 continue;
             }
+
+            $touchedMaterialIds[] = $materialId;
 
             $bookedQty = $this->bookFromAvailablePieces(
                 materialId: $materialId,
@@ -60,6 +66,14 @@ class TaskApprovalService
             $shortage = max(0, $dibutuhkan - $bookedQty);
 
             if ($shortage > 0) {
+                if (!$generatePr) {
+                    $pendingShortages[] = [
+                        'material_id' => $materialId,
+                        'shortage_qty' => $this->decimal($shortage),
+                    ];
+                    continue;
+                }
+
                 $pr = PurchaseRequest::create([
                     'material_id' => $materialId,
                     'project_id' => $projectId ?: null,
@@ -82,6 +96,11 @@ class TaskApprovalService
             }
         }
 
+        Material::query()
+            ->whereIn('id', array_unique($touchedMaterialIds))
+            ->get()
+            ->each(fn (Material $m) => $m->updateStokSummary());
+
         if ($projectId) {
             Project::whereKey($projectId)->update([
                 'material_confirmed_at' => now(),
@@ -98,12 +117,17 @@ class TaskApprovalService
         data_set($payload, 'execution_result', [
             'created_pr_ids' => $createdPrIds,
             'created_pr_count' => count($createdPrIds),
+            'pending_shortages_without_pr' => $pendingShortages,
+            'generate_pr_selected' => $generatePr,
         ]);
 
         $task->update([
             'status' => 'done',
             'handled_by' => $actor->id,
             'handled_at' => now(),
+            'message' => !$generatePr && !empty($pendingShortages)
+                ? 'Booking diproses. Ada shortage yang belum dibuat PR (sesuai pilihan konfirmasi).'
+                : $task->message,
             'payload' => $payload,
         ]);
 
