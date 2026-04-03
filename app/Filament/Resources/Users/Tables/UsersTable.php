@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Users\Tables;
 
+use App\Models\User;
 use Filament\Actions\BulkActionGroup;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
@@ -16,6 +17,8 @@ class UsersTable
             ->columns([
                TextColumn::make('id_custom')
                     ->label('ID User')
+                    ->state(fn (User $record): string => $record->id_custom
+                        ?: ('JAU-' . str_pad((string) $record->id, 3, '0', STR_PAD_LEFT)))
                     ->sortable()
                     ->searchable(),
                 TextColumn::make('role')

@@ -50,4 +50,15 @@ class User extends Authenticatable
             'password' => 'hashed',
         ];
     }
+
+    protected static function booted(): void
+    {
+        static::created(function (User $user): void {
+            if (blank($user->id_custom)) {
+                $user->updateQuietly([
+                    'id_custom' => 'JAU-' . str_pad((string) $user->id, 3, '0', STR_PAD_LEFT),
+                ]);
+            }
+        });
+    }
 }
