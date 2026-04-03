@@ -71,6 +71,7 @@ static::created(function ($inbound) {
                 : 'available',
             'sumber' => ($inbound->jenis_inbound === 'Retur') ? 'retur_proyek' : 'inbound_baru',
             'shelf_location_id' => $inbound->shelf_location_id,
+            'supplier_id' => $inbound->supplier_id,
             'inbound_id' => $inbound->id,
             'keterangan' => $inbound->keterangan ?? 
                 ($inbound->jenis_inbound === 'Retur' 
@@ -173,7 +174,7 @@ static::created(function ($inbound) {
     });
 
     // =====================================================
-    // DELETE
+    // hapus
     // =====================================================
     static::deleted(function ($inbound) {
         if ($inbound->material) {

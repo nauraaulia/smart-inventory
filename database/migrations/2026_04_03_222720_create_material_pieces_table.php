@@ -22,9 +22,15 @@ return new class extends Migration
             $table->foreignId('material_id')
                 ->constrained('materials')
                 ->cascadeOnDelete();
+
+            // RELASI KE INBOUND ASAL (jika dibuat dari inbound)
+            $table->foreignId('inbound_id')
+                ->nullable()
+                ->constrained('inbounds')
+                ->cascadeOnDelete();
             
             // RELASI KE PROJECT (kalau sudah di-book)
-            $table->foreignId('project_id')
+            $table->foreignId('booked_for_project_id')
                 ->nullable()
                 ->constrained('projects')
                 ->nullOnDelete();
@@ -43,7 +49,7 @@ return new class extends Migration
             
             // JUMLAH FISIK PIECE INI
             // Misal: piece #1 = 50 meter
-            $table->decimal('quantity', 10, 2);
+            $table->decimal('panjang', 10, 2);
             
             // HARGA SATUAN (optional)
             $table->decimal('unit_price', 15, 2)->nullable();
@@ -55,17 +61,22 @@ return new class extends Migration
             // damaged = rusak
             $table->enum('status', ['available', 'booked', 'used', 'damaged'])
                 ->default('available');
+
+            // SUMBER PIECE (tracking asal)
+            $table->string('sumber')->default('inbound_baru');
             
             // TIMESTAMP
             $table->timestamp('booked_at')->nullable();
             $table->timestamp('used_at')->nullable();
             
-            $table->text('notes')->nullable();
+            $table->text('keterangan')->nullable();
+            $table->softDeletes();
             $table->timestamps();
             
             // INDEX untuk performa query
             $table->index(['material_id', 'status']);
-            $table->index('project_id');
+            $table->index('booked_for_project_id');
+            $table->index('inbound_id');
         });
     }
 
