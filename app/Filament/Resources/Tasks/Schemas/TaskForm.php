@@ -7,6 +7,7 @@ use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\Repeater;
 use Filament\Schemas\Components\Section;
+use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Schema;
 
 class TaskForm
@@ -25,13 +26,20 @@ class TaskForm
                                 'done' => 'Done (Disetujui & Diproses)',
                                 'rejected' => 'Rejected (Ditolak)',
                             ])
+                            ->live()
                             ->required(),
+                        Textarea::make('rejection_reason')
+                            ->label('Alasan Reject')
+                            ->visible(fn (Get $get) => $get('status') === 'rejected')
+                            ->required(fn (Get $get) => $get('status') === 'rejected')
+                            ->rows(3),
                     ])->columns(1),
 
                 Section::make('Detail Rekomendasi AI (Mudah Dibaca)')
                     ->schema([
                         Repeater::make('payload.ai_summary.rekomendasi')
                             ->label('')
+                            ->dehydrated(false)
                             // INI YANG DIGANTI UNTUK FILAMENT V3:
                             ->addable(false)
                             ->deletable(false)

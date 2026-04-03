@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Projects\Tables;
 
+use Filament\Actions\Action;
 use Filament\Actions\BulkActionGroup;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
@@ -26,6 +27,11 @@ class ProjectsTable
                     ->sortable(),
                 TextColumn::make('status')
                     ->searchable(),
+                TextColumn::make('outbound_confirmed_at')
+                    ->label('Outbound Confirmed')
+                    ->dateTime('d M Y H:i')
+                    ->placeholder('-')
+                    ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('created_at')
                     ->dateTime()
                     ->sortable()
@@ -39,6 +45,20 @@ class ProjectsTable
                 //
             ])
             ->recordActions([
+                Action::make('confirm_outbound')
+                    ->label('Konfirmasi Outbound')
+                    ->icon('heroicon-o-truck')
+                    ->color('warning')
+                    ->requiresConfirmation()
+                    ->modalHeading('Konfirmasi Barang Sudah Outbound')
+                    ->modalDescription('Aksi ini akan mengubah status proyek menjadi Processing.')
+                    ->visible(fn ($record) => in_array($record->status, ['Pending', 'Approved']))
+                    ->action(function ($record) {
+                        $record->update([
+                            'status' => 'Processing',
+                            'outbound_confirmed_at' => now(),
+                        ]);
+                    }),
                 \Filament\Actions\EditAction::make(),
                 \Filament\Actions\DeleteAction::make(),
             ])

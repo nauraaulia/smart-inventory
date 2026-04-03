@@ -53,8 +53,9 @@ class Project extends Model
             ]);
         }
 
-        // 🔥 TRIGGER AI: Jalankan setelah project tersimpan
-        \App\Jobs\ProsesKebutuhanProyekJob::dispatch($item->id);
+        // 🔥 TRIGGER AI: jalankan setelah response terkirim.
+        // Aman untuk local tanpa queue worker, dan memberi waktu relasi items tersimpan dulu.
+        \App\Jobs\ProsesKebutuhanProyekJob::dispatchAfterResponse($item->id);
     });
 
     // 2. CCTV Saat Proyek Diedit (Update)
