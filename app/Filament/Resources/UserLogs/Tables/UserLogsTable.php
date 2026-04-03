@@ -73,7 +73,15 @@ class UserLogsTable
 
                 SelectFilter::make('user_id')
                     ->label('Actor (User)')
-                    ->options(fn() => User::pluck('id_custom', 'id')->toArray()) // ← id_custom
+                    ->options(fn() => User::query()
+                        ->get(['id', 'id_custom', 'name', 'email'])
+                        ->mapWithKeys(fn(User $user) => [
+                            $user->id => $user->id_custom
+                                ?: $user->name
+                                ?: $user->email
+                                ?: ('User #' . $user->id),
+                        ])
+                        ->toArray())
                     ->searchable(),
 
                 SelectFilter::make('action')
@@ -86,7 +94,10 @@ class UserLogsTable
 
                 SelectFilter::make('module')
                     ->label('Module')
-                    ->options(fn() => UserLog::distinct()
+                    ->options(fn() => UserLog::query()
+                        ->whereNotNull('module')
+                        ->where('module', '!=', '')
+                        ->distinct()
                         ->pluck('module', 'module')
                         ->toArray()
                     ),
