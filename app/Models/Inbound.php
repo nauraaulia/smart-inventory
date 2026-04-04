@@ -10,7 +10,11 @@ class Inbound extends Model
     protected $fillable = [
         'material_id', 'quantity', 'entry_date', 'supplier_id',
         'shelf_location_id', 'satuan', 'penerima', 'created_by', 
-        'updated_by', 'kategori', 'jenis_inbound', 'kondisi', 'keterangan',
+        'updated_by', 'kategori', 'jenis_inbound', 'is_opening_balance', 'kondisi', 'keterangan',
+    ];
+
+    protected $casts = [
+        'is_opening_balance' => 'boolean',
     ];
 
     public function material(): BelongsTo
@@ -69,14 +73,18 @@ static::created(function ($inbound) {
             'status' => ($inbound->jenis_inbound === 'Retur' && in_array($inbound->kondisi, ['Cacat Ringan', 'Cacat Berat'])) 
                 ? 'damaged' 
                 : 'available',
-            'sumber' => ($inbound->jenis_inbound === 'Retur') ? 'retur_proyek' : 'inbound_baru',
+            'sumber' => ($inbound->jenis_inbound === 'Retur')
+                ? 'retur_proyek'
+                : ($inbound->is_opening_balance ? 'opening_balance' : 'inbound_baru'),
             'shelf_location_id' => $inbound->shelf_location_id,
             'supplier_id' => $inbound->supplier_id,
             'inbound_id' => $inbound->id,
             'keterangan' => $inbound->keterangan ?? 
-                ($inbound->jenis_inbound === 'Retur' 
+                ($inbound->is_opening_balance
+                    ? 'Input opening balance awal stok.'
+                    : ($inbound->jenis_inbound === 'Retur' 
                     ? "Retur dengan kondisi: {$inbound->kondisi}" 
-                    : "Inbound baru dari supplier"),
+                    : "Inbound baru dari supplier")),
         ]);
     }
 
@@ -86,7 +94,7 @@ static::created(function ($inbound) {
             'user_id'     => auth()->id(),
             'action'      => 'Create',
             'module'      => 'Inbound',
-            'description' => "Mencatat Inbound [{$inbound->jenis_inbound}] Kondisi: [{$inbound->kondisi}] - ID: {$inbound->id}",
+            'description' => "Mencatat Inbound [{$inbound->jenis_inbound}]" . ($inbound->is_opening_balance ? ' [Opening Balance]' : '') . " Kondisi: [{$inbound->kondisi}] - ID: {$inbound->id}",
             'ip_address'  => request()->ip(),
         ]);
     }

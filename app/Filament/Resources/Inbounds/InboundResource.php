@@ -13,6 +13,7 @@ use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Model;
 
 class InboundResource extends Resource
 {
@@ -30,6 +31,31 @@ class InboundResource extends Resource
     public static function table(Table $table): Table
     {
         return InboundsTable::configure($table);
+    }
+
+    private static function canManageInbound(): bool
+    {
+        return in_array(auth()->user()?->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true);
+    }
+
+    public static function canViewAny(): bool
+    {
+        return self::canManageInbound();
+    }
+
+    public static function canCreate(): bool
+    {
+        return self::canManageInbound();
+    }
+
+    public static function canEdit(Model $record): bool
+    {
+        return self::canManageInbound();
+    }
+
+    public static function canDelete(Model $record): bool
+    {
+        return self::canManageInbound();
     }
 
     public static function getRelations(): array

@@ -5,6 +5,7 @@ namespace App\Filament\Resources\Inbounds\Schemas;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Select; // Untuk dropdown
+use Filament\Forms\Components\Checkbox;
 use Filament\Schemas\Schema;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\Hidden;
@@ -61,6 +62,11 @@ class InboundForm
                     ->searchable()
                     ->preload()
                     ->required()
+                    ->visible(fn ($get) => $get('jenis_inbound') === 'Baru' || request('type') === 'Baru'),
+
+                Checkbox::make('is_opening_balance')
+                    ->label('Opening Balance')
+                    ->default(false)
                     ->visible(fn ($get) => $get('jenis_inbound') === 'Baru' || request('type') === 'Baru'),
 
                 // 7. Penerima (Otomatis nama yang login tapi bisa diubah kalau perlu)

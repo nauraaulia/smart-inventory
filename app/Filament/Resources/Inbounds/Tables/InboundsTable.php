@@ -63,10 +63,14 @@ class InboundsTable
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('jenis_inbound')
                     ->label('Status')
+                    ->getStateUsing(fn ($record): string => $record->is_opening_balance
+                        ? 'Opening Balance'
+                        : ($record->jenis_inbound === 'Retur' ? 'Retur' : 'Inbound Baru'))
                     ->badge()
                     ->color(fn (string $state): string => match ($state) {
-                        'Baru' => 'success', // Warna hijau
-                        'Retur' => 'warning', // Warna kuning/oranye
+                        'Opening Balance' => 'info',
+                        'Inbound Baru' => 'success',
+                        'Retur' => 'warning',
                         default => 'gray',
                     })
                     ->searchable(),
