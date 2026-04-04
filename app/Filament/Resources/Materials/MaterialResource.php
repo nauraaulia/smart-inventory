@@ -46,22 +46,29 @@ class MaterialResource extends Resource
         return MaterialsTable::configure($table);
     }
 
-        // 1. Cuma Administrator IT yang bisa nambah barang baru
+    private static function canManageMaterial(): bool
+    {
+        $role = auth()->user()?->role;
+
+        return in_array($role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true);
+    }
+
+        // 1. Cuma Staff Administrasi Gudang yang bisa nambah barang baru
     public static function canCreate(): bool
     {
-        return auth()->user()->role === 'Administrator IT'; 
+        return self::canManageMaterial();
     }
 
-    // 2. Cuma Administrator IT yang bisa edit (termasuk edit Min Stock/Harga)
+    // 2. Cuma Staff Administrasi Gudang yang bisa edit master material
     public static function canEdit(Model $record): bool
     {
-        return auth()->user()->role === 'Administrator IT';
+        return self::canManageMaterial();
     }
 
-    // 3. Cuma Administrator IT yang bisa hapus data material
+    // 3. Cuma Staff Administrasi Gudang yang bisa hapus data material
     public static function canDelete(Model $record): bool
     {
-        return auth()->user()->role === 'Administrator IT';
+        return self::canManageMaterial();
     }
     
     public static function getRelations(): array

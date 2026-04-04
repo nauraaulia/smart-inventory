@@ -23,10 +23,6 @@ class MaterialForm
                     ->required(),
                 Textarea::make('deskripsi')
                     ->columnSpanFull(),
-                TextInput::make('stok')
-                    ->required()
-                    ->numeric()
-                    ->default(0),
                 TextInput::make('satuan')
                     ->required(),
                 Select::make('default_supplier_id')

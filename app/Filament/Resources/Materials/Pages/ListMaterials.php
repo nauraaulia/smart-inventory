@@ -13,7 +13,7 @@ class ListMaterials extends ListRecords
 
     protected function getHeaderActions(): array
 {
-    if (auth()->user()->role === 'Administrator IT') {
+    if (in_array(auth()->user()?->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)) {
         return [
             // Kalau iya, kasih tombol "New"
             Actions\CreateAction::make(),

@@ -11,7 +11,8 @@ class MaterialsTable
 {
     public static function configure(Table $table): Table
     {
-        $isAdmin = auth()->user()->role === 'Administrator IT';
+        $role = auth()->user()?->role;
+        $canManage = in_array($role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true);
 
         return $table
             ->columns([
@@ -75,14 +76,14 @@ class MaterialsTable
             ->recordActions([
                 \Filament\Actions\ViewAction::make(),
                 \Filament\Actions\EditAction::make()
-                    ->visible($isAdmin),
+                    ->visible($canManage),
                 \Filament\Actions\DeleteAction::make()
-                    ->visible($isAdmin),
+                    ->visible($canManage),
             ])
             ->toolbarActions([
                 BulkActionGroup::make([
                     DeleteBulkAction::make()
-                        ->visible($isAdmin),
+                        ->visible($canManage),
                 ]),
             ]);
     }
