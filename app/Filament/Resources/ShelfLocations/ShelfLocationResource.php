@@ -13,6 +13,7 @@ use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Model;
 
 class ShelfLocationResource extends Resource
 {
@@ -30,7 +31,29 @@ class ShelfLocationResource extends Resource
 
     public static function canViewAny(): bool
     {
-        return auth()->user()->role === 'Administrator IT';
+        $role = auth()->user()?->role;
+
+        return filled($role) && !in_array($role, ['Finance', 'Keuangan'], true);
+    }
+
+    public static function canCreate(): bool
+    {
+        return self::canManageModule();
+    }
+
+    public static function canEdit(Model $record): bool
+    {
+        return self::canManageModule();
+    }
+
+    public static function canDelete(Model $record): bool
+    {
+        return self::canManageModule();
+    }
+
+    private static function canManageModule(): bool
+    {
+        return in_array(auth()->user()?->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true);
     }
     
     public static function table(Table $table): Table

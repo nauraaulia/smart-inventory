@@ -12,6 +12,8 @@ class ShelfLocationsTable
 {
     public static function configure(Table $table): Table
     {
+        $canManage = in_array(auth()->user()?->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true);
+
         return $table
             ->columns([
                 TextColumn::make('kode_lokasi')
@@ -40,12 +42,15 @@ class ShelfLocationsTable
                 //
             ])
             ->recordActions([
-                \Filament\Actions\EditAction::make(),
-                \Filament\Actions\DeleteAction::make(),
+                \Filament\Actions\EditAction::make()
+                    ->visible($canManage),
+                \Filament\Actions\DeleteAction::make()
+                    ->visible($canManage),
             ])
             ->toolbarActions([
                 BulkActionGroup::make([
-                    DeleteBulkAction::make(),
+                    DeleteBulkAction::make()
+                        ->visible($canManage),
                 ]),
             ]);
     }

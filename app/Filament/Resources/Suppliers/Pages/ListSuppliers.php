@@ -12,8 +12,12 @@ class ListSuppliers extends ListRecords
 
     protected function getHeaderActions(): array
     {
-        return [
-            CreateAction::make(),
-        ];
+        if (in_array(auth()->user()?->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)) {
+            return [
+                CreateAction::make(),
+            ];
+        }
+
+        return [];
     }
 }
