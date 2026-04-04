@@ -3,7 +3,7 @@
 namespace App\Filament\Resources\UserLogs\Pages;
 
 use App\Filament\Resources\UserLogs\UserLogResource;
-use Filament\Actions\EditAction;
+use Filament\Actions\Action;
 use Filament\Resources\Pages\ViewRecord;
 
 class ViewUserLog extends ViewRecord
@@ -13,7 +13,11 @@ class ViewUserLog extends ViewRecord
     protected function getHeaderActions(): array
     {
         return [
-     
+            Action::make('close')
+                ->label('Close')
+                ->icon('heroicon-o-x-mark')
+                ->color('gray')
+                ->url(UserLogResource::getUrl('index')),
         ];
     }
 }
