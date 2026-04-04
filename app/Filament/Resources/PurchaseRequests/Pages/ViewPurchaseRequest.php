@@ -7,7 +7,6 @@ use App\Models\PurchaseRequest;
 use App\Models\UserLog;
 use App\Services\AI\PurchaseRequestSubmissionService;
 use Filament\Actions\Action;
-use Filament\Actions\EditAction;
 use Filament\Forms\Components\Textarea;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ViewRecord;
@@ -44,6 +43,68 @@ class ViewPurchaseRequest extends ViewRecord
                         ->send();
 
                     $this->redirect($this->getResource()::getUrl('index'));
+                }),
+            Action::make('approve_manager')
+                ->label('Setujui (Manager)')
+                ->icon('heroicon-o-check-circle')
+                ->color('success')
+                ->requiresConfirmation()
+                ->visible(fn () => self::canApproveByManager($this->getRecord()))
+                ->action(function (): void {
+                    /** @var PurchaseRequest $record */
+                    $record = $this->getRecord();
+
+                    $record->update([
+                        'status' => 'pending_finance',
+                        'approved_by_manager' => auth()->id(),
+                        'approved_by_manager_at' => now(),
+                    ]);
+
+                    UserLog::create([
+                        'user_id' => auth()->id(),
+                        'action' => 'Approve',
+                        'module' => 'Purchase Request',
+                        'description' => "Manager approve PR ID {$record->id}.",
+                        'ip_address' => request()?->ip(),
+                    ]);
+
+                    Notification::make()
+                        ->title('PR disetujui Manager')
+                        ->success()
+                        ->send();
+
+                    $this->refreshFormData([]);
+                }),
+            Action::make('approve_finance')
+                ->label('Setujui (Finance)')
+                ->icon('heroicon-o-check-badge')
+                ->color('success')
+                ->requiresConfirmation()
+                ->visible(fn () => self::canApproveByFinance($this->getRecord()))
+                ->action(function (): void {
+                    /** @var PurchaseRequest $record */
+                    $record = $this->getRecord();
+
+                    $record->update([
+                        'status' => 'approved',
+                        'approved_by_finance' => auth()->id(),
+                        'approved_by_finance_at' => now(),
+                    ]);
+
+                    UserLog::create([
+                        'user_id' => auth()->id(),
+                        'action' => 'Approve',
+                        'module' => 'Purchase Request',
+                        'description' => "Finance approve PR ID {$record->id}.",
+                        'ip_address' => request()?->ip(),
+                    ]);
+
+                    Notification::make()
+                        ->title('PR disetujui Finance')
+                        ->success()
+                        ->send();
+
+                    $this->refreshFormData([]);
                 }),
             Action::make('reject_draft')
                 ->label('Reject Draft')
@@ -109,8 +170,6 @@ class ViewPurchaseRequest extends ViewRecord
                         $this->redirect($this->getResource()::getUrl('index'));
                     }
                 }),
-            EditAction::make()
-                ->visible(fn () => PurchaseRequestResource::canEdit($this->getRecord())),
         ];
     }
 
@@ -156,5 +215,29 @@ class ViewPurchaseRequest extends ViewRecord
 
         return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
             && (int) $record->requested_by === (int) $user->id;
+    }
+
+    private static function canApproveByManager(PurchaseRequest $record): bool
+    {
+        $user = auth()->user();
+
+        if (!$user) {
+            return false;
+        }
+
+        return in_array($user->role, ['Manager Operasional', 'Manager Operational', 'Manajer Operasional'], true)
+            && $record->status === 'pending_manager';
+    }
+
+    private static function canApproveByFinance(PurchaseRequest $record): bool
+    {
+        $user = auth()->user();
+
+        if (!$user) {
+            return false;
+        }
+
+        return in_array($user->role, ['Finance', 'Keuangan'], true)
+            && $record->status === 'pending_finance';
     }
 }

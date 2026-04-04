@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\PurchaseRequests;
 
+use App\Filament\Resources\PurchaseRequests\Pages\CreatePurchaseRequest;
 use App\Filament\Resources\PurchaseRequests\Pages\EditPurchaseRequest;
 use App\Filament\Resources\PurchaseRequests\Pages\ListPurchaseRequests;
 use App\Filament\Resources\PurchaseRequests\Pages\ViewPurchaseRequest;
@@ -22,7 +23,7 @@ class PurchaseRequestResource extends Resource
 
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedDocumentText;
 
-    protected static ?string $navigationLabel = 'Draft PR';
+    protected static ?string $navigationLabel = 'Purchase Request';
 
     protected static ?string $modelLabel = 'Purchase Request';
 
@@ -43,9 +44,31 @@ class PurchaseRequestResource extends Resource
         return PurchaseRequestInfolist::configure($schema);
     }
 
+    private static function isGudangStaff(?string $role): bool
+    {
+        return in_array($role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true);
+    }
+
+    private static function isManager(?string $role): bool
+    {
+        return in_array($role, ['Manager Operasional', 'Manager Operational', 'Manajer Operasional'], true);
+    }
+
+    private static function isFinance(?string $role): bool
+    {
+        return in_array($role, ['Finance', 'Keuangan'], true);
+    }
+
+    public static function canViewAny(): bool
+    {
+        $role = auth()->user()?->role;
+
+        return self::isGudangStaff($role) || self::isManager($role) || self::isFinance($role);
+    }
+
     public static function canCreate(): bool
     {
-        return false;
+        return self::isGudangStaff(auth()->user()?->role);
     }
 
     public static function canDelete($record): bool
@@ -61,11 +84,7 @@ class PurchaseRequestResource extends Resource
             return false;
         }
 
-        if ($user->role === 'Administrator IT') {
-            return true;
-        }
-
-        return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
+        return self::isGudangStaff($user->role)
             && in_array($record->status, ['draft', 'rejected'], true)
             && (int) $record->requested_by === (int) $user->id;
     }
@@ -82,11 +101,7 @@ class PurchaseRequestResource extends Resource
             return false;
         }
 
-        if ($user->role === 'Administrator IT') {
-            return true;
-        }
-
-        return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
+        return self::isGudangStaff($user->role)
             && (int) $record->requested_by === (int) $user->id;
     }
 
@@ -99,19 +114,15 @@ class PurchaseRequestResource extends Resource
             return $query->whereRaw('1 = 0');
         }
 
-        if ($user->role === 'Administrator IT') {
+        if (self::isGudangStaff($user->role)) {
             return $query;
         }
 
-        if (in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)) {
-            return $query->where('requested_by', $user->id);
-        }
-
-        if (in_array($user->role, ['Manager Operasional', 'Manager Operational', 'Manajer Operasional'], true)) {
+        if (self::isManager($user->role)) {
             return $query->where('status', 'pending_manager');
         }
 
-        if (in_array($user->role, ['Finance', 'Keuangan'], true)) {
+        if (self::isFinance($user->role)) {
             return $query->where('status', 'pending_finance');
         }
 
@@ -122,6 +133,7 @@ class PurchaseRequestResource extends Resource
     {
         return [
             'index' => ListPurchaseRequests::route('/'),
+            'create' => CreatePurchaseRequest::route('/create'),
             'edit' => EditPurchaseRequest::route('/{record}/edit'),
             'view' => ViewPurchaseRequest::route('/{record}'),
         ];

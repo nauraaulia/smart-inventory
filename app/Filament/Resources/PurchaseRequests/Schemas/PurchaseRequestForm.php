@@ -2,13 +2,12 @@
 
 namespace App\Filament\Resources\PurchaseRequests\Schemas;
 
-use App\Models\PurchaseRequest;
 use Filament\Forms\Components\DatePicker;
-use Filament\Forms\Components\Placeholder;
+use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
+use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Schema;
-use Illuminate\Support\HtmlString;
 
 class PurchaseRequestForm
 {
@@ -16,73 +15,56 @@ class PurchaseRequestForm
     {
         return $schema
             ->components([
-                Placeholder::make('project_display')
+                Select::make('request_target')
+                    ->label('Tujuan PR')
+                    ->options([
+                        'project' => 'Untuk Proyek',
+                        'warehouse' => 'Tambah Stok Gudang',
+                    ])
+                    ->default('project')
+                    ->live()
+                    ->dehydrated(false)
+                    ->required(),
+                Select::make('project_id')
                     ->label('Kode Proyek')
-                    ->content(fn (?PurchaseRequest $record): HtmlString => self::asBadge($record?->project?->kode_proyek)),
-                Placeholder::make('material_display')
+                    ->relationship('project', 'kode_proyek')
+                    ->searchable()
+                    ->preload()
+                    ->visible(fn (Get $get): bool => ($get('request_target') ?? 'project') === 'project')
+                    ->required(fn (Get $get): bool => ($get('request_target') ?? 'project') === 'project'),
+                Select::make('material_id')
                     ->label('Material')
-                    ->content(fn (?PurchaseRequest $record): HtmlString => self::asBadge($record?->material?->nama_material)),
+                    ->relationship('material', 'nama_material')
+                    ->searchable()
+                    ->preload()
+                    ->required(),
                 TextInput::make('quantity')
                     ->label('Quantity')
                     ->numeric()
-                    ->disabled(),
-                TextInput::make('priority')
+                    ->required()
+                    ->minValue(0.01),
+                Select::make('priority')
                     ->label('Prioritas')
-                    ->formatStateUsing(fn (string $state): string => match ($state) {
-                        'urgent' => 'CRITICAL',
-                        'high' => 'HIGH',
-                        'medium' => 'MEDIUM',
+                    ->options([
                         'low' => 'LOW',
-                        default => strtoupper($state),
-                    })
-                    ->disabled(),
+                        'medium' => 'MEDIUM',
+                        'high' => 'HIGH',
+                        'urgent' => 'CRITICAL',
+                    ])
+                    ->default('medium')
+                    ->required(),
                 DatePicker::make('needed_date')
                     ->label('Tanggal Dibutuhkan')
-                    ->disabled(),
+                    ->required(),
                 Textarea::make('reason')
                     ->label('Reason')
                     ->rows(3)
-                    ->disabled(),
+                    ->columnSpanFull(),
                 TextInput::make('status')
                     ->label('Status')
-                    ->disabled(),
-                Placeholder::make('status_preview')
-                    ->label('Preview Status')
-                    ->content(fn (?PurchaseRequest $record): HtmlString => self::statusBadge($record?->status)),
-                TextInput::make('created_at')
-                    ->label('Draft Dibuat')
-                    ->disabled(),
-                TextInput::make('submitted_at')
-                    ->label('Draft Terkirim')
-                    ->disabled(),
-                Textarea::make('rejection_reason')
-                    ->label('Alasan Reject')
-                    ->rows(3)
-                    ->disabled(),
+                    ->default('draft')
+                    ->disabled()
+                    ->dehydrated(false),
             ]);
-    }
-
-    private static function asBadge(?string $value): HtmlString
-    {
-        $text = e($value ?: '-');
-
-        return new HtmlString("<span class=\"inline-flex items-center rounded-full border border-gray-300 bg-gray-50 px-3 py-1 text-sm font-medium text-gray-700\">{$text}</span>");
-    }
-
-    private static function statusBadge(?string $status): HtmlString
-    {
-        $text = match ($status) {
-            'rejected' => 'Rejected',
-            'draft' => 'Draft',
-            default => '-',
-        };
-
-        $classes = match ($status) {
-            'rejected' => 'border-red-300 bg-red-50 text-red-700',
-            'draft' => 'border-gray-300 bg-gray-50 text-gray-700',
-            default => 'border-slate-300 bg-slate-50 text-slate-600',
-        };
-
-        return new HtmlString("<span class=\"inline-flex items-center rounded-full border px-3 py-1 text-sm font-medium {$classes}\">" . e($text) . '</span>');
     }
 }

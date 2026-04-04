@@ -4,6 +4,7 @@ namespace App\Filament\Resources\PurchaseRequests\Tables;
 
 use App\Models\PurchaseRequest;
 use App\Filament\Resources\PurchaseRequests\PurchaseRequestResource;
+use App\Models\UserLog;
 use App\Services\AI\PurchaseRequestSubmissionService;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
@@ -97,7 +98,7 @@ class PurchaseRequestsTable
             ->actions([
                 ViewAction::make(),
                 EditAction::make()
-                    ->visible(fn (PurchaseRequest $record) => self::canEditDraft($record)),
+                    ->visible(fn (PurchaseRequest $record) => PurchaseRequestResource::canEdit($record)),
                 Action::make('approve_draft')
                     ->label('Setujui & Kirim ke Manager')
                     ->icon('heroicon-o-check-badge')
@@ -140,24 +141,59 @@ class PurchaseRequestsTable
                             ->warning(!$result['cancelled'])
                             ->send();
                     }),
+                Action::make('approve_manager')
+                    ->label('Setujui (Manager)')
+                    ->icon('heroicon-o-check-circle')
+                    ->color('success')
+                    ->requiresConfirmation()
+                    ->visible(fn (PurchaseRequest $record) => self::canApproveByManager($record))
+                    ->action(function (PurchaseRequest $record): void {
+                        $record->update([
+                            'status' => 'pending_finance',
+                            'approved_by_manager' => auth()->id(),
+                            'approved_by_manager_at' => now(),
+                        ]);
+
+                        UserLog::create([
+                            'user_id' => auth()->id(),
+                            'action' => 'Approve',
+                            'module' => 'Purchase Request',
+                            'description' => "Manager approve PR ID {$record->id}.",
+                            'ip_address' => request()?->ip(),
+                        ]);
+
+                        Notification::make()
+                            ->title('PR disetujui Manager')
+                            ->success()
+                            ->send();
+                    }),
+                Action::make('approve_finance')
+                    ->label('Setujui (Finance)')
+                    ->icon('heroicon-o-check-badge')
+                    ->color('success')
+                    ->requiresConfirmation()
+                    ->visible(fn (PurchaseRequest $record) => self::canApproveByFinance($record))
+                    ->action(function (PurchaseRequest $record): void {
+                        $record->update([
+                            'status' => 'approved',
+                            'approved_by_finance' => auth()->id(),
+                            'approved_by_finance_at' => now(),
+                        ]);
+
+                        UserLog::create([
+                            'user_id' => auth()->id(),
+                            'action' => 'Approve',
+                            'module' => 'Purchase Request',
+                            'description' => "Finance approve PR ID {$record->id}.",
+                            'ip_address' => request()?->ip(),
+                        ]);
+
+                        Notification::make()
+                            ->title('PR disetujui Finance')
+                            ->success()
+                            ->send();
+                    }),
             ]);
-    }
-
-    private static function canEditDraft(PurchaseRequest $record): bool
-    {
-        $user = auth()->user();
-
-        if (!$user) {
-            return false;
-        }
-
-        if ($user->role === 'Administrator IT') {
-            return true;
-        }
-
-        return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
-            && in_array($record->status, ['draft', 'rejected'], true)
-            && (int) $record->requested_by === (int) $user->id;
     }
 
     private static function canApproveDraft(PurchaseRequest $record): bool
@@ -182,6 +218,30 @@ class PurchaseRequestsTable
 
         return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
             && (int) $record->requested_by === (int) $user->id;
+    }
+
+    private static function canApproveByManager(PurchaseRequest $record): bool
+    {
+        $user = auth()->user();
+
+        if (!$user) {
+            return false;
+        }
+
+        return in_array($user->role, ['Manager Operasional', 'Manager Operational', 'Manajer Operasional'], true)
+            && $record->status === 'pending_manager';
+    }
+
+    private static function canApproveByFinance(PurchaseRequest $record): bool
+    {
+        $user = auth()->user();
+
+        if (!$user) {
+            return false;
+        }
+
+        return in_array($user->role, ['Finance', 'Keuangan'], true)
+            && $record->status === 'pending_finance';
     }
 
 }
