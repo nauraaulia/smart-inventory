@@ -4,10 +4,11 @@ namespace App\Filament\Resources\PurchaseRequests\Schemas;
 
 use App\Models\PurchaseRequest;
 use Filament\Forms\Components\DatePicker;
-use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Schemas\Schema;
+use Illuminate\Support\HtmlString;
 
 class PurchaseRequestForm
 {
@@ -15,38 +16,32 @@ class PurchaseRequestForm
     {
         return $schema
             ->components([
-                TextInput::make('project.kode_proyek')
+                Placeholder::make('project_display')
                     ->label('Kode Proyek')
-                    ->disabled()
-                    ->dehydrated(false),
-                TextInput::make('material.nama_material')
+                    ->content(fn (?PurchaseRequest $record): HtmlString => self::asBadge($record?->project?->kode_proyek)),
+                Placeholder::make('material_display')
                     ->label('Material')
-                    ->disabled()
-                    ->dehydrated(false),
+                    ->content(fn (?PurchaseRequest $record): HtmlString => self::asBadge($record?->material?->nama_material)),
                 TextInput::make('quantity')
                     ->label('Quantity')
                     ->numeric()
-                    ->required()
-                    ->disabled(fn (?PurchaseRequest $record) => !self::canEditDraft($record)),
-                Select::make('priority')
+                    ->disabled(),
+                TextInput::make('priority')
                     ->label('Prioritas')
-                    ->options([
-                        'low' => 'Low',
-                        'medium' => 'Medium',
-                        'high' => 'High',
-                        'urgent' => 'Urgent',
-                    ])
-                    ->required()
-                    ->disabled(fn (?PurchaseRequest $record) => !self::canEditDraft($record)),
+                    ->disabled(),
                 DatePicker::make('needed_date')
                     ->label('Tanggal Dibutuhkan')
-                    ->disabled(fn (?PurchaseRequest $record) => !self::canEditDraft($record)),
+                    ->disabled(),
                 Textarea::make('reason')
                     ->label('Reason')
                     ->rows(3)
-                    ->disabled(fn (?PurchaseRequest $record) => !self::canEditDraft($record)),
-                TextInput::make('status')
                     ->disabled(),
+                TextInput::make('status')
+                    ->label('Status')
+                    ->disabled(),
+                Placeholder::make('status_preview')
+                    ->label('Preview Status')
+                    ->content(fn (?PurchaseRequest $record): HtmlString => self::statusBadge($record?->status)),
                 TextInput::make('draftApprover.name')
                     ->label('Draft Approved By')
                     ->disabled()
@@ -61,20 +56,27 @@ class PurchaseRequestForm
             ]);
     }
 
-    private static function canEditDraft(?PurchaseRequest $record): bool
+    private static function asBadge(?string $value): HtmlString
     {
-        $user = auth()->user();
+        $text = e($value ?: '-');
 
-        if (!$user || !$record) {
-            return false;
-        }
+        return new HtmlString("<span class=\"inline-flex items-center rounded-full border border-gray-300 bg-gray-50 px-3 py-1 text-sm font-medium text-gray-700\">{$text}</span>");
+    }
 
-        if ($user->role === 'Administrator IT') {
-            return true;
-        }
+    private static function statusBadge(?string $status): HtmlString
+    {
+        $text = match ($status) {
+            'rejected' => 'Rejected',
+            'draft' => 'Draft',
+            default => '-',
+        };
 
-        return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
-            && in_array($record->status, ['draft', 'rejected'], true)
-            && (int) $record->requested_by === (int) $user->id;
+        $classes = match ($status) {
+            'rejected' => 'border-red-300 bg-red-50 text-red-700',
+            'draft' => 'border-gray-300 bg-gray-50 text-gray-700',
+            default => 'border-slate-300 bg-slate-50 text-slate-600',
+        };
+
+        return new HtmlString("<span class=\"inline-flex items-center rounded-full border px-3 py-1 text-sm font-medium {$classes}\">" . e($text) . '</span>');
     }
 }
