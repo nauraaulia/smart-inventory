@@ -104,8 +104,10 @@ class TaskApprovalService
             ->each(fn (Material $m) => $m->updateStokSummary());
 
         if ($projectId) {
+            $isMaterialReady = empty($pendingShortages) && count($createdPrIds) === 0;
+
             Project::whereKey($projectId)->update([
-                'material_confirmed_at' => now(),
+                'material_confirmed_at' => $isMaterialReady ? now() : null,
             ]);
         }
 

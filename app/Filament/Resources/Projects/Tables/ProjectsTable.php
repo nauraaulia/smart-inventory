@@ -5,7 +5,7 @@ namespace App\Filament\Resources\Projects\Tables;
 use Filament\Actions\Action;
 use Filament\Actions\BulkActionGroup;
 use Filament\Actions\DeleteBulkAction;
-use Filament\Actions\EditAction;
+use App\Models\Project;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
 
@@ -25,7 +25,28 @@ class ProjectsTable
                 TextColumn::make('tanggal_selesai')
                     ->date()
                     ->sortable(),
+                TextColumn::make('progress_label')
+                    ->label('Progress Operasional')
+                    ->badge()
+                    ->color(fn (Project $record): string => $record->progress_color)
+                    ->description(fn (Project $record): string => $record->progress_description)
+                    ->searchable(),
                 TextColumn::make('status')
+                    ->badge()
+                    ->formatStateUsing(fn (string $state): string => match ($state) {
+                        'Pending' => 'Pending',
+                        'Approved' => 'Approved',
+                        'Processing' => 'Processing',
+                        'Completed' => 'Completed',
+                        default => $state,
+                    })
+                    ->color(fn (string $state): string => match ($state) {
+                        'Pending' => 'gray',
+                        'Approved' => 'info',
+                        'Processing' => 'warning',
+                        'Completed' => 'success',
+                        default => 'gray',
+                    })
                     ->searchable(),
                 TextColumn::make('outbound_confirmed_at')
                     ->label('Outbound Confirmed')

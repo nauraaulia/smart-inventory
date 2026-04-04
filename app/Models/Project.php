@@ -10,6 +10,12 @@ class Project extends Model
 {
     protected $guarded = [];
 
+    protected $appends = [
+        'progress_label',
+        'progress_color',
+        'progress_description',
+    ];
+
     // =========================================
     // 🔑 AUTO GENERATE KODE PROYEK
     // =========================================
@@ -108,6 +114,93 @@ class Project extends Model
     public function items(): HasMany
     {
         return $this->hasMany(ProjectItem::class);
+    }
+
+    public function purchaseRequests(): HasMany
+    {
+        return $this->hasMany(PurchaseRequest::class);
+    }
+
+    public function bookedPieces(): HasMany
+    {
+        return $this->hasMany(MaterialPiece::class, 'booked_for_project_id');
+    }
+
+    public function getProgressLabelAttribute(): string
+    {
+        if ($this->prCount('pending_manager') > 0) {
+            return 'Menunggu Approval Manager';
+        }
+
+        if ($this->prCount('pending_finance') > 0) {
+            return 'Menunggu Approval Finance';
+        }
+
+        if ($this->prCount('draft') > 0) {
+            return 'Menunggu Review Draft PR';
+        }
+
+        if ($this->prCount('rejected') > 0) {
+            return 'Perlu Revisi PR';
+        }
+
+        if (!empty($this->outbound_confirmed_at)) {
+            return 'Siap Diambil';
+        }
+
+        if (!empty($this->material_confirmed_at)) {
+            return 'Barang Sudah Lengkap';
+        }
+
+        return match ((string) $this->status) {
+            'Processing' => 'Sedang Diproses Gudang',
+            'Approved' => 'Menunggu Proses Gudang',
+            'Completed' => 'Selesai',
+            default => 'Perencanaan Kebutuhan',
+        };
+    }
+
+    public function getProgressColorAttribute(): string
+    {
+        return match ($this->progress_label) {
+            'Menunggu Approval Manager' => 'warning',
+            'Menunggu Approval Finance' => 'warning',
+            'Menunggu Review Draft PR' => 'gray',
+            'Perlu Revisi PR' => 'danger',
+            'Siap Diambil' => 'success',
+            'Barang Sudah Lengkap' => 'info',
+            'Sedang Diproses Gudang' => 'warning',
+            'Menunggu Proses Gudang' => 'gray',
+            'Selesai' => 'success',
+            default => 'gray',
+        };
+    }
+
+    public function getProgressDescriptionAttribute(): string
+    {
+        return match ($this->progress_label) {
+            'Menunggu Approval Manager' => 'Draft PR sudah dikirim dan menunggu persetujuan Manager Operasional.',
+            'Menunggu Approval Finance' => 'PR sudah disetujui Manager Operasional dan menunggu approval Finance.',
+            'Menunggu Review Draft PR' => 'Draft PR masih di tahap review internal staff gudang sebelum dikirim ke Manager.',
+            'Perlu Revisi PR' => 'PR ditolak dan perlu revisi dari staff gudang sebelum diajukan ulang.',
+            'Siap Diambil' => 'Semua kebutuhan sudah diproses dan outbound sudah dikonfirmasi.',
+            'Barang Sudah Lengkap' => 'Material sudah terkonfirmasi lengkap. Menunggu outbound/penyerahan.',
+            'Sedang Diproses Gudang' => 'Gudang sedang menyiapkan material sesuai kebutuhan proyek.',
+            'Menunggu Proses Gudang' => 'Approval sudah selesai, menunggu proses pemenuhan oleh gudang.',
+            'Selesai' => 'Proyek selesai diproses.',
+            default => 'Kebutuhan material sedang dianalisis dan menunggu proses berikutnya.',
+        };
+    }
+
+    private function prCount(string $status): int
+    {
+        $attribute = 'pr_' . $status . '_count';
+
+        if (array_key_exists($attribute, $this->attributes)) {
+            return (int) $this->attributes[$attribute];
+        }
+
+        return $this->purchaseRequests()->where('status', $status)->count();
     }
 
 
