@@ -29,6 +29,11 @@ class PurchaseRequestResource extends Resource
 
     protected static ?string $pluralModelLabel = 'Purchase Requests';
 
+    public static function getNavigationGroup(): ?string
+    {
+        return auth()->user()?->role === 'Administrator IT' ? 'Gudang' : null;
+    }
+
     public static function form(Schema $schema): Schema
     {
         return PurchaseRequestForm::configure($schema);
@@ -59,11 +64,16 @@ class PurchaseRequestResource extends Resource
         return in_array($role, ['Finance', 'Keuangan'], true);
     }
 
+    private static function isAdminIt(?string $role): bool
+    {
+        return $role === 'Administrator IT';
+    }
+
     public static function canViewAny(): bool
     {
         $role = auth()->user()?->role;
 
-        return self::isGudangStaff($role) || self::isManager($role) || self::isFinance($role);
+        return self::isGudangStaff($role) || self::isManager($role) || self::isFinance($role) || self::isAdminIt($role);
     }
 
     public static function canCreate(): bool
@@ -115,6 +125,10 @@ class PurchaseRequestResource extends Resource
         }
 
         if (self::isGudangStaff($user->role)) {
+            return $query;
+        }
+
+        if (self::isAdminIt($user->role)) {
             return $query;
         }
 

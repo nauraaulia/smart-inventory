@@ -27,6 +27,11 @@ class TaskResource extends Resource
 
     protected static ?string $pluralModelLabel = 'Tasks';
 
+    public static function getNavigationGroup(): ?string
+    {
+        return auth()->user()?->role === 'Administrator IT' ? 'Gudang' : null;
+    }
+
     public static function form(Schema $schema): Schema
     {
         return TaskForm::configure($schema);

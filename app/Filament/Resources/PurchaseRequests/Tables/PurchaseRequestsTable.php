@@ -212,10 +212,6 @@ class PurchaseRequestsTable
             return false;
         }
 
-        if ($user->role === 'Administrator IT') {
-            return true;
-        }
-
         return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
             && (int) $record->requested_by === (int) $user->id;
     }
