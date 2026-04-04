@@ -115,6 +115,18 @@ class PurchaseRequestResource extends Resource
             && (int) $record->requested_by === (int) $user->id;
     }
 
+    public static function canCancelSubmissionToFinanceByManager($record): bool
+    {
+        $user = auth()->user();
+
+        if (!$user || !$record instanceof PurchaseRequest) {
+            return false;
+        }
+
+        return self::isManager($user->role)
+            && $record->status === 'pending_finance';
+    }
+
     public static function getEloquentQuery(): Builder
     {
         $query = parent::getEloquentQuery()->with(['project', 'material.defaultSupplier', 'requester']);
@@ -133,7 +145,7 @@ class PurchaseRequestResource extends Resource
         }
 
         if (self::isManager($user->role)) {
-            return $query->where('status', 'pending_manager');
+            return $query->whereIn('status', ['pending_manager', 'pending_finance']);
         }
 
         if (self::isFinance($user->role)) {
@@ -141,6 +153,34 @@ class PurchaseRequestResource extends Resource
         }
 
         return $query->whereRaw('1 = 0');
+    }
+
+    public static function getNavigationBadge(): ?string
+    {
+        $user = auth()->user();
+
+        if (!$user) {
+            return null;
+        }
+
+        $query = PurchaseRequest::query();
+
+        if (self::isGudangStaff($user->role)) {
+            $query->whereIn('status', ['draft', 'rejected'])
+                ->where('requested_by', $user->id);
+        } elseif (self::isManager($user->role)) {
+            $query->where('status', 'pending_manager');
+        } elseif (self::isFinance($user->role)) {
+            $query->where('status', 'pending_finance');
+        } elseif (self::isAdminIt($user->role)) {
+            $query->whereIn('status', ['draft', 'rejected', 'pending_manager', 'pending_finance']);
+        } else {
+            return null;
+        }
+
+        $count = $query->count();
+
+        return $count > 0 ? (string) $count : null;
     }
 
     public static function getPages(): array

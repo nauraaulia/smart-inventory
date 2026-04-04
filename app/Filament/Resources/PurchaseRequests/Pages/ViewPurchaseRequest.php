@@ -45,7 +45,7 @@ class ViewPurchaseRequest extends ViewRecord
                     $this->redirect($this->getResource()::getUrl('index'));
                 }),
             Action::make('approve_manager')
-                ->label('Setujui (Manager)')
+                ->label('Setujui dan Kirim ke Finance')
                 ->icon('heroicon-o-check-circle')
                 ->color('success')
                 ->requiresConfirmation()
@@ -168,6 +168,34 @@ class ViewPurchaseRequest extends ViewRecord
 
                     if ($result['cancelled']) {
                         $this->redirect($this->getResource()::getUrl('index'));
+                    }
+                }),
+            Action::make('cancel_submission_to_finance')
+                ->label('Batalkan Pengajuan ke Finance')
+                ->icon('heroicon-o-arrow-uturn-left')
+                ->color('gray')
+                ->requiresConfirmation()
+                ->modalHeading('Batalkan Pengajuan ke Finance')
+                ->modalDescription('PR akan dikembalikan ke status Menunggu ACC Manager selama Finance belum melakukan approval.')
+                ->visible(fn () => PurchaseRequestResource::canCancelSubmissionToFinanceByManager($this->getRecord()))
+                ->action(function (): void {
+                    /** @var PurchaseRequest $record */
+                    $record = $this->getRecord();
+
+                    $result = (new PurchaseRequestSubmissionService())
+                        ->cancelSubmissionToFinanceByManager($record, auth()->user());
+
+                    Notification::make()
+                        ->title($result['cancelled'] ? 'Pengajuan ke Finance dibatalkan' : 'Pengajuan tidak dapat dibatalkan')
+                        ->body($result['cancelled']
+                            ? "PR dikembalikan ke status pending manager untuk project {$result['project_code']}."
+                            : 'Status PR tidak lagi menunggu approval finance.')
+                        ->success($result['cancelled'])
+                        ->warning(!$result['cancelled'])
+                        ->send();
+
+                    if ($result['cancelled']) {
+                        $this->refreshFormData([]);
                     }
                 }),
         ];

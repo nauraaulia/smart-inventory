@@ -62,22 +62,6 @@ class Project extends Model
             ]);
         }
 
-        Task::create([
-            'for_role' => 'Staff Administrasi Gudang',
-            'type' => 'project_created_notification',
-            'title' => "Proyek Baru {$item->kode_proyek}",
-            'message' => "Project {$item->kode_proyek} ({$item->nama_proyek}) sudah dibuat dan siap diproses tim gudang.",
-            'payload' => [
-                'project_id' => $item->id,
-                'project_code' => $item->kode_proyek,
-                'project_name' => $item->nama_proyek,
-                'created_by' => auth()->id(),
-            ],
-            'status' => 'pending',
-            'related_id' => $item->id,
-            'related_type' => 'project',
-        ]);
-
         $gudangUsers = User::query()
             ->whereIn('role', ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'])
             ->get();

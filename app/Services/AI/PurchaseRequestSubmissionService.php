@@ -183,6 +183,43 @@ class PurchaseRequestSubmissionService
         });
     }
 
+    public function cancelSubmissionToFinanceByManager(PurchaseRequest $record, User $actor): array
+    {
+        return DB::transaction(function () use ($record, $actor) {
+            /** @var PurchaseRequest|null $pr */
+            $pr = PurchaseRequest::query()->lockForUpdate()->find($record->id);
+
+            if (!$pr || $pr->status !== 'pending_finance') {
+                return [
+                    'cancelled' => false,
+                    'project_code' => $this->projectCode((int) ($record->project_id ?? 0)),
+                ];
+            }
+
+            $projectCode = $this->projectCode((int) ($pr->project_id ?? 0));
+
+            $pr->update([
+                'status' => 'pending_manager',
+                'approved_by_manager' => null,
+                'approved_by_manager_at' => null,
+                'approved_by_finance' => null,
+                'approved_by_finance_at' => null,
+            ]);
+
+            $this->logUserAction(
+                actor: $actor,
+                action: 'Cancel Submit',
+                module: 'Purchase Request',
+                description: "Manager membatalkan pengajuan PR ID {$pr->id} ke Finance. Status kembali ke pending_manager.",
+            );
+
+            return [
+                'cancelled' => true,
+                'project_code' => $projectCode,
+            ];
+        });
+    }
+
     private function syncPendingManagerTaskAfterCancellation(int $projectId, int $cancelledPrId, User $actor, string $projectCode): void
     {
         $pendingTasks = Task::query()
