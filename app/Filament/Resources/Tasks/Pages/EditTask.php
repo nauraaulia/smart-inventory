@@ -14,6 +14,11 @@ class EditTask extends EditRecord
 {
     protected static string $resource = TaskResource::class;
 
+    protected function getRedirectUrl(): string
+    {
+        return $this->getResource()::getUrl('index');
+    }
+
     protected function handleRecordUpdate(Model $record, array $data): Model
     {
         /** @var Task $record */

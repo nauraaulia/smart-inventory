@@ -31,12 +31,6 @@ class TaskInfolist
                 TextEntry::make('payload.approval_trail.staff.status')
                     ->label('ACC Staff')
                     ->placeholder('-'),
-                TextEntry::make('payload.approval_trail.manager.status')
-                    ->label('ACC Manager')
-                    ->placeholder('-'),
-                TextEntry::make('payload.approval_trail.finance.status')
-                    ->label('ACC Finance')
-                    ->placeholder('-'),
                 TextEntry::make('payload.rejection.reason')
                     ->label('Alasan Reject')
                     ->visible(fn ($record) => filled(data_get($record, 'payload.rejection.reason')))

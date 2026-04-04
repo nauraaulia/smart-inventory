@@ -59,18 +59,6 @@ class TasksTable
                     ->badge()
                     ->color(fn (string $state): string => $state === 'approved' ? 'success' : 'gray'),
 
-                TextColumn::make('acc_manager')
-                    ->label('ACC Manager')
-                    ->getStateUsing(fn (Task $record) => data_get($record->payload, 'approval_trail.manager.status', '-'))
-                    ->badge()
-                    ->color(fn (string $state): string => $state === 'approved' ? 'success' : 'gray'),
-
-                TextColumn::make('acc_finance')
-                    ->label('ACC Finance')
-                    ->getStateUsing(fn (Task $record) => data_get($record->payload, 'approval_trail.finance.status', '-'))
-                    ->badge()
-                    ->color(fn (string $state): string => $state === 'approved' ? 'success' : 'gray'),
-
                 TextColumn::make('created_at')
                     ->label('Dibuat')
                     ->dateTime('d M Y H:i')
