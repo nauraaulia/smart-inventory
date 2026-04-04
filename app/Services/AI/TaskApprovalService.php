@@ -78,14 +78,16 @@ class TaskApprovalService
                     'material_id' => $materialId,
                     'project_id' => $projectId ?: null,
                     'requested_by' => $actor->id,
+                    'draft_approved_by' => null,
+                    'draft_approved_at' => null,
                     'approved_by_manager' => null,
                     'approved_by_finance' => null,
                     'quantity' => $this->decimal($shortage),
-                    'reason' => 'Auto-generated dari Task AI karena stok kurang.',
-                    'status' => 'pending_manager',
+                    'reason' => 'Draft auto-generated dari Task AI karena stok kurang.',
+                    'status' => 'draft',
                     'priority' => $shortage >= 100 ? 'urgent' : 'high',
                     'needed_date' => now()->addDays(7)->toDateString(),
-                    'submitted_at' => now(),
+                    'submitted_at' => null,
                     'approved_by_manager_at' => null,
                     'approved_by_finance_at' => null,
                     'rejected_at' => null,
@@ -115,8 +117,8 @@ class TaskApprovalService
             'at' => now()->toDateTimeString(),
         ]);
         data_set($payload, 'execution_result', [
-            'created_pr_ids' => $createdPrIds,
-            'created_pr_count' => count($createdPrIds),
+            'created_draft_pr_ids' => $createdPrIds,
+            'created_draft_pr_count' => count($createdPrIds),
             'pending_shortages_without_pr' => $pendingShortages,
             'generate_pr_selected' => $generatePr,
         ]);
@@ -125,31 +127,31 @@ class TaskApprovalService
             'status' => 'done',
             'handled_by' => $actor->id,
             'handled_at' => now(),
-            'message' => !$generatePr && !empty($pendingShortages)
-                ? 'Booking diproses. Ada shortage yang belum dibuat PR (sesuai pilihan konfirmasi).'
-                : $task->message,
+            'message' => $this->buildAiApprovalMessage(
+                $task->message,
+                $generatePr,
+                $pendingShortages,
+                count($createdPrIds),
+            ),
             'payload' => $payload,
         ]);
+    }
 
-        if (!empty($createdPrIds)) {
-            Task::create([
-                'for_role' => 'Manager Operasional',
-                'type' => 'pr_manager_approval',
-                'title' => "Approval PR Project {$projectCode}",
-                'message' => 'Terdapat PR hasil analisa AI yang menunggu approval Manager Operasional.',
-                'payload' => [
-                    'project_id' => $projectId,
-                    'project_code' => $projectCode,
-                    'pr_ids' => $createdPrIds,
-                    'approval_trail' => [
-                        'staff' => data_get($payload, 'approval_trail.staff'),
-                    ],
-                ],
-                'status' => 'pending',
-                'related_id' => $projectId,
-                'related_type' => 'project',
-            ]);
+    private function buildAiApprovalMessage(
+        string $defaultMessage,
+        bool $generatePr,
+        array $pendingShortages,
+        int $createdDraftPrCount,
+    ): string {
+        if (!$generatePr && !empty($pendingShortages)) {
+            return 'Booking diproses. Ada shortage yang belum dibuat PR (sesuai pilihan konfirmasi).';
         }
+
+        if ($generatePr && $createdDraftPrCount > 0) {
+            return "Booking diproses. Draft PR berhasil dibuat ({$createdDraftPrCount}) dan siap direview Staff.";
+        }
+
+        return $defaultMessage;
     }
 
     private function approveManagerPr(Task $task, User $actor): void
