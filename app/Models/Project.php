@@ -2,9 +2,12 @@
 
 namespace App\Models;
 
+use Filament\Notifications\Notification;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Notifications\DatabaseNotification as DatabaseNotificationModel;
+use Illuminate\Support\Str;
 
 class Project extends Model
 {
@@ -57,6 +60,47 @@ class Project extends Model
                 'description' => 'Membuat proyek baru: ' . $item->kode_proyek . ' - ' . $item->nama_proyek,
                 'ip_address' => request()->ip(),
             ]);
+        }
+
+        Task::create([
+            'for_role' => 'Staff Administrasi Gudang',
+            'type' => 'project_created_notification',
+            'title' => "Proyek Baru {$item->kode_proyek}",
+            'message' => "Project {$item->kode_proyek} ({$item->nama_proyek}) sudah dibuat dan siap diproses tim gudang.",
+            'payload' => [
+                'project_id' => $item->id,
+                'project_code' => $item->kode_proyek,
+                'project_name' => $item->nama_proyek,
+                'created_by' => auth()->id(),
+            ],
+            'status' => 'pending',
+            'related_id' => $item->id,
+            'related_type' => 'project',
+        ]);
+
+        $gudangUsers = User::query()
+            ->whereIn('role', ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'])
+            ->get();
+
+        if ($gudangUsers->isNotEmpty()) {
+            $databaseMessage = Notification::make()
+                ->title("Proyek baru {$item->kode_proyek}")
+                ->body("{$item->nama_proyek} sudah dibuat Manager Teknik dan siap diproses gudang.")
+                ->success()
+                ->getDatabaseMessage();
+
+            foreach ($gudangUsers as $gudangUser) {
+                DatabaseNotificationModel::query()->create([
+                    'id' => (string) Str::uuid(),
+                    'type' => \Filament\Notifications\DatabaseNotification::class,
+                    'notifiable_type' => User::class,
+                    'notifiable_id' => $gudangUser->id,
+                    'data' => $databaseMessage,
+                    'read_at' => null,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
         }
 
         // 🔥 TRIGGER AI: jalankan setelah response terkirim.

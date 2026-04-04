@@ -12,6 +12,10 @@ class ListProjects extends ListRecords
 
     protected function getHeaderActions(): array
     {
+        if (auth()->user()?->role !== 'Manager Teknik') {
+            return [];
+        }
+
         return [
             CreateAction::make(),
         ];

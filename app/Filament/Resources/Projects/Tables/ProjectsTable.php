@@ -73,20 +73,23 @@ class ProjectsTable
                     ->requiresConfirmation()
                     ->modalHeading('Konfirmasi Barang Sudah Outbound')
                     ->modalDescription('Aksi ini akan mengubah status proyek menjadi Processing.')
-                    ->visible(fn ($record) => in_array($record->status, ['Pending', 'Approved']))
+                    ->visible(fn ($record) => auth()->user()?->role === 'Manager Teknik' && in_array($record->status, ['Pending', 'Approved']))
                     ->action(function ($record) {
                         $record->update([
                             'status' => 'Processing',
                             'outbound_confirmed_at' => now(),
                         ]);
                     }),
-                \Filament\Actions\EditAction::make(),
-                \Filament\Actions\DeleteAction::make(),
+                \Filament\Actions\EditAction::make()
+                    ->visible(fn () => auth()->user()?->role === 'Manager Teknik'),
+                \Filament\Actions\DeleteAction::make()
+                    ->visible(fn () => auth()->user()?->role === 'Manager Teknik'),
             ])
             ->toolbarActions([
                 BulkActionGroup::make([
                     DeleteBulkAction::make(),
-                ]),
+                ])
+                    ->visible(fn () => auth()->user()?->role === 'Manager Teknik'),
             ]);
     }
 }

@@ -23,6 +23,23 @@ class ProjectResource extends Resource
 
     protected static ?string $recordTitleAttribute = 'Project';
 
+    private static function canManageProject(?string $role): bool
+    {
+        return $role === 'Manager Teknik';
+    }
+
+    private static function canViewProjectModule(?string $role): bool
+    {
+        return in_array($role, [
+            'Manager Teknik',
+            'Manager Operasional',
+            'Finance',
+            'Staff Administrasi Gudang',
+            'Staff Adm Gudang',
+            'Staff Gudang',
+        ], true);
+    }
+
     public static function form(Schema $schema): Schema
     {
         return ProjectForm::configure($schema);
@@ -35,12 +52,38 @@ class ProjectResource extends Resource
 
     public static function getEloquentQuery(): Builder
     {
+        $user = auth()->user();
+
+        if (!$user || !self::canViewProjectModule($user->role)) {
+            return parent::getEloquentQuery()->whereRaw('1 = 0');
+        }
+
         return parent::getEloquentQuery()->withCount([
             'purchaseRequests as pr_draft_count' => fn (Builder $query) => $query->where('status', 'draft'),
             'purchaseRequests as pr_rejected_count' => fn (Builder $query) => $query->where('status', 'rejected'),
             'purchaseRequests as pr_pending_manager_count' => fn (Builder $query) => $query->where('status', 'pending_manager'),
             'purchaseRequests as pr_pending_finance_count' => fn (Builder $query) => $query->where('status', 'pending_finance'),
         ]);
+    }
+
+    public static function canViewAny(): bool
+    {
+        return self::canViewProjectModule(auth()->user()?->role);
+    }
+
+    public static function canCreate(): bool
+    {
+        return self::canManageProject(auth()->user()?->role);
+    }
+
+    public static function canEdit($record): bool
+    {
+        return self::canManageProject(auth()->user()?->role);
+    }
+
+    public static function canDelete($record): bool
+    {
+        return self::canManageProject(auth()->user()?->role);
     }
 
     public static function getRelations(): array
