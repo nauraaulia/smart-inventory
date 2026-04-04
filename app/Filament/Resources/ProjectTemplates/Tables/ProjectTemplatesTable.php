@@ -40,13 +40,16 @@ class ProjectTemplatesTable
                 //
             ])
             ->recordActions([
-                \Filament\Actions\EditAction::make(),
-                \Filament\Actions\DeleteAction::make(),
+                \Filament\Actions\EditAction::make()
+                    ->visible(fn () => auth()->user()?->role === 'Manager Teknik'),
+                \Filament\Actions\DeleteAction::make()
+                    ->visible(fn () => false),
             ])
             ->toolbarActions([
                 BulkActionGroup::make([
                     DeleteBulkAction::make(),
-                ]),
+                ])
+                    ->visible(fn () => false),
             ]);
     }
 }

@@ -38,22 +38,28 @@ class ProjectTemplateResource extends Resource
 
     public static function canViewAny(): bool
     {
-        return !in_array(auth()->user()->role, ['Finance', 'Staff Administrasi Gudang']);
+        $role = auth()->user()?->role;
+
+        if (!$role) {
+            return false;
+        }
+
+        return !in_array($role, ['Finance', 'Keuangan'], true);
     }
 
     public static function canCreate(): bool
     {
-        return auth()->user()->role === 'Administrator IT';
+        return auth()->user()?->role === 'Manager Teknik';
     }
 
     public static function canEdit(Model $record): bool
     {
-        return auth()->user()->role === 'Administrator IT';
+        return auth()->user()?->role === 'Manager Teknik';
     }
 
     public static function canDelete(Model $record): bool
     {
-        return auth()->user()->role === 'Administrator IT';
+        return false;
     }
 
     public static function getPages(): array

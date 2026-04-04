@@ -13,7 +13,7 @@ class ListProjectTemplates extends ListRecords
 
     protected function getHeaderActions(): array
 {
-    if (auth()->user()->role === 'Administrator IT') {
+    if (auth()->user()?->role === 'Manager Teknik') {
         return [
             // Kalau iya, kasih tombol "New"
             Actions\CreateAction::make(),
