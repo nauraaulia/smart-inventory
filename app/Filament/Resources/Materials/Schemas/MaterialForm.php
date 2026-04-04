@@ -25,6 +25,13 @@ class MaterialForm
                     ->columnSpanFull(),
                 TextInput::make('satuan')
                     ->required(),
+                TextInput::make('default_roll_length')
+                    ->label('Panjang Roll Standar')
+                    ->numeric()
+                    ->step('0.01')
+                    ->suffix(fn ($get) => $get('satuan') ?: 'meter')
+                    ->helperText('Isi jika material memiliki standar 1 roll (contoh kabel 300 meter/roll).')
+                    ->nullable(),
                 Select::make('default_supplier_id')
                     ->label('Supplier')
                     ->relationship('defaultSupplier', 'nama_supplier')

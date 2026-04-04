@@ -14,6 +14,10 @@ class Material extends Model
 
     protected $guarded = [];
 
+    protected $casts = [
+        'default_roll_length' => 'decimal:2',
+    ];
+
     // ============================================
     // RELASI KE MATERIAL PIECES
     // ============================================

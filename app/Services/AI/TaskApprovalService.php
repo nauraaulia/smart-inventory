@@ -68,8 +68,8 @@ class TaskApprovalService
         $projectCode = $this->projectCodeFromPayload($payload, $projectId);
         $detail = data_get($payload, 'detail', []);
         $generatePr = (bool) ($options['generate_pr'] ?? true);
-        $bufferDays = (int) ($options['buffer_days'] ?? 3);
         $project = $projectId > 0 ? Project::query()->find($projectId) : null;
+        $bufferDays = (int) ($options['buffer_days'] ?? 3);
 
         $createdPrIds = [];
         $pendingShortages = [];
@@ -78,6 +78,7 @@ class TaskApprovalService
         foreach ($detail as $item) {
             $materialId = (int) ($item['material_id'] ?? 0);
             $dibutuhkan = (float) ($item['dibutuhkan'] ?? 0);
+            $tanpaPotongan = (bool) ($item['tanpa_potongan'] ?? false);
 
             if ($materialId <= 0 || $dibutuhkan <= 0) {
                 continue;
@@ -89,6 +90,7 @@ class TaskApprovalService
                 materialId: $materialId,
                 projectId: $projectId,
                 qtyNeeded: $dibutuhkan,
+                tanpaPotongan: $tanpaPotongan,
             );
 
             $shortage = max(0, $dibutuhkan - $bookedQty);
@@ -393,8 +395,66 @@ class TaskApprovalService
         ]);
     }
 
-    private function bookFromAvailablePieces(int $materialId, int $projectId, float $qtyNeeded): float
+    private function bookFromAvailablePieces(int $materialId, int $projectId, float $qtyNeeded, bool $tanpaPotongan = false): float
     {
+        if ($tanpaPotongan) {
+            $material = Material::query()->find($materialId);
+            $rollStandar = (float) ($material?->default_roll_length ?? 0);
+            $minimumUtuh = $rollStandar > 0 ? $rollStandar : $qtyNeeded;
+
+            /** @var MaterialPiece|null $piece */
+            $piece = MaterialPiece::query()
+                ->where('material_id', $materialId)
+                ->where('status', 'available')
+                ->whereIn('sumber', ['inbound_baru', 'opening_balance'])
+                ->where('panjang', '>=', $minimumUtuh)
+                ->where(function ($query) {
+                    $query->whereNull('keterangan')
+                        ->orWhere('keterangan', 'not ilike', '%split%');
+                })
+                ->orderBy('panjang')
+                ->lockForUpdate()
+                ->first();
+
+            if (!$piece) {
+                return 0.0;
+            }
+
+            $pieceLength = (float) $piece->panjang;
+
+            if ($pieceLength <= $qtyNeeded) {
+                $piece->update([
+                    'status' => 'booked',
+                    'booked_for_project_id' => $projectId,
+                    'booked_at' => now(),
+                ]);
+
+                return round($pieceLength, 2);
+            }
+
+            $piece->update([
+                'panjang' => $this->decimal($pieceLength - $qtyNeeded),
+                'sumber' => 'split_booking_residue',
+                'keterangan' => trim(($piece->keterangan ?? '') . ' | Sisa split dari booking tanpa potongan.'),
+            ]);
+
+            MaterialPiece::create([
+                'material_id' => $piece->material_id,
+                'inbound_id' => $piece->inbound_id,
+                'booked_for_project_id' => $projectId,
+                'shelf_location_id' => $piece->shelf_location_id,
+                'supplier_id' => $piece->supplier_id,
+                'panjang' => $this->decimal($qtyNeeded),
+                'unit_price' => $piece->unit_price,
+                'status' => 'booked',
+                'sumber' => 'split_booking',
+                'booked_at' => now(),
+                'keterangan' => 'Auto split booking dari task approval AI (mode tanpa potongan).',
+            ]);
+
+            return round($qtyNeeded, 2);
+        }
+
         $remaining = $qtyNeeded;
         $booked = 0.0;
 

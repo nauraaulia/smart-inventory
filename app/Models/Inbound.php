@@ -66,26 +66,7 @@ static::created(function ($inbound) {
             }
         }
 
-        // ── 🔥 BARU: Auto-create MaterialPiece ──
-        \App\Models\MaterialPiece::create([
-            'material_id' => $inbound->material_id,
-            'panjang' => $inbound->quantity,
-            'status' => ($inbound->jenis_inbound === 'Retur' && in_array($inbound->kondisi, ['Cacat Ringan', 'Cacat Berat'])) 
-                ? 'damaged' 
-                : 'available',
-            'sumber' => ($inbound->jenis_inbound === 'Retur')
-                ? 'retur_proyek'
-                : ($inbound->is_opening_balance ? 'opening_balance' : 'inbound_baru'),
-            'shelf_location_id' => $inbound->shelf_location_id,
-            'supplier_id' => $inbound->supplier_id,
-            'inbound_id' => $inbound->id,
-            'keterangan' => $inbound->keterangan ?? 
-                ($inbound->is_opening_balance
-                    ? 'Input opening balance awal stok.'
-                    : ($inbound->jenis_inbound === 'Retur' 
-                    ? "Retur dengan kondisi: {$inbound->kondisi}" 
-                    : "Inbound baru dari supplier")),
-        ]);
+        self::createPiecesFromInbound($inbound);
     }
 
     // CCTV (tetap sama)
@@ -216,4 +197,70 @@ static::created(function ($inbound) {
         }
     });
 }
+
+    private static function createPiecesFromInbound(Inbound $inbound): void
+    {
+        $status = ($inbound->jenis_inbound === 'Retur' && in_array($inbound->kondisi, ['Cacat Ringan', 'Cacat Berat'], true))
+            ? 'damaged'
+            : 'available';
+
+        $sumber = ($inbound->jenis_inbound === 'Retur')
+            ? 'retur_proyek'
+            : ($inbound->is_opening_balance ? 'opening_balance' : 'inbound_baru');
+
+        $keteranganDasar = $inbound->keterangan
+            ?? ($inbound->is_opening_balance
+                ? 'Input opening balance awal stok.'
+                : ($inbound->jenis_inbound === 'Retur'
+                    ? "Retur dengan kondisi: {$inbound->kondisi}"
+                    : 'Inbound baru dari supplier'));
+
+        $totalQty = (float) $inbound->quantity;
+        $rollLength = (float) ($inbound->material?->default_roll_length ?? 0);
+
+        // Jika tidak ada konfigurasi roll standar, simpan seperti perilaku sebelumnya (1 piece).
+        if ($rollLength <= 0 || $totalQty <= $rollLength) {
+            \App\Models\MaterialPiece::create([
+                'material_id' => $inbound->material_id,
+                'panjang' => $totalQty,
+                'status' => $status,
+                'sumber' => $sumber,
+                'shelf_location_id' => $inbound->shelf_location_id,
+                'supplier_id' => $inbound->supplier_id,
+                'inbound_id' => $inbound->id,
+                'keterangan' => $keteranganDasar,
+            ]);
+
+            return;
+        }
+
+        $fullRollCount = (int) floor($totalQty / $rollLength);
+        $remainder = round($totalQty - ($fullRollCount * $rollLength), 2);
+
+        for ($i = 0; $i < $fullRollCount; $i++) {
+            \App\Models\MaterialPiece::create([
+                'material_id' => $inbound->material_id,
+                'panjang' => number_format($rollLength, 2, '.', ''),
+                'status' => $status,
+                'sumber' => $sumber,
+                'shelf_location_id' => $inbound->shelf_location_id,
+                'supplier_id' => $inbound->supplier_id,
+                'inbound_id' => $inbound->id,
+                'keterangan' => $keteranganDasar . ' | Roll utuh dari auto-split inbound.',
+            ]);
+        }
+
+        if ($remainder > 0) {
+            \App\Models\MaterialPiece::create([
+                'material_id' => $inbound->material_id,
+                'panjang' => number_format($remainder, 2, '.', ''),
+                'status' => $status,
+                'sumber' => 'split_inbound_remainder',
+                'shelf_location_id' => $inbound->shelf_location_id,
+                'supplier_id' => $inbound->supplier_id,
+                'inbound_id' => $inbound->id,
+                'keterangan' => $keteranganDasar . ' | Sisa potongan dari auto-split inbound.',
+            ]);
+        }
+    }
 }

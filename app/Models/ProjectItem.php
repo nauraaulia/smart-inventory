@@ -7,7 +7,11 @@ use Illuminate\Database\Eloquent\Model;
 
 class ProjectItem extends Model
 {
-    protected $fillable = ['project_id', 'material_id', 'jumlah_diminta', 'jumlah_keluar'];
+    protected $fillable = ['project_id', 'material_id', 'jumlah_diminta', 'tanpa_potongan', 'jumlah_keluar'];
+
+    protected $casts = [
+        'tanpa_potongan' => 'boolean',
+    ];
 
     protected static function booted(): void
     {

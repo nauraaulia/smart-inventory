@@ -93,12 +93,6 @@ class ProjectForm
 
                         Section::make('Parameter Efisiensi (Smart AI)')
                             ->schema([
-                                TextInput::make('buffer_stock')
-                                    ->label('Buffer Stock (%)')
-                                    ->numeric()
-                                    ->suffix('%')
-                                    ->default(0)
-                                    ->required(),
                                 Textarea::make('catatan_teknis')
                                     ->label('Instruksi Khusus (Akan dibaca AI)')
                                     ->nullable()

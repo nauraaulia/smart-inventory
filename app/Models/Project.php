@@ -115,6 +115,10 @@ class Project extends Model
                 'ip_address' => request()->ip(),
             ]);
         }
+
+        if ($item->wasChanged(['catatan_teknis', 'h_minus_persiapan', 'tanggal_mulai'])) {
+            \App\Jobs\ProsesKebutuhanProyekJob::dispatchAfterResponse($item->id);
+        }
     });
 
     // 3. CCTV Saat Proyek Dihapus (Delete)

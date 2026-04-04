@@ -31,6 +31,13 @@ class MaterialsTable
                 TextColumn::make('satuan')
                     ->label('Unit'),
 
+                TextColumn::make('default_roll_length')
+                    ->label('Roll Standar')
+                    ->numeric(decimalPlaces: 2)
+                    ->suffix(fn ($record) => ' ' . ($record->satuan ?: 'meter'))
+                    ->placeholder('-')
+                    ->toggleable(isToggledHiddenByDefault: true),
+
                 TextColumn::make('defaultSupplier.nama_supplier')
                     ->label('Supplier Default')
                     ->placeholder('-')

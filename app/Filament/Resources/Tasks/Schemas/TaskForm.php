@@ -20,6 +20,9 @@ class TaskForm
                     ->schema([
                         TextInput::make('title')->label('Judul Task')->disabled(),
                         Textarea::make('message')->label('Ringkasan dari AI')->rows(3)->disabled(),
+                        TextInput::make('payload.ai_instruction.ringkas')
+                            ->label('Interpretasi Instruksi AI')
+                            ->disabled(),
                         Select::make('status')
                             ->options([
                                 'pending' => 'Pending (Menunggu Konfirmasi)',
@@ -35,7 +38,7 @@ class TaskForm
                             ->rows(3),
                     ])->columns(1),
 
-                Section::make('Detail Rekomendasi AI (Mudah Dibaca)')
+                Section::make('Detail Rekomendasi AI')
                     ->schema([
                         Repeater::make('payload.ai_summary.rekomendasi')
                             ->label('')
@@ -47,7 +50,30 @@ class TaskForm
                             ->schema([
                                 TextInput::make('material')->label('Nama Material')->disabled(),
                                 TextInput::make('aksi')->label('Saran Aksi')->disabled(),
-                                Textarea::make('detail')->label('Penjelasan AI')->disabled()->columnSpanFull(),
+                                Textarea::make('detail')
+                                    ->label('Penjelasan AI')
+                                    ->rows(5)
+                                    ->autosize()
+                                    ->formatStateUsing(function ($state): string {
+                                        $text = (string) ($state ?? '');
+
+                                        $legacyPattern = '/Butuh\s+asli\s*([^,]+),\s*buffer\s*[^,]+,\s*kebutuhan\s+akhir\s*([^,]+),\s*belum\s+tercover\s*([^,]+),\s*tersedia\s*([^,]+),\s*booking\s*([^,]+),\s*PR\s*([^\.]+)\.?/i';
+
+                                        if (preg_match($legacyPattern, $text, $m)) {
+                                            return sprintf(
+                                                'Butuh %s, belum tercover %s, tersedia %s, booking %s, PR %s.',
+                                                trim($m[2]),
+                                                trim($m[3]),
+                                                trim($m[4]),
+                                                trim($m[5]),
+                                                trim($m[6]),
+                                            );
+                                        }
+
+                                        return $text;
+                                    })
+                                    ->disabled()
+                                    ->columnSpanFull(),
                             ])->columns(2),
                     ]),
             ]);
