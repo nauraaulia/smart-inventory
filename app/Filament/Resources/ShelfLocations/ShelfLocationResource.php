@@ -18,7 +18,7 @@ use Illuminate\Database\Eloquent\Model;
 class ShelfLocationResource extends Resource
 {
     protected static ?string $model = ShelfLocation::class;
-    protected static string | \UnitEnum | null $navigationGroup = 'Kelola Data Master';
+    protected static string | \UnitEnum | null $navigationGroup = 'Data Master';
     
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedRectangleStack;
 

@@ -18,19 +18,7 @@ use Filament\Tables\Table;
 class MaterialResource extends Resource
 {
     protected static ?string $model = Material::class;
-    //protected static string | \UnitEnum | null $navigationGroup = 'Kelola Data Master';
-    public static function getNavigationGroup(): ?string
-    {
-        // Cek siapa yang lagi login
-        if (auth()->check() && auth()->user()->role === 'Administrator IT') {
-            // Kalau Admin, masukin ke laci 'Kelola Data Master'
-            return 'Kelola Data Master';
-        }
-
-        // Kalau BUKAN Admin (misal: Staff), balikin null. 
-        // null artinya dia bakal tampil di luar, mandiri sebagai menu utama!
-        return null; 
-    }
+    protected static string|\UnitEnum|null $navigationGroup = 'Data Master';
 
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedRectangleStack;
 

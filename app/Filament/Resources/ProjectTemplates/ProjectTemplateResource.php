@@ -18,7 +18,7 @@ class ProjectTemplateResource extends Resource
     protected static ?string $model = ProjectTemplate::class;
 
     protected static string|\BackedEnum|null $navigationIcon = 'heroicon-o-rectangle-stack';
-    protected static string|\UnitEnum|null $navigationGroup = 'Kelola Data Master';
+    protected static string|\UnitEnum|null $navigationGroup = 'Data Master';
 
     // ✅ Pakai form baru dari ProjectTemplateForm
     public static function form(Schema $schema): Schema
