@@ -37,6 +37,15 @@ class TaskResource extends Resource
         return false;
     }
 
+    public static function canViewAny(): bool
+    {
+        $role = auth()->user()?->role;
+
+        return self::isAdminIt($role)
+            || self::isManagerTeknik($role)
+            || self::isStaffAdministrasiGudang($role);
+    }
+
     public static function canEdit($record): bool
     {
         $user = auth()->user();
@@ -45,8 +54,12 @@ class TaskResource extends Resource
             return false;
         }
 
-        if ($user->role === 'Administrator IT') {
-            return true;
+        if (self::isAdminIt($user->role)) {
+            return false;
+        }
+
+        if (!self::isManagerTeknik($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
+            return false;
         }
 
         return $record->status === 'pending'
@@ -77,8 +90,12 @@ class TaskResource extends Resource
             return $query->whereRaw('1 = 0');
         }
 
-        if ($user->role === 'Administrator IT') {
+        if (self::isAdminIt($user->role)) {
             return $query;
+        }
+
+        if (!self::isManagerTeknik($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
+            return $query->whereRaw('1 = 0');
         }
 
         return $query->whereIn('for_role', self::roleAliases($user->role));
@@ -94,7 +111,11 @@ class TaskResource extends Resource
 
         $query = Task::query()->where('status', 'pending');
 
-        if ($user->role !== 'Administrator IT') {
+        if (!self::isAdminIt($user->role)) {
+            if (!self::isManagerTeknik($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
+                return null;
+            }
+
             $query->whereIn('for_role', self::roleAliases($user->role));
         }
 
@@ -131,7 +152,26 @@ class TaskResource extends Resource
                 'Finance',
                 'Keuangan',
             ],
+            'manager teknik', 'manajer teknik' => [
+                'Manager Teknik',
+                'Manajer Teknik',
+            ],
             default => [$role],
         };
+    }
+
+    private static function isAdminIt(?string $role): bool
+    {
+        return $role === 'Administrator IT';
+    }
+
+    private static function isManagerTeknik(?string $role): bool
+    {
+        return in_array($role, ['Manager Teknik', 'Manajer Teknik'], true);
+    }
+
+    private static function isStaffAdministrasiGudang(?string $role): bool
+    {
+        return in_array($role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true);
     }
 }

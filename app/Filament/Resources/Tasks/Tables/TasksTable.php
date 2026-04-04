@@ -117,7 +117,7 @@ class TasksTable
         }
 
         if ($user->role === 'Administrator IT') {
-            return true;
+            return false;
         }
 
         return in_array($record->for_role, self::roleAliases($user->role), true);
@@ -141,6 +141,10 @@ class TasksTable
             'finance', 'keuangan' => [
                 'Finance',
                 'Keuangan',
+            ],
+            'manager teknik', 'manajer teknik' => [
+                'Manager Teknik',
+                'Manajer Teknik',
             ],
             default => [$role],
         };
