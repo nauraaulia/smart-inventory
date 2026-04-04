@@ -30,6 +30,16 @@ class MaterialsTable
                 TextColumn::make('satuan')
                     ->label('Unit'),
 
+                TextColumn::make('defaultSupplier.nama_supplier')
+                    ->label('Supplier Default')
+                    ->placeholder('-')
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('defaultSupplier.lead_time_hari')
+                    ->label('Lead Time (hari)')
+                    ->placeholder('-')
+                    ->toggleable(isToggledHiddenByDefault: true),
+
                 // ── KOLOM STOK ──────────────────────────────────
 
                 TextColumn::make('stok')

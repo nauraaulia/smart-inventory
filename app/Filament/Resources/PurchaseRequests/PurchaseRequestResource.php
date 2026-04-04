@@ -70,9 +70,29 @@ class PurchaseRequestResource extends Resource
             && (int) $record->requested_by === (int) $user->id;
     }
 
+    public static function canCancelSubmission($record): bool
+    {
+        $user = auth()->user();
+
+        if (!$user || !$record instanceof PurchaseRequest) {
+            return false;
+        }
+
+        if ($record->status !== 'pending_manager') {
+            return false;
+        }
+
+        if ($user->role === 'Administrator IT') {
+            return true;
+        }
+
+        return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
+            && (int) $record->requested_by === (int) $user->id;
+    }
+
     public static function getEloquentQuery(): Builder
     {
-        $query = parent::getEloquentQuery()->with(['project', 'material', 'requester']);
+        $query = parent::getEloquentQuery()->with(['project', 'material.defaultSupplier', 'requester']);
         $user = auth()->user();
 
         if (!$user) {

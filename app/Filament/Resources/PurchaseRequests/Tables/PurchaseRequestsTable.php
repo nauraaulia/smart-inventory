@@ -3,10 +3,12 @@
 namespace App\Filament\Resources\PurchaseRequests\Tables;
 
 use App\Models\PurchaseRequest;
+use App\Filament\Resources\PurchaseRequests\PurchaseRequestResource;
 use App\Services\AI\PurchaseRequestSubmissionService;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
+use Filament\Notifications\Notification;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
@@ -29,7 +31,32 @@ class PurchaseRequestsTable
                     ->numeric(decimalPlaces: 2),
                 TextColumn::make('priority')
                     ->label('Prioritas')
-                    ->badge(),
+                    ->badge()
+                    ->formatStateUsing(fn (string $state): string => match ($state) {
+                        'urgent' => 'CRITICAL',
+                        'high' => 'HIGH',
+                        'medium' => 'MEDIUM',
+                        'low' => 'LOW',
+                        default => strtoupper($state),
+                    })
+                    ->color(fn (string $state): string => match ($state) {
+                        'urgent' => 'danger',
+                        'high' => 'warning',
+                        'medium' => 'info',
+                        'low' => 'success',
+                        default => 'gray',
+                    }),
+                TextColumn::make('hari_tersisa')
+                    ->label('Hari Tersisa')
+                    ->getStateUsing(fn (PurchaseRequest $record) => $record->hari_tersisa)
+                    ->formatStateUsing(fn ($state): string => $state === null ? '-' : "{$state} hari")
+                    ->color(fn ($state): string => match (true) {
+                        $state === null => 'gray',
+                        $state <= 0 => 'danger',
+                        $state <= 7 => 'warning',
+                        $state <= 14 => 'info',
+                        default => 'success',
+                    }),
                 TextColumn::make('status')
                     ->badge()
                     ->colors([
@@ -38,15 +65,15 @@ class PurchaseRequestsTable
                         'warning' => ['pending_manager', 'pending_finance'],
                         'success' => ['approved', 'ordered', 'received'],
                     ]),
-                TextColumn::make('draft_approved_at')
-                    ->label('Draft Approved')
+                TextColumn::make('created_at')
+                    ->label('Draft Dibuat')
                     ->dateTime('d M Y H:i')
                     ->placeholder('-'),
                 TextColumn::make('requester.name')
                     ->label('Requester')
                     ->placeholder('-'),
                 TextColumn::make('submitted_at')
-                    ->label('Submitted')
+                    ->label('Draft Terkirim')
                     ->dateTime('d M Y H:i')
                     ->placeholder('-'),
                 TextColumn::make('rejection_reason')
@@ -72,9 +99,9 @@ class PurchaseRequestsTable
                 EditAction::make()
                     ->visible(fn (PurchaseRequest $record) => self::canEditDraft($record)),
                 Action::make('approve_draft')
-                    ->label('Setujui Draft')
+                    ->label('Setujui & Kirim ke Manager')
                     ->icon('heroicon-o-check-badge')
-                    ->color('info')
+                    ->color('success')
                     ->requiresConfirmation()
                     ->visible(fn (PurchaseRequest $record) => self::canApproveDraft($record))
                     ->action(function (PurchaseRequest $record) {
@@ -82,30 +109,36 @@ class PurchaseRequestsTable
                             'draft_approved_by' => auth()->id(),
                             'draft_approved_at' => now(),
                         ]);
+
+                        $service = new PurchaseRequestSubmissionService();
+                        $result = $service->submitDraftsForProject((int) $record->project_id, auth()->user());
+
+                        Notification::make()
+                            ->title('Draft PR disetujui dan dikirim ke Manager')
+                            ->body("{$result['submitted_count']} PR berhasil disubmit untuk project {$result['project_code']}.")
+                            ->success()
+                            ->send();
                     }),
-                Action::make('unapprove_draft')
-                    ->label('Batalkan Persetujuan Draft')
-                    ->icon('heroicon-o-x-mark')
+                Action::make('cancel_submission')
+                    ->label('Batalkan Pengajuan')
+                    ->icon('heroicon-o-arrow-uturn-left')
                     ->color('gray')
                     ->requiresConfirmation()
-                    ->visible(fn (PurchaseRequest $record) => self::canUnapproveDraft($record))
-                    ->action(function (PurchaseRequest $record) {
-                        $record->update([
-                            'draft_approved_by' => null,
-                            'draft_approved_at' => null,
-                        ]);
-                    }),
-                Action::make('submit_to_manager')
-                    ->label('Submit ke Manager')
-                    ->icon('heroicon-o-paper-airplane')
-                    ->color('success')
-                    ->requiresConfirmation()
-                    ->modalHeading('Submit Draft PR ke Manager Operasional')
-                    ->modalDescription('Semua draft/rejected PR pada proyek ini akan digabung dan dikirim ke approval Manager Operasional.')
-                    ->visible(fn (PurchaseRequest $record) => self::canSubmit($record))
-                    ->action(function (PurchaseRequest $record) {
-                        $service = new PurchaseRequestSubmissionService();
-                        $service->submitDraftsForProject((int) $record->project_id, auth()->user());
+                    ->modalHeading('Batalkan Pengajuan ke Manager')
+                    ->modalDescription('PR akan dikembalikan ke status Draft selama Manager Operasional belum melakukan approval.')
+                    ->visible(fn (PurchaseRequest $record) => PurchaseRequestResource::canCancelSubmission($record))
+                    ->action(function (PurchaseRequest $record): void {
+                        $result = (new PurchaseRequestSubmissionService())
+                            ->cancelSubmittedPr($record, auth()->user());
+
+                        Notification::make()
+                            ->title($result['cancelled'] ? 'Pengajuan PR dibatalkan' : 'Pengajuan tidak dapat dibatalkan')
+                            ->body($result['cancelled']
+                                ? "PR dikembalikan ke draft untuk project {$result['project_code']}."
+                                : 'Status PR tidak lagi menunggu approval manager.')
+                            ->success($result['cancelled'])
+                            ->warning(!$result['cancelled'])
+                            ->send();
                     }),
             ]);
     }
@@ -124,30 +157,6 @@ class PurchaseRequestsTable
 
         return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
             && in_array($record->status, ['draft', 'rejected'], true)
-            && (int) $record->requested_by === (int) $user->id;
-    }
-
-    private static function canSubmit(PurchaseRequest $record): bool
-    {
-        $user = auth()->user();
-
-        if (!$user || !$record->project_id) {
-            return false;
-        }
-
-        if (!in_array($record->status, ['draft', 'rejected'], true)) {
-            return false;
-        }
-
-        if (blank($record->draft_approved_at)) {
-            return false;
-        }
-
-        if ($user->role === 'Administrator IT') {
-            return true;
-        }
-
-        return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
             && (int) $record->requested_by === (int) $user->id;
     }
 
@@ -175,27 +184,4 @@ class PurchaseRequestsTable
             && (int) $record->requested_by === (int) $user->id;
     }
 
-    private static function canUnapproveDraft(PurchaseRequest $record): bool
-    {
-        $user = auth()->user();
-
-        if (!$user) {
-            return false;
-        }
-
-        if (!in_array($record->status, ['draft', 'rejected'], true)) {
-            return false;
-        }
-
-        if (blank($record->draft_approved_at)) {
-            return false;
-        }
-
-        if ($user->role === 'Administrator IT') {
-            return true;
-        }
-
-        return in_array($user->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true)
-            && (int) $record->requested_by === (int) $user->id;
-    }
 }

@@ -22,21 +22,25 @@ class PurchaseRequestInfolist
                     ->numeric(decimalPlaces: 2),
                 TextEntry::make('priority')
                     ->label('Prioritas')
-                    ->badge(),
+                    ->badge()
+                    ->formatStateUsing(fn (string $state): string => match ($state) {
+                        'urgent' => 'CRITICAL',
+                        'high' => 'HIGH',
+                        'medium' => 'MEDIUM',
+                        'low' => 'LOW',
+                        default => strtoupper($state),
+                    }),
                 TextEntry::make('status')
                     ->badge(),
                 TextEntry::make('requester.name')
                     ->label('Requester')
                     ->placeholder('-'),
-                TextEntry::make('draftApprover.name')
-                    ->label('Draft Approved By')
-                    ->placeholder('-'),
-                TextEntry::make('draft_approved_at')
-                    ->label('Draft Approved At')
+                TextEntry::make('created_at')
+                    ->label('Draft Dibuat')
                     ->dateTime()
                     ->placeholder('-'),
                 TextEntry::make('submitted_at')
-                    ->label('Submitted At')
+                    ->label('Draft Terkirim')
                     ->dateTime()
                     ->placeholder('-'),
                 TextEntry::make('reason')
@@ -46,10 +50,6 @@ class PurchaseRequestInfolist
                 TextEntry::make('rejection_reason')
                     ->label('Alasan Reject')
                     ->columnSpanFull()
-                    ->placeholder('-'),
-                TextEntry::make('created_at')
-                    ->label('Created At')
-                    ->dateTime()
                     ->placeholder('-'),
             ]);
     }

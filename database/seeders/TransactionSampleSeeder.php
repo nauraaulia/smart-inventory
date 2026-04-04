@@ -9,7 +9,6 @@ use App\Models\ProjectItem;
 use App\Models\ProjectTemplate;
 use App\Models\ShelfLocation;
 use App\Models\Supplier;
-use App\Models\Task;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
@@ -158,51 +157,5 @@ class TransactionSampleSeeder extends Seeder
             }
         }
 
-        $tasks = [
-            [
-                'for_role' => 'Manager Operasional',
-                'type' => 'approval_pr',
-                'title' => 'Approval Purchase Request',
-                'message' => 'Silakan review PR material kabel untuk proyek Area Timur.',
-                'status' => 'pending',
-            ],
-            [
-                'for_role' => 'Finance',
-                'type' => 'approval_budget',
-                'title' => 'Verifikasi Budget Material',
-                'message' => 'Menunggu persetujuan anggaran material kabel.',
-                'status' => 'pending',
-            ],
-            [
-                'for_role' => 'Staff Administrasi Gudang',
-                'type' => 'stok_check',
-                'title' => 'Cek Ketersediaan Material',
-                'message' => 'Lakukan pengecekan stok fisik mingguan.',
-                'status' => 'done',
-                'handled_at' => now()->subHours(1),
-            ],
-        ];
-
-        foreach ($tasks as $task) {
-            Task::query()->updateOrCreate(
-                [
-                    'for_role' => $task['for_role'],
-                    'type' => $task['type'],
-                    'title' => $task['title'],
-                ],
-                [
-                    'message' => $task['message'],
-                    'payload' => [
-                        'source' => 'seeder',
-                        'generated_at' => now()->toIso8601String(),
-                    ],
-                    'status' => $task['status'],
-                    'related_id' => null,
-                    'related_type' => null,
-                    'handled_by' => null,
-                    'handled_at' => $task['handled_at'] ?? null,
-                ]
-            );
-        }
     }
 }

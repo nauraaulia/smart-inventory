@@ -4,10 +4,14 @@ namespace App\Services\AI;
 
 use App\Models\Material;
 use App\Models\MaterialPiece;
+use App\Models\Inbound;
 use App\Models\Project;
 use App\Models\PurchaseRequest;
+use App\Models\Supplier;
 use App\Models\Task;
 use App\Models\User;
+use App\Models\UserLog;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 class TaskApprovalService
@@ -23,6 +27,17 @@ class TaskApprovalService
                 default => $this->markDone($task, $actor),
             };
         });
+
+        $payload = $task->payload ?? [];
+        $projectId = (int) data_get($payload, 'project_id');
+        $projectCode = $this->projectCodeFromPayload($payload, $projectId);
+
+        $this->logUserAction(
+            actor: $actor,
+            action: 'Approve',
+            module: 'Task AI',
+            description: "Approve task {$task->type} (ID {$task->id}) untuk project {$projectCode}.",
+        );
     }
 
     public function reject(Task $task, User $actor, string $reason): void
@@ -33,6 +48,17 @@ class TaskApprovalService
                 default => $this->markRejected($task, $actor, $reason),
             };
         });
+
+        $payload = $task->payload ?? [];
+        $projectId = (int) data_get($payload, 'project_id');
+        $projectCode = $this->projectCodeFromPayload($payload, $projectId);
+
+        $this->logUserAction(
+            actor: $actor,
+            action: 'Reject',
+            module: 'Task AI',
+            description: "Reject task {$task->type} (ID {$task->id}) untuk project {$projectCode}. Alasan: {$reason}",
+        );
     }
 
     private function approveAiBookingSuggestion(Task $task, User $actor, array $options = []): void
@@ -42,6 +68,8 @@ class TaskApprovalService
         $projectCode = $this->projectCodeFromPayload($payload, $projectId);
         $detail = data_get($payload, 'detail', []);
         $generatePr = (bool) ($options['generate_pr'] ?? true);
+        $bufferDays = (int) ($options['buffer_days'] ?? 3);
+        $project = $projectId > 0 ? Project::query()->find($projectId) : null;
 
         $createdPrIds = [];
         $pendingShortages = [];
@@ -85,8 +113,12 @@ class TaskApprovalService
                     'quantity' => $this->decimal($shortage),
                     'reason' => 'Draft auto-generated dari Task AI karena stok kurang.',
                     'status' => 'draft',
-                    'priority' => $shortage >= 100 ? 'urgent' : 'high',
-                    'needed_date' => now()->addDays(7)->toDateString(),
+                    'priority' => $this->hitungPrioritas(
+                        material: $materialId > 0 ? Material::query()->find($materialId) : null,
+                        project: $project,
+                        bufferDays: $bufferDays,
+                    ),
+                    'needed_date' => $this->tanggalPenggunaan($project)?->toDateString() ?? now()->addDays(7)->toDateString(),
                     'submitted_at' => null,
                     'approved_by_manager_at' => null,
                     'approved_by_finance_at' => null,
@@ -432,5 +464,88 @@ class TaskApprovalService
         }
 
         return Project::query()->whereKey($projectId)->value('kode_proyek') ?: "#{$projectId}";
+    }
+
+    private function tanggalPenggunaan(?Project $project): ?Carbon
+    {
+        if (!$project || blank($project->tanggal_mulai)) {
+            return null;
+        }
+
+        $usageDate = Carbon::parse($project->tanggal_mulai)->startOfDay();
+        $hMinus = max(0, (int) ($project->h_minus_persiapan ?? 0));
+
+        if ($hMinus > 0) {
+            $usageDate = $usageDate->subDays($hMinus);
+        }
+
+        return $usageDate;
+    }
+
+    private function hitungPrioritas(?Material $material, ?Project $project, int $bufferDays = 3): string
+    {
+        $usageDate = $this->tanggalPenggunaan($project) ?? now()->addDays(14)->startOfDay();
+        $today = now()->startOfDay();
+
+        $leadTimeDays = $this->leadTimeSupplierHari($material);
+        $buffer = max(0, $bufferDays);
+
+        $hariTersisa = $today->diffInDays($usageDate, false) - $leadTimeDays - $buffer;
+
+        if ($hariTersisa <= 0) {
+            // Mapping CRITICAL ke nilai enum existing `urgent`.
+            return 'urgent';
+        }
+
+        if ($hariTersisa <= 7) {
+            return 'high';
+        }
+
+        if ($hariTersisa <= 14) {
+            return 'medium';
+        }
+
+        return 'low';
+    }
+
+    private function leadTimeSupplierHari(?Material $material): int
+    {
+        if (!$material) {
+            return 7;
+        }
+
+        $defaultLeadTime = (int) ($material->defaultSupplier?->lead_time_hari ?? 0);
+
+        if ($defaultLeadTime > 0) {
+            return $defaultLeadTime;
+        }
+
+        $latestSupplierId = Inbound::query()
+            ->where('material_id', $material->id)
+            ->whereNotNull('supplier_id')
+            ->orderByDesc('entry_date')
+            ->orderByDesc('id')
+            ->value('supplier_id');
+
+        if (!$latestSupplierId) {
+            return 7;
+        }
+
+        $leadTime = (int) Supplier::query()
+            ->whereKey($latestSupplierId)
+            ->value('lead_time_hari');
+
+        return $leadTime > 0 ? $leadTime : 7;
+    }
+
+    private function logUserAction(User $actor, string $action, string $module, string $description): void
+    {
+        UserLog::create([
+            'user_id' => $actor->id,
+            'action' => $action,
+            'module' => $module,
+            'description' => $description,
+            'ip_address' => request()?->ip(),
+        ]);
     }
 }

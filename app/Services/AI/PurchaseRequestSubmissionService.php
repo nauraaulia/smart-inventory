@@ -6,6 +6,7 @@ use App\Models\Project;
 use App\Models\PurchaseRequest;
 use App\Models\Task;
 use App\Models\User;
+use App\Models\UserLog;
 use Illuminate\Support\Facades\DB;
 
 class PurchaseRequestSubmissionService
@@ -86,6 +87,13 @@ class PurchaseRequestSubmissionService
                     'payload' => $payload,
                 ]);
 
+                $this->logUserAction(
+                    actor: $actor,
+                    action: 'Submit',
+                    module: 'Draft PR',
+                    description: "Submit draft PR ke Manager untuk project {$projectCode}. Jumlah PR: " . count($ids),
+                );
+
                 return [
                     'submitted_count' => count($ids),
                     'task_id' => $existingTask->id,
@@ -112,6 +120,13 @@ class PurchaseRequestSubmissionService
                 'related_type' => 'project',
             ]);
 
+            $this->logUserAction(
+                actor: $actor,
+                action: 'Submit',
+                module: 'Draft PR',
+                description: "Submit draft PR ke Manager untuk project {$projectCode}. Jumlah PR: " . count($ids),
+            );
+
             return [
                 'submitted_count' => count($ids),
                 'task_id' => $task->id,
@@ -120,8 +135,133 @@ class PurchaseRequestSubmissionService
         });
     }
 
+    public function cancelSubmittedPr(PurchaseRequest $record, User $actor): array
+    {
+        return DB::transaction(function () use ($record, $actor) {
+            /** @var PurchaseRequest|null $pr */
+            $pr = PurchaseRequest::query()->lockForUpdate()->find($record->id);
+
+            if (!$pr || $pr->status !== 'pending_manager') {
+                return [
+                    'cancelled' => false,
+                    'project_code' => $this->projectCode((int) ($record->project_id ?? 0)),
+                ];
+            }
+
+            $projectId = (int) $pr->project_id;
+            $projectCode = $this->projectCode($projectId);
+
+            $pr->update([
+                'status' => 'draft',
+                'submitted_at' => null,
+                'approved_by_manager' => null,
+                'approved_by_manager_at' => null,
+                'approved_by_finance' => null,
+                'approved_by_finance_at' => null,
+                'rejected_at' => null,
+                'rejection_reason' => null,
+            ]);
+
+            $this->syncPendingManagerTaskAfterCancellation(
+                projectId: $projectId,
+                cancelledPrId: (int) $pr->id,
+                actor: $actor,
+                projectCode: $projectCode,
+            );
+
+            $this->logUserAction(
+                actor: $actor,
+                action: 'Cancel Submit',
+                module: 'Draft PR',
+                description: "Membatalkan pengajuan PR ID {$pr->id} untuk project {$projectCode} sebelum approval Manager.",
+            );
+
+            return [
+                'cancelled' => true,
+                'project_code' => $projectCode,
+            ];
+        });
+    }
+
+    private function syncPendingManagerTaskAfterCancellation(int $projectId, int $cancelledPrId, User $actor, string $projectCode): void
+    {
+        $pendingTasks = Task::query()
+            ->where('type', 'pr_manager_approval')
+            ->where('status', 'pending')
+            ->where('related_type', 'project')
+            ->where('related_id', $projectId)
+            ->orderByDesc('id')
+            ->get();
+
+        $task = $pendingTasks->first();
+
+        if (!$task) {
+            return;
+        }
+
+        if ($pendingTasks->count() > 1) {
+            $pendingTasks->slice(1)->each(function (Task $redundantTask): void {
+                $payload = $redundantTask->payload ?? [];
+                data_set($payload, 'superseded', true);
+                data_set($payload, 'superseded_at', now()->toDateTimeString());
+
+                $redundantTask->update([
+                    'status' => 'done',
+                    'handled_at' => now(),
+                    'message' => 'Task approval manager ini digabung ke task terbaru.',
+                    'payload' => $payload,
+                ]);
+            });
+        }
+
+        $payload = $task->payload ?? [];
+        $remainingPrIds = collect(data_get($payload, 'pr_ids', []))
+            ->map(fn ($id) => (int) $id)
+            ->reject(fn ($id) => $id === $cancelledPrId)
+            ->unique()
+            ->values()
+            ->all();
+
+        data_set($payload, 'project_id', $projectId);
+        data_set($payload, 'project_code', $projectCode);
+        data_set($payload, 'pr_ids', $remainingPrIds);
+        data_set($payload, 'last_cancellation', [
+            'pr_id' => $cancelledPrId,
+            'by_user_id' => $actor->id,
+            'at' => now()->toDateTimeString(),
+        ]);
+
+        if (empty($remainingPrIds)) {
+            $task->update([
+                'status' => 'done',
+                'handled_at' => now(),
+                'message' => 'Semua PR pada task ini dibatalkan sebelum approval Manager.',
+                'payload' => $payload,
+            ]);
+
+            return;
+        }
+
+        $task->update([
+            'title' => "Approval PR Project {$projectCode}",
+            'message' => 'Terdapat PR draft yang menunggu approval Manager Operasional.',
+            'payload' => $payload,
+        ]);
+    }
+
     private function projectCode(int $projectId): string
     {
         return Project::query()->whereKey($projectId)->value('kode_proyek') ?: "#{$projectId}";
+    }
+
+    private function logUserAction(User $actor, string $action, string $module, string $description): void
+    {
+        UserLog::create([
+            'user_id' => $actor->id,
+            'action' => $action,
+            'module' => $module,
+            'description' => $description,
+            'ip_address' => request()?->ip(),
+        ]);
     }
 }

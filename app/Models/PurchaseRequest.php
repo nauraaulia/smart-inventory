@@ -2,12 +2,15 @@
 
 namespace App\Models;
 
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class PurchaseRequest extends Model
 {
     protected $guarded = [];
+
+    public const PRIORITY_BUFFER_DAYS = 3;
 
     protected $casts = [
         'quantity' => 'decimal:2',
@@ -47,5 +50,18 @@ class PurchaseRequest extends Model
     public function financeApprover(): BelongsTo
     {
         return $this->belongsTo(User::class, 'approved_by_finance');
+    }
+
+    public function getHariTersisaAttribute(): ?int
+    {
+        if (blank($this->needed_date)) {
+            return null;
+        }
+
+        $today = Carbon::today();
+        $usageDate = Carbon::parse($this->needed_date)->startOfDay();
+        $leadTimeDays = max(0, (int) ($this->material?->defaultSupplier?->lead_time_hari ?? 7));
+
+        return $today->diffInDays($usageDate, false) - $leadTimeDays - self::PRIORITY_BUFFER_DAYS;
     }
 }

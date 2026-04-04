@@ -28,6 +28,13 @@ class PurchaseRequestForm
                     ->disabled(),
                 TextInput::make('priority')
                     ->label('Prioritas')
+                    ->formatStateUsing(fn (string $state): string => match ($state) {
+                        'urgent' => 'CRITICAL',
+                        'high' => 'HIGH',
+                        'medium' => 'MEDIUM',
+                        'low' => 'LOW',
+                        default => strtoupper($state),
+                    })
                     ->disabled(),
                 DatePicker::make('needed_date')
                     ->label('Tanggal Dibutuhkan')
@@ -42,12 +49,11 @@ class PurchaseRequestForm
                 Placeholder::make('status_preview')
                     ->label('Preview Status')
                     ->content(fn (?PurchaseRequest $record): HtmlString => self::statusBadge($record?->status)),
-                TextInput::make('draftApprover.name')
-                    ->label('Draft Approved By')
-                    ->disabled()
-                    ->dehydrated(false),
-                TextInput::make('draft_approved_at')
-                    ->label('Draft Approved At')
+                TextInput::make('created_at')
+                    ->label('Draft Dibuat')
+                    ->disabled(),
+                TextInput::make('submitted_at')
+                    ->label('Draft Terkirim')
                     ->disabled(),
                 Textarea::make('rejection_reason')
                     ->label('Alasan Reject')

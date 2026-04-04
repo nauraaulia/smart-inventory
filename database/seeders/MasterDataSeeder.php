@@ -2,7 +2,6 @@
 
 namespace Database\Seeders;
 
-use App\Models\Klien;
 use App\Models\Material;
 use App\Models\ProjectTemplate;
 use App\Models\ProjectTemplateItem;
@@ -96,34 +95,6 @@ class MasterDataSeeder extends Seeder
             Supplier::updateOrCreate(
                 ['kode_supplier' => $supplier['kode_supplier']],
                 $supplier
-            );
-        }
-
-        $kliens = [
-            [
-                'kode_klien' => 'KLN-001',
-                'nama_klien' => 'PT Telekom Prima',
-                'no_telp' => '0812000001',
-                'alamat' => 'Jakarta Selatan',
-            ],
-            [
-                'kode_klien' => 'KLN-002',
-                'nama_klien' => 'PT Infrastruktur Digital',
-                'no_telp' => '0812000002',
-                'alamat' => 'Bekasi',
-            ],
-            [
-                'kode_klien' => 'KLN-003',
-                'nama_klien' => 'PT Energi Seluler',
-                'no_telp' => '0812000003',
-                'alamat' => 'Yogyakarta',
-            ],
-        ];
-
-        foreach ($kliens as $klien) {
-            Klien::updateOrCreate(
-                ['kode_klien' => $klien['kode_klien']],
-                $klien
             );
         }
 

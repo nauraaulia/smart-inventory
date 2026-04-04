@@ -4,6 +4,7 @@ namespace App\Filament\Resources\PurchaseRequests\Pages;
 
 use App\Filament\Resources\PurchaseRequests\PurchaseRequestResource;
 use App\Models\PurchaseRequest;
+use App\Models\UserLog;
 use App\Services\AI\PurchaseRequestSubmissionService;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
@@ -67,10 +68,46 @@ class ViewPurchaseRequest extends ViewRecord
                         'draft_approved_at' => null,
                     ]);
 
+                    UserLog::create([
+                        'user_id' => auth()->id(),
+                        'action' => 'Reject',
+                        'module' => 'Draft PR',
+                        'description' => "Reject draft PR ID {$record->id} untuk project " . ($record->project?->kode_proyek ?? ('#' . $record->project_id)) . ". Alasan: " . $data['rejection_reason'],
+                        'ip_address' => request()?->ip(),
+                    ]);
+
                     Notification::make()
                         ->title('Draft PR direject')
                         ->success()
                         ->send();
+                }),
+            Action::make('cancel_submission')
+                ->label('Batalkan Pengajuan')
+                ->icon('heroicon-o-arrow-uturn-left')
+                ->color('gray')
+                ->requiresConfirmation()
+                ->modalHeading('Batalkan Pengajuan ke Manager')
+                ->modalDescription('PR akan dikembalikan ke status Draft selama Manager Operasional belum melakukan approval.')
+                ->visible(fn () => PurchaseRequestResource::canCancelSubmission($this->getRecord()))
+                ->action(function (): void {
+                    /** @var PurchaseRequest $record */
+                    $record = $this->getRecord();
+
+                    $result = (new PurchaseRequestSubmissionService())
+                        ->cancelSubmittedPr($record, auth()->user());
+
+                    Notification::make()
+                        ->title($result['cancelled'] ? 'Pengajuan PR dibatalkan' : 'Pengajuan tidak dapat dibatalkan')
+                        ->body($result['cancelled']
+                            ? "PR dikembalikan ke draft untuk project {$result['project_code']}."
+                            : 'Status PR tidak lagi menunggu approval manager.')
+                        ->success($result['cancelled'])
+                        ->warning(!$result['cancelled'])
+                        ->send();
+
+                    if ($result['cancelled']) {
+                        $this->redirect($this->getResource()::getUrl('index'));
+                    }
                 }),
             EditAction::make()
                 ->visible(fn () => PurchaseRequestResource::canEdit($this->getRecord())),
