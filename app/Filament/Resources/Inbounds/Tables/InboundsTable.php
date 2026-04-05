@@ -38,9 +38,12 @@ class InboundsTable
                     ->date()
                     ->sortable(),
 
-                // 5. Pemasok (Pakai relasi dataSupplier yang baru kita bikin!)
-                TextColumn::make('dataSupplier.nama_supplier')
-                    ->label('Pemasok')
+                // 5. Asal inbound: supplier untuk inbound baru, project untuk retur
+                TextColumn::make('asal_inbound')
+                    ->label('Asal Inbound')
+                    ->getStateUsing(fn ($record): string => $record->jenis_inbound === 'Retur'
+                        ? ($record->project?->kode_proyek ?? '-')
+                        : ($record->dataSupplier?->nama_supplier ?? '-'))
                     ->searchable(),
 
                 // 6. Lokasi Rak (Tambahan baru)

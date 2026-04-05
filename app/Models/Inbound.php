@@ -10,7 +10,7 @@ class Inbound extends Model
     protected $fillable = [
         'material_id', 'quantity', 'entry_date', 'supplier_id',
         'shelf_location_id', 'satuan', 'penerima', 'created_by', 
-        'updated_by', 'kategori', 'jenis_inbound', 'is_opening_balance', 'kondisi', 'keterangan',
+        'updated_by', 'kategori', 'jenis_inbound', 'is_opening_balance', 'kondisi', 'keterangan', 'project_id',
     ];
 
     protected $casts = [
@@ -30,6 +30,11 @@ class Inbound extends Model
     public function shelfLocation(): BelongsTo
     {
         return $this->belongsTo(ShelfLocation::class, 'shelf_location_id');
+    }
+
+    public function project(): BelongsTo
+    {
+        return $this->belongsTo(Project::class, 'project_id');
     }
 
     protected static function booted()
@@ -216,9 +221,9 @@ static::created(function ($inbound) {
                     : 'Inbound baru dari supplier'));
 
         $totalQty = (float) $inbound->quantity;
-        $rollLength = (float) ($inbound->material?->default_roll_length ?? 0);
+        $rollLength = self::resolveAutoSplitRollLength($inbound, $totalQty);
 
-        // Jika tidak ada konfigurasi roll standar, simpan seperti perilaku sebelumnya (1 piece).
+        // Jika panjang roll standar tidak tersedia/terdeteksi, simpan sebagai 1 piece seperti perilaku sebelumnya.
         if ($rollLength <= 0 || $totalQty <= $rollLength) {
             \App\Models\MaterialPiece::create([
                 'material_id' => $inbound->material_id,
@@ -246,7 +251,7 @@ static::created(function ($inbound) {
                 'shelf_location_id' => $inbound->shelf_location_id,
                 'supplier_id' => $inbound->supplier_id,
                 'inbound_id' => $inbound->id,
-                'keterangan' => $keteranganDasar . ' | Roll utuh dari auto-split inbound.',
+                'keterangan' => $keteranganDasar . " | Roll utuh dari auto-split inbound ({$rollLength}).",
             ]);
         }
 
@@ -262,5 +267,39 @@ static::created(function ($inbound) {
                 'keterangan' => $keteranganDasar . ' | Sisa potongan dari auto-split inbound.',
             ]);
         }
+    }
+
+    private static function resolveAutoSplitRollLength(Inbound $inbound, float $totalQty): float
+    {
+        $configured = (float) ($inbound->material?->default_roll_length ?? 0);
+
+        if ($configured > 0) {
+            return $configured;
+        }
+
+        // Fallback: ikuti pola data historis piece inbound sebelumnya untuk material yang sama.
+        $historicalLengths = \App\Models\MaterialPiece::query()
+            ->where('material_id', $inbound->material_id)
+            ->whereIn('sumber', ['inbound_baru', 'opening_balance'])
+            ->whereIn('status', ['available', 'booked', 'used'])
+            ->where('panjang', '>', 0)
+            ->pluck('panjang')
+            ->map(fn ($value) => (float) $value)
+            ->filter(fn (float $value) => $value <= $totalQty)
+            ->values();
+
+        if ($historicalLengths->isEmpty()) {
+            return 0;
+        }
+
+        $preferred = $historicalLengths
+            ->map(fn (float $value) => number_format($value, 2, '.', ''))
+            ->countBy()
+            ->sortDesc()
+            ->keys()
+            ->map(fn (string $value) => (float) $value)
+            ->first();
+
+        return (float) ($preferred ?? 0);
     }
 }

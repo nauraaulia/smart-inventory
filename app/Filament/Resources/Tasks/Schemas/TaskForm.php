@@ -52,7 +52,7 @@ class TaskForm
                                 TextInput::make('aksi')->label('Saran Aksi')->disabled(),
                                 Textarea::make('detail')
                                     ->label('Penjelasan AI')
-                                    ->rows(5)
+                                    ->rows(8)
                                     ->autosize()
                                     ->formatStateUsing(function ($state): string {
                                         $text = (string) ($state ?? '');
@@ -70,9 +70,22 @@ class TaskForm
                                             );
                                         }
 
+                                        // Normalisasi tampilan untuk snapshot lama:
+                                        // jika sudah dibooking tapi alasan masih menyebut potongan tidak bisa dipakai.
+                                        $isBookedFlow = (bool) preg_match('/dibooking\s+[0-9]+(?:\.[0-9]+)?/i', $text)
+                                            && (bool) preg_match('/\bPR\s+0\b|\bgenerate\s+PR\s+0\b/i', $text);
+
+                                        if ($isBookedFlow && preg_match('/potongan\s+.*tidak\s+bisa\s+dipakai/i', $text)) {
+                                            $text = preg_replace(
+                                                '/dikarenakan\s+.+$/i',
+                                                'dikarenakan aturan tanpa potongan aktif, stok roll utuh tersedia sehingga kebutuhan bisa langsung dibooking.',
+                                                $text
+                                            ) ?? $text;
+                                        }
+
                                         return $text;
                                     })
-                                    ->disabled()
+                                    ->readOnly()
                                     ->columnSpanFull(),
                             ])->columns(2),
                     ]),

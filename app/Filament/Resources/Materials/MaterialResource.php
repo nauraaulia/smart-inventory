@@ -20,7 +20,7 @@ class MaterialResource extends Resource
     protected static ?string $model = Material::class;
     protected static string|\UnitEnum|null $navigationGroup = 'Data Master';
 
-    protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedRectangleStack;
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-cube';
 
     protected static ?string $recordTitleAttribute = 'Material';
 

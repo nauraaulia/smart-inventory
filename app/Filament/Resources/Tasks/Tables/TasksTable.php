@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Tasks\Tables;
 
+use App\Filament\Resources\Tasks\TaskResource;
 use App\Models\Task;
 use App\Services\AI\TaskApprovalService;
 use Filament\Actions\Action;
@@ -18,6 +19,7 @@ class TasksTable
     public static function configure(Table $table): Table
     {
         return $table
+            ->poll('1s')
             ->columns([
                 TextColumn::make('id')
                     ->sortable(),
@@ -69,7 +71,9 @@ class TasksTable
                 ViewAction::make(),
 
                 EditAction::make()
-                    ->visible(fn (Task $record) => $record->status === 'pending' && self::canHandleTask($record)),
+                    ->visible(fn (Task $record) => $record->status === 'pending'
+                        && self::canHandleTask($record)
+                        && $record->type !== 'ai_booking_suggestion'),
 
                 Action::make('approve')
                     ->label('Approve')
@@ -87,6 +91,9 @@ class TasksTable
                         $service->approve($record, auth()->user(), [
                             'generate_pr' => (bool) ($data['generate_pr'] ?? true),
                         ]);
+                    })
+                    ->after(function ($livewire): void {
+                        $livewire->redirect(TaskResource::getUrl('index'), navigate: true);
                     }),
 
                 Action::make('reject')
@@ -103,6 +110,9 @@ class TasksTable
                     ->action(function (Task $record, array $data) {
                         $service = new TaskApprovalService();
                         $service->reject($record, auth()->user(), (string) ($data['reason'] ?? 'Ditolak'));
+                    })
+                    ->after(function ($livewire): void {
+                        $livewire->redirect(TaskResource::getUrl('index'), navigate: true);
                     }),
 
             ]);
@@ -128,10 +138,12 @@ class TasksTable
         $normalized = mb_strtolower(trim($role));
 
         return match ($normalized) {
-            'staff administrasi gudang', 'staff adm gudang', 'staff gudang' => [
+            'staff administrasi gudang', 'staff adm gudang', 'staff gudang', 'admin gudang', 'administrator gudang' => [
                 'Staff Administrasi Gudang',
                 'Staff Adm Gudang',
                 'Staff Gudang',
+                'Admin Gudang',
+                'Administrator Gudang',
             ],
             'manager operasional', 'manager operational', 'manajer operasional' => [
                 'Manager Operasional',

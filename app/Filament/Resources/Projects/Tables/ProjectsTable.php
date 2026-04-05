@@ -14,6 +14,7 @@ class ProjectsTable
     public static function configure(Table $table): Table
     {
         return $table
+            ->poll('2s')
             ->columns([
                 TextColumn::make('nama_proyek')
                     ->searchable(),

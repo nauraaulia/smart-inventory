@@ -19,6 +19,7 @@ class PurchaseRequestsTable
     public static function configure(Table $table): Table
     {
         return $table
+            ->poll('2s')
             ->columns([
                 TextColumn::make('project.kode_proyek')
                     ->label('Kode Proyek')
@@ -119,6 +120,9 @@ class PurchaseRequestsTable
                             ->body("{$result['submitted_count']} PR berhasil disubmit untuk project {$result['project_code']}.")
                             ->success()
                             ->send();
+                    })
+                    ->after(function ($livewire): void {
+                        $livewire->redirect(PurchaseRequestResource::getUrl('index'), navigate: true);
                     }),
                 Action::make('cancel_submission')
                     ->label('Batalkan Pengajuan')
@@ -140,6 +144,9 @@ class PurchaseRequestsTable
                             ->success($result['cancelled'])
                             ->warning(!$result['cancelled'])
                             ->send();
+                    })
+                    ->after(function ($livewire): void {
+                        $livewire->redirect(PurchaseRequestResource::getUrl('index'), navigate: true);
                     }),
                 Action::make('cancel_submission_to_finance')
                     ->label('Batalkan Pengajuan ke Finance')
@@ -161,6 +168,9 @@ class PurchaseRequestsTable
                             ->success($result['cancelled'])
                             ->warning(!$result['cancelled'])
                             ->send();
+                    })
+                    ->after(function ($livewire): void {
+                        $livewire->redirect(PurchaseRequestResource::getUrl('index'), navigate: true);
                     }),
                 Action::make('approve_manager')
                     ->label('Setujui dan Kirim ke Finance')
@@ -187,6 +197,9 @@ class PurchaseRequestsTable
                             ->title('PR disetujui Manager')
                             ->success()
                             ->send();
+                    })
+                    ->after(function ($livewire): void {
+                        $livewire->redirect(PurchaseRequestResource::getUrl('index'), navigate: true);
                     }),
                 Action::make('approve_finance')
                     ->label('Setujui (Finance)')
@@ -213,6 +226,9 @@ class PurchaseRequestsTable
                             ->title('PR disetujui Finance')
                             ->success()
                             ->send();
+                    })
+                    ->after(function ($livewire): void {
+                        $livewire->redirect(PurchaseRequestResource::getUrl('index'), navigate: true);
                     }),
             ]);
     }

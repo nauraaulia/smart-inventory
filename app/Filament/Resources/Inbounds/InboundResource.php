@@ -19,7 +19,7 @@ class InboundResource extends Resource
 {
     protected static ?string $model = Inbound::class;
 
-    protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedRectangleStack;
+    protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-arrow-down-tray';
 
     protected static ?string $recordTitleAttribute = 'Barang Masuk';
 

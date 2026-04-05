@@ -75,6 +75,21 @@ class TaskApprovalService
         $pendingShortages = [];
         $touchedMaterialIds = [];
 
+        // Tandai task selesai lebih awal agar hook sinkron stok tidak membuat task AI duplikat
+        // ketika material piece berubah di tengah proses approval.
+        data_set($payload, 'approval_trail.staff', [
+            'status' => 'approved',
+            'by_user_id' => $actor->id,
+            'at' => now()->toDateTimeString(),
+        ]);
+
+        $task->update([
+            'status' => 'done',
+            'handled_by' => $actor->id,
+            'handled_at' => now(),
+            'payload' => $payload,
+        ]);
+
         foreach ($detail as $item) {
             $materialId = (int) ($item['material_id'] ?? 0);
             $dibutuhkan = (float) ($item['dibutuhkan'] ?? 0);
@@ -147,11 +162,6 @@ class TaskApprovalService
 
         $payload = $task->payload ?? [];
         data_set($payload, 'project_code', $projectCode);
-        data_set($payload, 'approval_trail.staff', [
-            'status' => 'approved',
-            'by_user_id' => $actor->id,
-            'at' => now()->toDateTimeString(),
-        ]);
         data_set($payload, 'execution_result', [
             'created_draft_pr_ids' => $createdPrIds,
             'created_draft_pr_count' => count($createdPrIds),
@@ -408,10 +418,6 @@ class TaskApprovalService
                 ->where('status', 'available')
                 ->whereIn('sumber', ['inbound_baru', 'opening_balance'])
                 ->where('panjang', '>=', $minimumUtuh)
-                ->where(function ($query) {
-                    $query->whereNull('keterangan')
-                        ->orWhere('keterangan', 'not ilike', '%split%');
-                })
                 ->orderBy('panjang')
                 ->lockForUpdate()
                 ->first();

@@ -2,10 +2,13 @@
 
 namespace App\Filament\Resources\Materials\Tables;
 
+use App\Models\MaterialPiece;
+use Filament\Actions\Action;
 use Filament\Actions\BulkActionGroup;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Table;
+use Illuminate\Support\HtmlString;
 
 class MaterialsTable
 {
@@ -15,6 +18,7 @@ class MaterialsTable
         $canManage = in_array($role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'], true);
 
         return $table
+            ->poll('5s')
             ->columns([
                 TextColumn::make('kode_material')
                     ->label('Kode/SKU')
@@ -68,7 +72,20 @@ class MaterialsTable
                     ->label('Booked')
                     ->badge()
                     ->color('warning')
-                    ->default(0),
+                    ->default(0)
+                    ->tooltip(function ($record): ?string {
+                        if ((int) ($record->booked ?? 0) <= 0) {
+                            return null;
+                        }
+
+                        $rows = self::bookedBreakdownLines($record);
+
+                        if (empty($rows)) {
+                            return 'Belum ada detail booking per project.';
+                        }
+
+                        return "Booked per project:\n" . implode("\n", $rows);
+                    }),
 
                 TextColumn::make('available')
                     ->label('Available')
@@ -81,6 +98,22 @@ class MaterialsTable
             ])
             ->filters([])
             ->recordActions([
+                Action::make('booked_detail')
+                    ->label('Booked Detail')
+                    ->icon('heroicon-o-list-bullet')
+                    ->color('warning')
+                    ->visible(fn ($record) => (int) ($record->booked ?? 0) > 0)
+                    ->modalHeading(fn ($record) => 'Booked Detail - ' . $record->nama_material)
+                    ->modalSubmitAction(false)
+                    ->modalCancelActionLabel('Tutup')
+                    ->modalContent(function ($record) {
+                        $rows = self::bookedBreakdownLines($record);
+                        $text = empty($rows)
+                            ? 'Belum ada detail booking per project.'
+                            : implode("\n", $rows);
+
+                        return new HtmlString('<pre style="white-space: pre-wrap; font-size: 13px; margin: 0;">' . e($text) . '</pre>');
+                    }),
                 \Filament\Actions\ViewAction::make(),
                 \Filament\Actions\EditAction::make()
                     ->visible($canManage),
@@ -93,5 +126,37 @@ class MaterialsTable
                         ->visible($canManage),
                 ]),
             ]);
+    }
+
+    private static function bookedBreakdownLines($record): array
+    {
+        $rows = MaterialPiece::query()
+            ->where('material_id', $record->id)
+            ->whereIn('status', ['booked', 'used'])
+            ->whereNotNull('booked_for_project_id')
+            ->with('bookedForProject:id,kode_proyek')
+            ->get(['booked_for_project_id', 'panjang'])
+            ->groupBy('booked_for_project_id')
+            ->map(function ($pieces) {
+                $projectCode = optional($pieces->first()->bookedForProject)->kode_proyek
+                    ?: ('PRJ#' . (int) $pieces->first()->booked_for_project_id);
+
+                $lengths = $pieces
+                    ->pluck('panjang')
+                    ->map(function ($value) {
+                        $num = (float) $value;
+                        return fmod($num, 1.0) === 0.0
+                            ? (string) (int) $num
+                            : rtrim(rtrim(number_format($num, 2, '.', ''), '0'), '.');
+                    })
+                    ->values()
+                    ->all();
+
+                return $projectCode . ': ' . implode(' + ', $lengths);
+            })
+            ->values()
+            ->all();
+
+        return $rows;
     }
 }

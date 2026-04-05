@@ -56,13 +56,21 @@ class InboundForm
                     ->required(),
 
                 // 6. Dropdown Pemasok / Supplier
-                    Select::make('supplier_id')
+                Select::make('supplier_id')
                     ->label('Pemasok / Supplier')
-                    ->relationship('dataSupplier', 'nama_supplier') // <--- UBAH DI SINI DARI 'supplier' JADI 'dataSupplier'
+                    ->relationship('dataSupplier', 'nama_supplier')
                     ->searchable()
                     ->preload()
                     ->required()
                     ->visible(fn ($get) => $get('jenis_inbound') === 'Baru' || request('type') === 'Baru'),
+
+                Select::make('project_id')
+                    ->label('Project Yang Diretur')
+                    ->relationship('project', 'kode_proyek')
+                    ->searchable()
+                    ->preload()
+                    ->visible(fn ($get) => $get('jenis_inbound') === 'Retur' || request('type') === 'Retur')
+                    ->required(fn ($get) => $get('jenis_inbound') === 'Retur' || request('type') === 'Retur'),
 
                 Checkbox::make('is_opening_balance')
                     ->label('Opening Balance')

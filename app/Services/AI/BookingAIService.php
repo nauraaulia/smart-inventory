@@ -80,40 +80,55 @@ class BookingAIService
      */
     private function analisaSatuItem(Material $material, float $dibutuhkan, int $projectId, bool $tanpaPotongan = false, string $alasanInstruksi = ''): array
     {
-        if ($tanpaPotongan) {
+        $applyNoCut = $tanpaPotongan && $this->isNoCutRelevantMaterial($material);
+
+        if ($applyNoCut) {
             $rollStandar = (float) ($material->default_roll_length ?? 0);
             $minimumUtuh = $rollStandar > 0 ? $rollStandar : $dibutuhkan;
-            $stokSisaPotongan = (float) MaterialPiece::query()
+            $stokTersediaFaktual = (float) $material->available;
+            $stokSisaPotonganPieces = MaterialPiece::query()
                 ->where('material_id', $material->id)
                 ->where('status', 'available')
                 ->where('panjang', '<', $minimumUtuh)
-                ->sum('panjang');
+                ->orderByDesc('panjang')
+                ->pluck('panjang')
+                ->map(fn ($value) => (float) $value)
+                ->values()
+                ->all();
+
+            $stokSisaPotongan = array_sum($stokSisaPotonganPieces);
+            $stokSisaPotonganList = collect($stokSisaPotonganPieces)
+                ->take(6)
+                ->map(fn (float $value) => $this->formatQty($value))
+                ->values()
+                ->all();
+
+            $potonganBreakdown = empty($stokSisaPotonganList)
+                ? ''
+                : 'potongan tersedia ' . implode(' + ', $stokSisaPotonganList);
 
             $stokUtuhCukup = MaterialPiece::query()
                 ->where('material_id', $material->id)
                 ->where('status', 'available')
                 ->whereIn('sumber', ['inbound_baru', 'opening_balance'])
                 ->where('panjang', '>=', $minimumUtuh)
-                ->where(function ($query) {
-                    $query->whereNull('keterangan')
-                        ->orWhere('keterangan', 'not ilike', '%split%');
-                })
                 ->exists();
 
             return [
                 'material_id' => $material->id,
                 'nama_material' => $material->nama_material,
                 'dibutuhkan' => $dibutuhkan,
-                // Tampilkan stok fisik yang terlihat di gudang, meskipun tidak valid untuk no-cut.
-                'available' => $stokUtuhCukup ? $dibutuhkan : $stokSisaPotongan,
+                // Tampilkan stok faktual agar user tetap melihat kondisi gudang real-time.
+                'available' => round($stokTersediaFaktual, 2),
                 'aksi' => $stokUtuhCukup ? 'full_booking' : 'full_pr',
                 'qty_booking' => $stokUtuhCukup ? $dibutuhkan : 0,
                 'qty_pr' => $stokUtuhCukup ? 0 : $dibutuhkan,
                 'tanpa_potongan' => true,
                 'stok_sisa_potongan' => $stokSisaPotongan,
+                'stok_sisa_potongan_list' => $stokSisaPotonganList,
                 'alasan_ai' => $stokUtuhCukup
                     ? ('instruksi tidak boleh potongan, jadi sistem hanya memakai roll utuh yang memenuhi kebutuhan. ' . trim($alasanInstruksi))
-                    : ('instruksi tidak boleh potongan dan stok roll utuh tidak mencukupi' . ($stokSisaPotongan > 0 ? ', stok sisa ' . $this->formatQty($stokSisaPotongan) . ' tidak bisa dipakai' : '') . ', sehingga kebutuhan dialihkan ke PR. ' . trim($alasanInstruksi)),
+                    : ('instruksi tidak boleh potongan dan stok roll utuh tidak mencukupi' . ($stokSisaPotongan > 0 ? ', stok sisa ' . $this->formatQty($stokSisaPotongan) . ' tidak bisa dipakai' : '') . ($potonganBreakdown !== '' ? ', ' . $potonganBreakdown . ' tidak bisa dipakai' : '') . ', sehingga kebutuhan dialihkan ke PR. ' . trim($alasanInstruksi)),
             ];
         }
 
@@ -191,8 +206,10 @@ class BookingAIService
         Gaya bahasa: natural, human-friendly, seperti penjelasan rekan kerja operasional.
         Jangan kaku seperti template sistem, tapi juga jangan terlalu chatty.
         Batasan: maksimal 1-2 kalimat per item, hindari filler seperti "btw", "hehe", "tentunya", "sangat-sangat".
-        Untuk setiap item rekomendasi, tulis detail dengan pola seperti ini:
-        "Butuh X, belum tercover Y, tersedia Z, booking A, PR B, dikarenakan ..."
+        Untuk setiap item rekomendasi, tulis detail ringkas dengan pola salah satu ini:
+        - "Butuh X, tersedia total Z, dibooking A, dikarenakan ..."
+        - "Butuh X, tersedia total Z, generate PR B, dikarenakan ..."
+        - "Butuh X, tersedia total Z, dibooking A, generate PR B, dikarenakan ..."
         Bagian "dikarenakan ..." wajib menjelaskan alasan keputusan secara praktis sesuai kondisi stok dan aturan project.
         
         Format output HARUS berupa JSON seperti ini (jangan tambah teks lain di luar JSON):
@@ -541,19 +558,37 @@ class BookingAIService
             $reasonFromLlm = $this->extractReasonPhrase((string) ($llmItem['detail'] ?? ''));
             $reason = $this->normalizeReasonFromLlm($reasonFromLlm, $fallbackReason);
             $reason = $this->sinkronkanAngkaAlasan($reason, $item);
+            $reason = $this->sesuaikanAlasanDenganTipeMaterial($reason, $item);
+            $reason = rtrim($reason, '.');
+
+            if ((bool) ($item['tanpa_potongan'] ?? false)) {
+                $aksiNoCut = (string) ($item['aksi'] ?? '');
+                $stokSisa = $this->formatQty((float) ($item['stok_sisa_potongan'] ?? 0));
+
+                $reason = match ($aksiNoCut) {
+                    'full_booking' => 'aturan tanpa potongan aktif, stok roll utuh tersedia sehingga kebutuhan bisa langsung dibooking',
+                    'partial' => 'aturan tanpa potongan aktif, stok roll utuh hanya menutup sebagian kebutuhan sehingga sisanya dibuat PR',
+                    'full_pr' => "aturan tanpa potongan aktif, stok roll utuh tidak mencukupi sehingga dibuat PR (stok potongan {$stokSisa} tidak dipakai)",
+                    default => $reason,
+                };
+            }
+
+            $butuh = $this->formatQty((float) ($item['kebutuhan_asli'] ?? ($item['dibutuhkan'] ?? 0)));
+            $tersedia = $this->formatQty((float) ($item['available'] ?? 0));
+            $booking = $this->formatQty((float) ($item['qty_booking'] ?? 0));
+            $pr = $this->formatQty((float) ($item['qty_pr'] ?? 0));
+
+            $detailText = match ($item['aksi'] ?? null) {
+                'full_booking' => "Butuh {$butuh}, tersedia total {$tersedia}, dibooking {$booking}, dikarenakan {$reason}.",
+                'full_pr' => "Butuh {$butuh}, tersedia total {$tersedia}, generate PR {$pr}, dikarenakan {$reason}.",
+                'partial' => "Butuh {$butuh}, tersedia total {$tersedia}, dibooking {$booking}, generate PR {$pr}, dikarenakan {$reason}.",
+                default => "Butuh {$butuh}, tersedia total {$tersedia}, dibooking {$booking}, generate PR {$pr}, dikarenakan {$reason}.",
+            };
 
             return [
                 'material' => $namaMaterial,
                 'aksi' => $aksi,
-                'detail' => sprintf(
-                    'Butuh %s, belum tercover %s, tersedia %s, booking %s, PR %s, dikarenakan %s.',
-                    $item['kebutuhan_asli'] ?? ($item['dibutuhkan'] ?? 0),
-                    $item['kebutuhan_belum_tercover'] ?? ($item['dibutuhkan'] ?? 0),
-                    $item['available'] ?? 0,
-                    $item['qty_booking'] ?? 0,
-                    $item['qty_pr'] ?? 0,
-                    $reason,
-                ),
+                'detail' => $detailText,
             ];
         })->values()->all();
     }
@@ -594,10 +629,6 @@ class BookingAIService
         $normalized = preg_replace('/^(karena|dikarenakan)\s+/iu', '', (string) $normalized);
         $normalized = rtrim((string) $normalized, '.');
 
-        if (mb_strlen((string) $normalized) > 220) {
-            $normalized = rtrim(mb_substr((string) $normalized, 0, 220)) . '...';
-        }
-
         return (string) $normalized;
     }
 
@@ -610,8 +641,17 @@ class BookingAIService
         }
 
         if ((bool) ($item['tanpa_potongan'] ?? false)) {
+            $aksi = (string) ($item['aksi'] ?? '');
+            $qtyPr = (float) ($item['qty_pr'] ?? 0);
+            $perluAlasanPotongan = in_array($aksi, ['full_pr', 'partial'], true) || $qtyPr > 0;
+
             $stokSisa = (float) ($item['stok_sisa_potongan'] ?? 0);
             $stokSisaText = $this->formatQty($stokSisa);
+            $stokSisaList = collect($item['stok_sisa_potongan_list'] ?? [])
+                ->map(fn ($value) => $this->formatQty((float) $value))
+                ->filter()
+                ->values()
+                ->all();
 
             if ($stokSisa > 0) {
                 if (preg_match('/stok\s+sisa\s+\d+(?:\.\d+)?/iu', $normalized)) {
@@ -623,9 +663,102 @@ class BookingAIService
                     );
                 }
             }
+
+            if ($perluAlasanPotongan && !empty($stokSisaList)) {
+                $potonganText = implode(' + ', $stokSisaList);
+                if (!preg_match('/potongan\s+tersedia\s+/iu', $normalized)) {
+                    $normalized = rtrim($normalized, '.');
+                    $normalized .= ". Potongan tersedia {$potonganText}, jadi tidak bisa dipakai karena aturan tanpa potongan";
+                }
+            }
         }
 
-        return $normalized;
+        return $this->ringkasAlasanJikaPanjang($normalized, $item);
+    }
+
+    private function ringkasAlasanJikaPanjang(string $reason, array $item): string
+    {
+        $text = trim(preg_replace('/\s+/', ' ', $reason));
+        $aksi = (string) ($item['aksi'] ?? '');
+        $qtyPr = (float) ($item['qty_pr'] ?? 0);
+        $perluAlasanPotongan = in_array($aksi, ['full_pr', 'partial'], true) || $qtyPr > 0;
+
+        $shouldShorten = mb_strlen($text) > 190;
+
+        if ((bool) ($item['tanpa_potongan'] ?? false)
+            && $perluAlasanPotongan
+            && preg_match('/potongan\s+tersedia\s+/iu', $text)) {
+            $shouldShorten = true;
+        }
+
+        if ($text === '' || !$shouldShorten) {
+            return $text;
+        }
+
+        if ((bool) ($item['tanpa_potongan'] ?? false)) {
+            if (!$perluAlasanPotongan) {
+                return 'aturan tanpa potongan aktif dan stok roll utuh tersedia, sehingga kebutuhan bisa langsung dibooking.';
+            }
+
+            $stokSisa = (float) ($item['stok_sisa_potongan'] ?? 0);
+            $stokSisaText = $this->formatQty($stokSisa);
+            $stokSisaList = collect($item['stok_sisa_potongan_list'] ?? [])
+                ->map(fn ($value) => $this->formatQty((float) $value))
+                ->filter()
+                ->take(4)
+                ->values()
+                ->all();
+
+            if (!empty($stokSisaList)) {
+                $potonganText = implode(' + ', $stokSisaList);
+                return "aturan tanpa potongan aktif, stok yang ada hanya potongan {$potonganText} (total {$stokSisaText}) jadi tidak bisa dipakai.";
+            }
+
+            return 'aturan tanpa potongan aktif dan stok roll utuh tidak mencukupi, sehingga kebutuhan dialihkan ke PR.';
+        }
+
+        return 'stok tersedia belum mencukupi kebutuhan, sehingga sistem melakukan penyesuaian booking dan PR.';
+    }
+
+    private function isNoCutRelevantMaterial(Material $material): bool
+    {
+        if ((float) ($material->default_roll_length ?? 0) > 0) {
+            return true;
+        }
+
+        $text = mb_strtolower(trim((string) ($material->nama_material ?? '')));
+
+        return (bool) preg_match('/kabel|cable|fiber|fo\b|optic|utp|ftp|coax|coaxial|wire|roll/i', $text);
+    }
+
+    private function sesuaikanAlasanDenganTipeMaterial(string $reason, array $item): string
+    {
+        $text = trim($reason);
+
+        if ($text === '') {
+            return $text;
+        }
+
+        if ((bool) ($item['tanpa_potongan'] ?? false)) {
+            return $text;
+        }
+
+        if (!preg_match('/potong|potongan|roll\s+utuh|tanpa\s+potongan/i', $text)) {
+            return $text;
+        }
+
+        $aksi = (string) ($item['aksi'] ?? '');
+        $available = (float) ($item['available'] ?? 0);
+        $qtyBooking = (float) ($item['qty_booking'] ?? 0);
+
+        return match ($aksi) {
+            'full_booking' => 'stok tersedia mencukupi sehingga kebutuhan bisa langsung dibooking',
+            'partial' => 'stok tersedia hanya mencukupi sebagian, sehingga sisanya perlu dibuatkan PR',
+            'full_pr' => $available > 0 && $qtyBooking <= 0
+                ? 'stok yang tersedia belum memenuhi syarat kebutuhan item ini, sehingga dialihkan ke PR'
+                : 'stok tersedia tidak mencukupi sehingga kebutuhan dialihkan ke PR',
+            default => 'keputusan mengikuti kondisi stok aktual untuk material ini',
+        };
     }
 
     private function formatQty(float|int $value): string
