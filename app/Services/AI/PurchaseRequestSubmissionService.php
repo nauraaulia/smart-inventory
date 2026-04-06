@@ -35,8 +35,8 @@ class PurchaseRequestSubmissionService
                 ->update([
                     'status' => 'pending_manager',
                     'submitted_at' => now(),
-                    'draft_approved_by' => null,
-                    'draft_approved_at' => null,
+                    'draft_approved_by' => DB::raw('COALESCE(draft_approved_by, ' . (int) $actor->id . ')'),
+                    'draft_approved_at' => DB::raw('COALESCE(draft_approved_at, NOW())'),
                     'rejected_at' => null,
                     'rejection_reason' => null,
                 ]);

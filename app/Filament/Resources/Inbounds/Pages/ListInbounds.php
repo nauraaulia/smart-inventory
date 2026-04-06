@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Inbounds\Pages;
 
 use App\Filament\Resources\Inbounds\InboundResource;
+use App\Filament\Resources\PurchaseOrders\PurchaseOrderResource;
 use Filament\Actions;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Schemas\Components\Tabs\Tab;  
@@ -20,6 +21,12 @@ class ListInbounds extends ListRecords
                 ->color('success')
                 ->icon('heroicon-o-arrow-down-tray')
                 ->url(fn (): string => static::getResource()::getUrl('create', ['type' => 'Baru'])),
+
+            Actions\Action::make('receive_from_po')
+                ->label('Terima dari Nomor PO')
+                ->color('info')
+                ->icon('heroicon-o-document-text')
+                ->url(fn (): string => PurchaseOrderResource::getUrl('receive')),
 
             Actions\Action::make('new_retur')
                 ->label('Tambah Retur')

@@ -10,7 +10,8 @@ class Inbound extends Model
     protected $fillable = [
         'material_id', 'quantity', 'entry_date', 'supplier_id',
         'shelf_location_id', 'satuan', 'penerima', 'created_by', 
-        'updated_by', 'kategori', 'jenis_inbound', 'is_opening_balance', 'kondisi', 'keterangan', 'project_id',
+        'updated_by', 'jenis_inbound', 'is_opening_balance', 'kondisi', 'keterangan', 'project_id',
+        'purchase_order_id', 'purchase_order_item_id',
     ];
 
     protected $casts = [
@@ -35,6 +36,16 @@ class Inbound extends Model
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class, 'project_id');
+    }
+
+    public function purchaseOrder(): BelongsTo
+    {
+        return $this->belongsTo(PurchaseOrder::class);
+    }
+
+    public function purchaseOrderItem(): BelongsTo
+    {
+        return $this->belongsTo(PurchaseOrderItem::class);
     }
 
     protected static function booted()

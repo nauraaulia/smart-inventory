@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\PurchaseRequests\Pages;
 
+use App\Filament\Resources\PurchaseOrders\PurchaseOrderResource;
 use App\Filament\Resources\PurchaseRequests\PurchaseRequestResource;
 use App\Models\PurchaseRequest;
 use App\Models\Task;
@@ -43,7 +44,7 @@ class ViewPurchaseRequest extends ViewRecord
                         ->success()
                         ->send();
 
-                    $this->redirect($this->getResource()::getUrl('index'));
+                    $this->refreshFormData([]);
                 }),
             Action::make('approve_manager')
                 ->label('Setujui dan Kirim ke Finance')
@@ -76,10 +77,10 @@ class ViewPurchaseRequest extends ViewRecord
 
                     $this->refreshFormData([]);
                 }),
-            Action::make('approve_finance')
+            Action::make('approve_finance_only')
                 ->label('Setujui (Finance)')
-                ->icon('heroicon-o-check-badge')
-                ->color('success')
+                ->icon('heroicon-o-check-circle')
+                ->color('gray')
                 ->requiresConfirmation()
                 ->visible(fn () => self::canApproveByFinance($this->getRecord()))
                 ->action(function (): void {
@@ -93,15 +94,15 @@ class ViewPurchaseRequest extends ViewRecord
                     ]);
 
                     Task::create([
-                        'for_role' => 'Staff Administrasi Gudang',
-                        'type' => 'pr_finance_approved_followup',
-                        'title' => 'PR Disetujui Finance - Tindak Lanjut Gudang',
-                        'message' => 'PR sudah disetujui Finance. Mohon lanjutkan proses pengadaan/penerimaan sesuai alur gudang.',
+                        'for_role' => 'Manager Operasional',
+                        'type' => 'po_manual_followup',
+                        'title' => 'PR Disetujui Finance - Lanjutkan ke PO',
+                        'message' => 'PR sudah disetujui Finance. Mohon Manager Operasional lanjutkan proses pembuatan PO.',
                         'payload' => [
                             'pr_ids' => [$record->id],
                             'project_id' => $record->project_id,
                             'project_code' => $record->project?->kode_proyek ?? ('#' . $record->project_id),
-                            'source' => 'purchase_requests_view_approve_finance',
+                            'source' => 'purchase_requests_view_approve_finance_only',
                         ],
                         'status' => 'pending',
                         'related_id' => $record->project_id,
@@ -112,7 +113,7 @@ class ViewPurchaseRequest extends ViewRecord
                         'user_id' => auth()->id(),
                         'action' => 'Approve',
                         'module' => 'Purchase Request',
-                        'description' => "Finance approve PR ID {$record->id}.",
+                        'description' => "Finance approve PR ID {$record->id} (tanpa auto-redirect PO).",
                         'ip_address' => request()?->ip(),
                     ]);
 

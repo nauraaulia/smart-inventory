@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\PurchaseOrderWorkflowController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
@@ -18,3 +19,14 @@ Route::get('livewire-{token}/update', function () {
 
     return redirect()->to($fallback);
 })->where('token', '[A-Za-z0-9]+');
+
+Route::middleware(['auth'])->group(function () {
+    Route::get('/purchase-orders/review', [PurchaseOrderWorkflowController::class, 'review'])->name('po.review');
+    Route::post('/purchase-orders/publish', [PurchaseOrderWorkflowController::class, 'publish'])->name('po.publish');
+    Route::get('/purchase-orders', [PurchaseOrderWorkflowController::class, 'index'])->name('po.index');
+    Route::get('/purchase-orders/{purchaseOrder}', [PurchaseOrderWorkflowController::class, 'show'])->name('po.show');
+    Route::get('/purchase-orders/{purchaseOrder}/print', [PurchaseOrderWorkflowController::class, 'print'])->name('po.print');
+    Route::post('/purchase-orders/{purchaseOrder}/receive', [PurchaseOrderWorkflowController::class, 'receive'])->name('po.receive');
+
+    Route::get('/inbounds/receive-po', [PurchaseOrderWorkflowController::class, 'inboundLookup'])->name('inbound.receive-po');
+});

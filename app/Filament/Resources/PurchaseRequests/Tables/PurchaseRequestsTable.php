@@ -4,6 +4,7 @@ namespace App\Filament\Resources\PurchaseRequests\Tables;
 
 use App\Models\PurchaseRequest;
 use App\Filament\Resources\PurchaseRequests\PurchaseRequestResource;
+use App\Filament\Resources\PurchaseOrders\PurchaseOrderResource;
 use App\Models\Task;
 use App\Models\UserLog;
 use App\Services\AI\PurchaseRequestSubmissionService;
@@ -21,6 +22,8 @@ class PurchaseRequestsTable
     {
         return $table
             ->poll('2s')
+            ->selectable(fn (): bool => in_array(auth()->user()?->role, ['Manager Operasional', 'Manager Operational', 'Manajer Operasional'], true))
+            ->currentSelectionLivewireProperty('selectedPrIds')
             ->columns([
                 TextColumn::make('project.kode_proyek')
                     ->label('Kode Proyek')
@@ -121,9 +124,6 @@ class PurchaseRequestsTable
                             ->body("{$result['submitted_count']} PR berhasil disubmit untuk project {$result['project_code']}.")
                             ->success()
                             ->send();
-                    })
-                    ->after(function ($livewire): void {
-                        $livewire->redirect(PurchaseRequestResource::getUrl('index'), navigate: true);
                     }),
                 Action::make('cancel_submission')
                     ->label('Batalkan Pengajuan')
@@ -198,17 +198,14 @@ class PurchaseRequestsTable
                             ->title('PR disetujui Manager')
                             ->success()
                             ->send();
-                    })
-                    ->after(function ($livewire): void {
-                        $livewire->redirect(PurchaseRequestResource::getUrl('index'), navigate: true);
                     }),
-                Action::make('approve_finance')
+                Action::make('approve_finance_only')
                     ->label('Setujui (Finance)')
-                    ->icon('heroicon-o-check-badge')
-                    ->color('success')
+                    ->icon('heroicon-o-check-circle')
+                    ->color('gray')
                     ->requiresConfirmation()
                     ->visible(fn (PurchaseRequest $record) => self::canApproveByFinance($record))
-                    ->action(function (PurchaseRequest $record): void {
+                    ->action(function (PurchaseRequest $record, $livewire): void {
                         $record->update([
                             'status' => 'approved',
                             'approved_by_finance' => auth()->id(),
@@ -216,15 +213,15 @@ class PurchaseRequestsTable
                         ]);
 
                         Task::create([
-                            'for_role' => 'Staff Administrasi Gudang',
-                            'type' => 'pr_finance_approved_followup',
-                            'title' => 'PR Disetujui Finance - Tindak Lanjut Gudang',
-                            'message' => 'PR sudah disetujui Finance. Mohon lanjutkan proses pengadaan/penerimaan sesuai alur gudang.',
+                            'for_role' => 'Manager Operasional',
+                            'type' => 'po_manual_followup',
+                            'title' => 'PR Disetujui Finance - Lanjutkan ke PO',
+                            'message' => 'PR sudah disetujui Finance. Mohon Manager Operasional lanjutkan proses pembuatan PO.',
                             'payload' => [
                                 'pr_ids' => [$record->id],
                                 'project_id' => $record->project_id,
                                 'project_code' => $record->project?->kode_proyek ?? ('#' . $record->project_id),
-                                'source' => 'purchase_requests_table_approve_finance',
+                                'source' => 'purchase_requests_table_approve_finance_only',
                             ],
                             'status' => 'pending',
                             'related_id' => $record->project_id,
@@ -235,7 +232,7 @@ class PurchaseRequestsTable
                             'user_id' => auth()->id(),
                             'action' => 'Approve',
                             'module' => 'Purchase Request',
-                            'description' => "Finance approve PR ID {$record->id}.",
+                            'description' => "Finance approve PR ID {$record->id} (tanpa auto-redirect PO).",
                             'ip_address' => request()?->ip(),
                         ]);
 
@@ -243,9 +240,6 @@ class PurchaseRequestsTable
                             ->title('PR disetujui Finance')
                             ->success()
                             ->send();
-                    })
-                    ->after(function ($livewire): void {
-                        $livewire->redirect(PurchaseRequestResource::getUrl('index', ['activeTab' => 'approved']), navigate: true);
                     }),
             ]);
     }

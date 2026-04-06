@@ -129,7 +129,14 @@ class PurchaseRequestResource extends Resource
 
     public static function getEloquentQuery(): Builder
     {
-        $query = parent::getEloquentQuery()->with(['project', 'material.defaultSupplier', 'requester']);
+        $query = parent::getEloquentQuery()->with([
+            'project',
+            'material.defaultSupplier',
+            'requester',
+            'draftApprover',
+            'managerApprover',
+            'financeApprover',
+        ]);
         $user = auth()->user();
 
         if (!$user) {
@@ -145,7 +152,7 @@ class PurchaseRequestResource extends Resource
         }
 
         if (self::isManager($user->role)) {
-            return $query->whereIn('status', ['pending_manager', 'pending_finance', 'approved', 'ordered', 'received']);
+            return $query->where('status', 'approved');
         }
 
         if (self::isFinance($user->role)) {
