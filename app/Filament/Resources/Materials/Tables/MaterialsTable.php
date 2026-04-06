@@ -145,9 +145,7 @@ class MaterialsTable
                     ->pluck('panjang')
                     ->map(function ($value) {
                         $num = (float) $value;
-                        return fmod($num, 1.0) === 0.0
-                            ? (string) (int) $num
-                            : rtrim(rtrim(number_format($num, 2, '.', ''), '0'), '.');
+                        return number_format($num, 1, '.', '');
                     })
                     ->values()
                     ->all();

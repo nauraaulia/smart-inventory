@@ -16,7 +16,7 @@ class ListPurchaseRequests extends ListRecords
 
     public function getTabs(): array
     {
-        return [
+        $tabs = [
             'all' => Tab::make('Semua PR')
                 ->badge($this->countVisiblePr()),
 
@@ -55,6 +55,18 @@ class ListPurchaseRequests extends ListRecords
                 ->badge($this->countVisiblePr('received'))
                 ->badgeColor('success'),
         ];
+
+        if (in_array(auth()->user()?->role, ['Finance', 'Keuangan'], true)) {
+            return array_intersect_key($tabs, array_flip([
+                'all',
+                'pending_finance',
+                'approved',
+                'ordered',
+                'received',
+            ]));
+        }
+
+        return $tabs;
     }
 
     protected function getHeaderActions(): array

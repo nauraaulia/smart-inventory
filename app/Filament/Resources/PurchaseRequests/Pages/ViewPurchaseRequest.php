@@ -4,6 +4,7 @@ namespace App\Filament\Resources\PurchaseRequests\Pages;
 
 use App\Filament\Resources\PurchaseRequests\PurchaseRequestResource;
 use App\Models\PurchaseRequest;
+use App\Models\Task;
 use App\Models\UserLog;
 use App\Services\AI\PurchaseRequestSubmissionService;
 use Filament\Actions\Action;
@@ -89,6 +90,22 @@ class ViewPurchaseRequest extends ViewRecord
                         'status' => 'approved',
                         'approved_by_finance' => auth()->id(),
                         'approved_by_finance_at' => now(),
+                    ]);
+
+                    Task::create([
+                        'for_role' => 'Staff Administrasi Gudang',
+                        'type' => 'pr_finance_approved_followup',
+                        'title' => 'PR Disetujui Finance - Tindak Lanjut Gudang',
+                        'message' => 'PR sudah disetujui Finance. Mohon lanjutkan proses pengadaan/penerimaan sesuai alur gudang.',
+                        'payload' => [
+                            'pr_ids' => [$record->id],
+                            'project_id' => $record->project_id,
+                            'project_code' => $record->project?->kode_proyek ?? ('#' . $record->project_id),
+                            'source' => 'purchase_requests_view_approve_finance',
+                        ],
+                        'status' => 'pending',
+                        'related_id' => $record->project_id,
+                        'related_type' => 'project',
                     ]);
 
                     UserLog::create([

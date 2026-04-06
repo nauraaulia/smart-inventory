@@ -278,10 +278,10 @@ class TaskApprovalService
         ]);
 
         Task::create([
-            'for_role' => 'Manager Operasional',
+            'for_role' => 'Staff Administrasi Gudang',
             'type' => 'po_manual_followup',
-            'title' => "PO Manual Project {$projectCode}",
-            'message' => 'Finance sudah ACC. Lanjutkan pemesanan barang (PO) secara manual.',
+            'title' => "Tindak Lanjut Gudang Project {$projectCode}",
+            'message' => 'Finance sudah ACC. Lanjutkan proses pengadaan/penerimaan sesuai alur gudang.',
             'payload' => [
                 'project_id' => $projectId,
                 'project_code' => $projectCode,

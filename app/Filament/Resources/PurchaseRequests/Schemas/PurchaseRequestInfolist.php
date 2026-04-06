@@ -19,7 +19,7 @@ class PurchaseRequestInfolist
                     ->placeholder('-'),
                 TextEntry::make('quantity')
                     ->label('Quantity')
-                    ->numeric(decimalPlaces: 2),
+                    ->numeric(decimalPlaces: 1),
                 TextEntry::make('priority')
                     ->label('Prioritas')
                     ->badge()

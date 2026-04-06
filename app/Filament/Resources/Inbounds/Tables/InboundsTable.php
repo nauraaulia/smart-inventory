@@ -24,7 +24,7 @@ class InboundsTable
                 // 2. Jumlah
                 TextColumn::make('quantity')
                     ->label('Jumlah')
-                    ->numeric()
+                    ->numeric(decimalPlaces: 1)
                     ->sortable(),
 
                 // 3. Satuan (Tambahan baru)
