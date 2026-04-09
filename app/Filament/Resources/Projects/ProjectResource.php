@@ -21,6 +21,8 @@ class ProjectResource extends Resource
 
     protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-folder';
 
+    protected static ?int $navigationSort = 1;
+
     protected static ?string $recordTitleAttribute = 'Project';
 
     private static function canManageProject(?string $role): bool

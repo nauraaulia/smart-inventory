@@ -11,9 +11,9 @@ use Illuminate\Support\Facades\DB;
 
 class PurchaseOrderInboundService
 {
-    public function receive(PurchaseOrder $purchaseOrder, User $actor, ?string $receiverName = null, array $receivedQuantities = []): int
+    public function receive(PurchaseOrder $purchaseOrder, User $actor, ?string $receiverName = null, ?int $shelfLocationId = null, array $receivedQuantities = []): int
     {
-        return DB::transaction(function () use ($purchaseOrder, $actor, $receiverName, $receivedQuantities) {
+        return DB::transaction(function () use ($purchaseOrder, $actor, $receiverName, $shelfLocationId, $receivedQuantities) {
             $po = PurchaseOrder::query()->lockForUpdate()->with(['items.material'])->findOrFail($purchaseOrder->id);
 
             if ($po->status !== 'waiting_inbound') {
@@ -60,7 +60,7 @@ class PurchaseOrderInboundService
                     'quantity' => $receiveQtySystem,
                     'entry_date' => now()->toDateString(),
                     'supplier_id' => $po->supplier_id,
-                    'shelf_location_id' => null,
+                    'shelf_location_id' => $shelfLocationId,
                     'satuan' => (string) ($item->unit_system ?: ($material->satuan ?: 'Meter')),
                     'penerima' => $receiverName ?: (string) ($actor->name ?? 'System'),
                     'jenis_inbound' => 'Baru',

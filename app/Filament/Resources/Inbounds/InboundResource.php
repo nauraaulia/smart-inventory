@@ -21,6 +21,8 @@ class InboundResource extends Resource
 
     protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-arrow-down-tray';
 
+    protected static ?int $navigationSort = 5;
+
     protected static ?string $recordTitleAttribute = 'Barang Masuk';
 
     public static function form(Schema $schema): Schema

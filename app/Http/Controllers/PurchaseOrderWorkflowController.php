@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Filament\Resources\Outbounds\OutboundResource;
 use App\Filament\Resources\PurchaseOrders\PurchaseOrderResource;
 use App\Models\PurchaseOrder;
 use App\Services\Inventory\PurchaseOrderInboundService;
@@ -143,6 +144,7 @@ class PurchaseOrderWorkflowController extends Controller
 
         $validated = $request->validate([
             'receiver_name' => ['nullable', 'string', 'max:255'],
+            'shelf_location_id' => ['required', 'integer', 'exists:shelf_locations,id'],
             'received_quantities' => ['nullable', 'array'],
             'received_quantities.*' => ['nullable', 'numeric', 'min:0'],
         ]);
@@ -175,6 +177,7 @@ class PurchaseOrderWorkflowController extends Controller
             purchaseOrder: $purchaseOrder,
             actor: auth()->user(),
             receiverName: $receiverName,
+            shelfLocationId: (int) $validated['shelf_location_id'],
             receivedQuantities: $receivedQuantities,
         );
 
@@ -182,7 +185,8 @@ class PurchaseOrderWorkflowController extends Controller
             return back()->with('error', 'PO tidak dalam status waiting inbound atau tidak ada item yang bisa diproses.');
         }
 
-        return back()->with('success', "PO {$purchaseOrder->po_number} berhasil diterima. Inbound dibuat: {$created} item.");
+        return redirect()->to(OutboundResource::getUrl('index'))
+            ->with('success', "PO {$purchaseOrder->po_number} berhasil diterima. Inbound dibuat: {$created} item.");
     }
 
     private function isManager(): bool

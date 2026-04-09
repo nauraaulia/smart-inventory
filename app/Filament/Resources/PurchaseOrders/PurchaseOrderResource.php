@@ -22,6 +22,8 @@ class PurchaseOrderResource extends Resource
 
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedClipboardDocumentList;
 
+    protected static ?int $navigationSort = 4;
+
     protected static ?string $navigationLabel = 'Purchase Orders';
 
     protected static ?string $modelLabel = 'Purchase Order';

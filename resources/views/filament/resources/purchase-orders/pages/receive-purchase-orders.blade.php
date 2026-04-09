@@ -26,6 +26,9 @@
         @endif
 
         @if ($purchaseOrder)
+            @php
+                $isInboundLocked = $purchaseOrder->status !== 'waiting_inbound';
+            @endphp
             <x-filament::section>
                 <x-slot name="heading">PO {{ $purchaseOrder->po_number }}</x-slot>
 
@@ -34,12 +37,24 @@
                     <span class="inline-flex rounded-md bg-primary-50 px-2 py-1 font-medium text-primary-700 dark:bg-primary-900/30 dark:text-primary-300">Status: {{ $purchaseOrder->progress_status ?? $purchaseOrder->status }}</span>
                 </div>
 
-                <form method="POST" action="{{ route('po.receive', ['purchaseOrder' => $purchaseOrder->id]) }}" class="space-y-4">
+                <form method="POST" action="{{ route('po.receive', ['purchaseOrder' => $purchaseOrder->id]) }}" class="relative space-y-4" x-data="{ shelfLocationId: @js((string) old('shelf_location_id', $selectedShelfLocationId)), isSubmitting: false, isLocked: @js($isInboundLocked) }" x-on:submit.capture="isSubmitting = true">
                     @csrf
+
+                    <div x-show="isSubmitting" class="absolute inset-0 z-20 cursor-wait rounded-xl bg-white/30 dark:bg-black/20"></div>
 
                     <div>
                         <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">Nama Penerima</label>
-                        <input class="block w-full rounded-lg border-gray-300 px-3 py-2 text-sm shadow-sm transition focus:border-primary-500 focus:ring-primary-500 dark:border-white/15 dark:bg-white/5" type="text" name="receiver_name" value="{{ auth()->user()?->name }}">
+                        <input x-bind:readonly="isSubmitting || isLocked" class="block w-full rounded-lg border-gray-300 px-3 py-2 text-sm shadow-sm transition focus:border-primary-500 focus:ring-primary-500 dark:border-white/15 dark:bg-white/5" type="text" name="receiver_name" value="{{ old('receiver_name', $receiverName) }}">
+                    </div>
+
+                    <div>
+                        <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">Lokasi Rak</label>
+                        <select x-model="shelfLocationId" x-bind:disabled="isSubmitting || isLocked" name="shelf_location_id" required class="block w-full rounded-lg border-gray-300 px-3 py-2 text-sm shadow-sm transition focus:border-primary-500 focus:ring-primary-500 dark:border-white/15 dark:bg-white/5">
+                            <option value="">Pilih lokasi rak</option>
+                            @foreach ($shelfLocationOptions as $id => $label)
+                                <option value="{{ $id }}" @selected((string) old('shelf_location_id', $selectedShelfLocationId) === (string) $id)>{{ $label }}</option>
+                            @endforeach
+                        </select>
                     </div>
 
                     <div class="overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
@@ -71,7 +86,7 @@
                                         </span>
                                     </td>
                                     <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">
-                                        <input class="block w-full rounded-lg border-gray-300 px-3 py-2 text-sm shadow-sm transition focus:border-primary-500 focus:ring-primary-500 dark:border-white/15 dark:bg-white/5" type="number" step="0.01" min="0" max="{{ $remaining }}" name="received_quantities[{{ $item->id }}]" value="{{ $remaining > 0 ? number_format($remaining, 2, '.', '') : '0' }}">
+                                        <input x-bind:readonly="isSubmitting || isLocked" class="block w-full rounded-lg border-gray-300 px-3 py-2 text-sm shadow-sm transition focus:border-primary-500 focus:ring-primary-500 dark:border-white/15 dark:bg-white/5" type="number" step="0.01" min="0" max="{{ $remaining }}" name="received_quantities[{{ $item->id }}]" value="{{ $remaining > 0 ? number_format($remaining, 2, '.', '') : '0' }}">
                                     </td>
                                 </tr>
                             @endforeach
@@ -80,11 +95,21 @@
                         </div>
                     </div>
 
-                    @if ($purchaseOrder->status === 'waiting_inbound')
-                        <x-filament::button color="danger" type="submit">
-                            Terima Inbound (Partial/Full)
+                    <div class="flex items-center justify-end gap-2">
+                        <x-filament::button
+                            tag="a"
+                            color="gray"
+                            :href="\App\Filament\Resources\PurchaseOrders\PurchaseOrderResource::getUrl('index')"
+                        >
+                            Close
                         </x-filament::button>
-                    @endif
+
+                        @if ($purchaseOrder->status === 'waiting_inbound')
+                            <x-filament::button color="danger" type="submit" x-bind:disabled="isSubmitting || isLocked || !shelfLocationId">
+                                Terima Inbound
+                            </x-filament::button>
+                        @endif
+                    </div>
                 </form>
             </x-filament::section>
         @endif

@@ -23,6 +23,8 @@ class PurchaseRequestResource extends Resource
 
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedDocumentText;
 
+    protected static ?int $navigationSort = 3;
+
     protected static ?string $navigationLabel = 'Purchase Request';
 
     protected static ?string $modelLabel = 'Purchase Request';
