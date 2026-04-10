@@ -17,7 +17,7 @@ class ViewPurchaseOrder extends ViewRecord
                 ->label('Cetak PDF')
                 ->icon('heroicon-o-printer')
                 ->color('gray')
-                ->visible(fn (): bool => in_array(auth()->user()?->role, ['Manager Operasional', 'Manager Operational', 'Manajer Operasional', 'Finance', 'Keuangan'], true))
+                ->visible(fn (): bool => in_array(auth()->user()?->role, ['Manager Operasional', 'Manager Operasional', 'Manajer Operasional', 'Finance', 'Keuangan'], true))
                 ->url(fn (): string => route('po.print', ['purchaseOrder' => $this->record->id]))
                 ->openUrlInNewTab(),
             Action::make('receive_po')

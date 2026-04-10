@@ -58,7 +58,7 @@ class PurchaseRequestResource extends Resource
 
     private static function isManager(?string $role): bool
     {
-        return in_array($role, ['Manager Operasional', 'Manager Operational', 'Manajer Operasional'], true);
+        return in_array($role, ['Manager Operasional', 'Manager Operasional', 'Manajer Operasional'], true);
     }
 
     private static function isFinance(?string $role): bool

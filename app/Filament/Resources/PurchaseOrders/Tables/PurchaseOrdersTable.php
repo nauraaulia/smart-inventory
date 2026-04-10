@@ -104,8 +104,11 @@ class PurchaseOrdersTable
     {
         return in_array(auth()->user()?->role, [
             'Manager Operasional',
+            'Manager Operasional',
             'Manager Operational',
             'Manajer Operasional',
+            'Finance',
+            'Keuangan',
             'Finance',
             'Keuangan',
         ], true);

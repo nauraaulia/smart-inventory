@@ -36,11 +36,9 @@ class TasksTable
                     ->color('info')
                     ->formatStateUsing(function ($state, $record) {
                         if (!$record) return $state;
-                        // Untuk task operasional, tampilkan label tanpa AI
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             return 'Alokasi Inbound';
                         }
-                        // Untuk task AI lain, tampilkan value asli
                         return $state;
                     }),
 
@@ -49,11 +47,9 @@ class TasksTable
                     ->searchable()
                     ->formatStateUsing(function ($state, $record) {
                         if (!$record) return $state;
-                        // Untuk task operasional, judul tanpa AI
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             return 'Usulan Alokasi Inbound';
                         }
-                        // Untuk task AI lain, tetap pakai AI
                         if (str_starts_with($record->type, 'ai_')) {
                             return 'AI: Konfirmasi Kebutuhan Material Proyek';
                         }
@@ -63,15 +59,13 @@ class TasksTable
                 TextColumn::make('project_code')
                     ->label('Kode Proyek')
                     ->searchable()
-                    ->visible(fn ($record) => !$record || $record->type !== 'ai_inbound_allocation_suggestion'),
-
+                    ->hidden(fn ($livewire) => $livewire->activeTab === 'operasional'),
 
                 TextColumn::make('acc_staff')
                     ->label('ACC Staff')
                     ->getStateUsing(function ($record) {
                         if (!$record) return '-';
                         $status = data_get($record->payload, 'approval_trail.staff.status', '-');
-                        // Untuk task operasional, jika sudah di-ACC tampilkan status, jika belum tetap '-'
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             return $record->status !== 'pending' ? ($status === '-' ? 'approved' : $status) : '-';
                         }
@@ -110,10 +104,15 @@ class TasksTable
                         }
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             $suggestions = collect(data_get($record->payload, 'allocation_suggestions', []));
+
+                            $suggestedProjectIds = $suggestions->pluck('project_id')->toArray();
+
                             $projectOptions = \App\Models\Project::query()
+                                ->whereIn('id', $suggestedProjectIds)
                                 ->orderBy('kode_proyek')
                                 ->pluck('kode_proyek', 'id')
                                 ->toArray();
+
                             return [
                                 \Filament\Forms\Components\Repeater::make('manual_allocation')
                                     ->label('Alokasi ke Proyek')
@@ -121,7 +120,14 @@ class TasksTable
                                         \Filament\Forms\Components\Select::make('project_id')
                                             ->label('Proyek')
                                             ->options($projectOptions)
-                                            ->required(),
+                                            ->required()
+                                            ->reactive()
+                                            ->afterStateUpdated(function ($state, callable $set) use ($suggestions) {
+                                                $match = $suggestions->firstWhere('project_id', (int) $state);
+                                                if ($match) {
+                                                    $set('qty', $match['suggested_qty']);
+                                                }
+                                            }),
                                         \Filament\Forms\Components\TextInput::make('qty')
                                             ->label('Qty')
                                             ->numeric()
