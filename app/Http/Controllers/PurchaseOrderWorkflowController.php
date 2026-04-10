@@ -12,6 +12,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
+use Throwable;
 
 class PurchaseOrderWorkflowController extends Controller
 {
@@ -173,16 +174,28 @@ class PurchaseOrderWorkflowController extends Controller
             }
         }
 
-        $created = $service->receive(
-            purchaseOrder: $purchaseOrder,
-            actor: auth()->user(),
-            receiverName: $receiverName,
-            shelfLocationId: (int) $validated['shelf_location_id'],
-            receivedQuantities: $receivedQuantities,
-        );
+        try {
+            $created = $service->receive(
+                purchaseOrder: $purchaseOrder,
+                actor: auth()->user(),
+                receiverName: $receiverName,
+                shelfLocationId: (int) $validated['shelf_location_id'],
+                receivedQuantities: $receivedQuantities,
+            );
+        } catch (ValidationException $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return back()
+                ->withInput()
+                ->with('error', 'Gagal menerima inbound PO: ' . $exception->getMessage());
+        }
 
         if ($created <= 0) {
-            return back()->with('error', 'PO tidak dalam status waiting inbound atau tidak ada item yang bisa diproses.');
+            return back()
+                ->withInput()
+                ->with('error', 'PO tidak dalam status waiting inbound atau tidak ada item yang bisa diproses.');
         }
 
         return redirect()->to(OutboundResource::getUrl('index'))

@@ -12,6 +12,19 @@
             </x-filament::section>
         @endif
 
+        @if ($errors->any())
+            <x-filament::section>
+                <div class="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-300">
+                    <p class="mb-2 font-medium">Terjadi kesalahan saat menerima inbound:</p>
+                    <ul class="list-disc space-y-1 pl-5">
+                        @foreach ($errors->all() as $error)
+                            <li>{{ $error }}</li>
+                        @endforeach
+                    </ul>
+                </div>
+            </x-filament::section>
+        @endif
+
         <x-filament::section>
             <form method="GET" action="{{ \App\Filament\Resources\PurchaseOrders\PurchaseOrderResource::getUrl('receive') }}" class="flex flex-col gap-2 sm:flex-row">
                 <input class="block w-full rounded-lg border-gray-300 px-3 py-2 text-sm shadow-sm transition focus:border-primary-500 focus:ring-primary-500 dark:border-white/15 dark:bg-white/5" type="text" name="po_number" value="{{ $poNumber }}" placeholder="Contoh: PO/SI/IV/2026/0001">
@@ -37,7 +50,7 @@
                     <span class="inline-flex rounded-md bg-primary-50 px-2 py-1 font-medium text-primary-700 dark:bg-primary-900/30 dark:text-primary-300">Status: {{ $purchaseOrder->progress_status ?? $purchaseOrder->status }}</span>
                 </div>
 
-                <form method="POST" action="{{ route('po.receive', ['purchaseOrder' => $purchaseOrder->id]) }}" class="relative space-y-4" x-data="{ shelfLocationId: @js((string) old('shelf_location_id', $selectedShelfLocationId)), isSubmitting: false, isLocked: @js($isInboundLocked) }" x-on:submit.capture="isSubmitting = true">
+                <form method="POST" action="{{ route('po.receive', ['purchaseOrder' => $purchaseOrder->id]) }}" class="relative space-y-4" x-data="{ shelfLocationId: @js((string) old('shelf_location_id', $selectedShelfLocationId)), isSubmitting: false, isLocked: @js($isInboundLocked) }" x-on:submit="isSubmitting = true">
                     @csrf
 
                     <div x-show="isSubmitting" class="absolute inset-0 z-20 cursor-wait rounded-xl bg-white/30 dark:bg-black/20"></div>
@@ -49,12 +62,15 @@
 
                     <div>
                         <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">Lokasi Rak</label>
-                        <select x-model="shelfLocationId" x-bind:disabled="isSubmitting || isLocked" name="shelf_location_id" required class="block w-full rounded-lg border-gray-300 px-3 py-2 text-sm shadow-sm transition focus:border-primary-500 focus:ring-primary-500 dark:border-white/15 dark:bg-white/5">
+                        <select x-model="shelfLocationId" x-bind:disabled="isLocked" name="shelf_location_id" required class="block w-full rounded-lg border-gray-300 px-3 py-2 text-sm shadow-sm transition focus:border-primary-500 focus:ring-primary-500 dark:border-white/15 dark:bg-white/5">
                             <option value="">Pilih lokasi rak</option>
                             @foreach ($shelfLocationOptions as $id => $label)
                                 <option value="{{ $id }}" @selected((string) old('shelf_location_id', $selectedShelfLocationId) === (string) $id)>{{ $label }}</option>
                             @endforeach
                         </select>
+                        @error('shelf_location_id')
+                            <p class="mt-1 text-xs text-red-600 dark:text-red-300">{{ $message }}</p>
+                        @enderror
                     </div>
 
                     <div class="overflow-hidden rounded-xl border border-gray-200 dark:border-white/10">
@@ -86,7 +102,10 @@
                                         </span>
                                     </td>
                                     <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">
-                                        <input x-bind:readonly="isSubmitting || isLocked" class="block w-full rounded-lg border-gray-300 px-3 py-2 text-sm shadow-sm transition focus:border-primary-500 focus:ring-primary-500 dark:border-white/15 dark:bg-white/5" type="number" step="0.01" min="0" max="{{ $remaining }}" name="received_quantities[{{ $item->id }}]" value="{{ $remaining > 0 ? number_format($remaining, 2, '.', '') : '0' }}">
+                                        <input x-bind:readonly="isSubmitting || isLocked" class="block w-full rounded-lg border-gray-300 px-3 py-2 text-sm shadow-sm transition focus:border-primary-500 focus:ring-primary-500 dark:border-white/15 dark:bg-white/5" type="number" step="0.01" min="0" max="{{ $remaining }}" name="received_quantities[{{ $item->id }}]" value="{{ old('received_quantities.' . $item->id, $remaining > 0 ? number_format($remaining, 2, '.', '') : '0') }}">
+                                        @error('received_quantities.' . $item->id)
+                                            <p class="mt-1 text-xs text-red-600 dark:text-red-300">{{ $message }}</p>
+                                        @enderror
                                     </td>
                                 </tr>
                             @endforeach

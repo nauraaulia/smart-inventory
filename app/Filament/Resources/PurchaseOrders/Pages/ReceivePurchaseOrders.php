@@ -28,7 +28,7 @@ class ReceivePurchaseOrders extends Page
 
     public function mount(): void
     {
-        abort_unless(in_array(auth()->user()?->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang'], true), 403);
+        abort_unless(in_array(auth()->user()?->role, ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang', 'Administrator IT'], true), 403);
 
         $this->shelfLocationOptions = ShelfLocation::query()
             ->orderBy('kode_lokasi')
