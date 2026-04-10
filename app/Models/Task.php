@@ -7,6 +7,17 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Task extends Model
 {
+    public function getProjectCodeAttribute()
+    {
+        $code = (string) data_get($this->payload, 'project_code', '');
+        if ($code !== '') {
+            return $code;
+        }
+        if (isset($this->payload['project_id'])) {
+            return \App\Models\Project::query()->whereKey($this->payload['project_id'])->value('kode_proyek') ?: '#' . $this->payload['project_id'];
+        }
+        return null;
+    }
     protected $guarded = [];
 
     protected $casts = [

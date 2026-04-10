@@ -29,6 +29,11 @@ class OutboundsTable
                     ->label('Mulai')
                     ->date('d M Y')
                     ->sortable(),
+                TextColumn::make('kelengkapan')
+                    ->label('Kelengkapan')
+                    ->getStateUsing(fn (Project $record): string => $record->outbound_is_complete ? 'Lengkap' : 'Belum Lengkap')
+                    ->badge()
+                    ->color(fn (string $state): string => $state === 'Lengkap' ? 'success' : 'warning'),
                 TextColumn::make('status')
                     ->badge()
                     ->color(fn (string $state): string => $state === 'Approved' ? 'info' : 'gray'),
@@ -47,7 +52,7 @@ class OutboundsTable
                 Action::make('process_outbound')
                     ->label('Proses Outbound')
                     ->icon('heroicon-o-truck')
-                    ->color('warning')
+                    ->color(fn (Project $record): string => $record->outbound_is_complete ? 'success' : 'warning')
                     ->url(fn (Project $record): string => OutboundResource::getUrl('view', ['record' => $record])),
             ]);
     }

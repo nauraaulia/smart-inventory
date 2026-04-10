@@ -235,6 +235,49 @@ class Project extends Model
         return $this->purchaseRequests()->where('status', $status)->count();
     }
 
+    public function getOutboundIsCompleteAttribute(): bool
+    {
+        $requiredByMaterial = $this->relationLoaded('items')
+            ? $this->items
+                ->groupBy('material_id')
+                ->map(fn ($items) => (float) $items->sum('jumlah_diminta'))
+            : $this->items()
+                ->selectRaw('material_id, SUM(jumlah_diminta) as total_required')
+                ->groupBy('material_id')
+                ->pluck('total_required', 'material_id')
+                ->map(fn ($value) => (float) $value);
+
+        if ($requiredByMaterial->isEmpty()) {
+            return false;
+        }
+
+        $bookedByMaterial = $this->relationLoaded('bookedPieces')
+            ? $this->bookedPieces
+                ->where('status', 'booked')
+                ->groupBy('material_id')
+                ->map(fn ($pieces) => (float) $pieces->sum('panjang'))
+            : $this->bookedPieces()
+                ->where('status', 'booked')
+                ->selectRaw('material_id, SUM(panjang) as total_booked')
+                ->groupBy('material_id')
+                ->pluck('total_booked', 'material_id')
+                ->map(fn ($value) => (float) $value);
+
+        foreach ($requiredByMaterial as $materialId => $requiredQty) {
+            if ($requiredQty <= 0) {
+                continue;
+            }
+
+            $bookedQty = (float) ($bookedByMaterial[(int) $materialId] ?? 0);
+
+            if ($bookedQty + 0.00001 < $requiredQty) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
 
 
     

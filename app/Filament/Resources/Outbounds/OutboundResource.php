@@ -65,6 +65,10 @@ class OutboundResource extends Resource
         return parent::getEloquentQuery()
             ->whereIn('status', ['Pending', 'Approved'])
             ->whereHas('bookedPieces', fn (Builder $query) => $query->where('status', 'booked'))
+            ->with([
+                'items:id,project_id,material_id,jumlah_diminta',
+                'bookedPieces:id,booked_for_project_id,material_id,panjang,status',
+            ])
             ->withCount([
                 'bookedPieces as outbound_booked_count' => fn (Builder $query) => $query->where('status', 'booked'),
             ]);

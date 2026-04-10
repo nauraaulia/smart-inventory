@@ -22,7 +22,9 @@ class TasksTable
             ->poll('1s')
             ->columns([
                 TextColumn::make('id')
-                    ->sortable(),
+                    ->label('ID')
+                    ->sortable()
+                    ->formatStateUsing(fn ($state) => 'Task #' . $state),
 
                 TextColumn::make('for_role')
                     ->label('Untuk')
@@ -32,24 +34,49 @@ class TasksTable
                     ->label('Tipe')
                     ->badge()
                     ->color('info')
-                    ->formatStateUsing(function ($state) {
-                        return match ($state) {
-                            'ai_booking_suggestion' => 'Rekomendasi Booking',
-                            'ai_inbound_allocation_suggestion' => 'Alokasi Inbound',
-                            'pr_manager_approval' => 'Approval Manager PR',
-                            'pr_finance_approval' => 'Approval Finance PR',
-                            'pr_revision' => 'Revisi PR',
-                            default => ucfirst(str_replace('_', ' ', $state)),
-                        };
+                    ->formatStateUsing(function ($state, $record) {
+                        if (!$record) return $state;
+                        // Untuk task operasional, tampilkan label tanpa AI
+                        if ($record->type === 'ai_inbound_allocation_suggestion') {
+                            return 'Alokasi Inbound';
+                        }
+                        // Untuk task AI lain, tampilkan value asli
+                        return $state;
                     }),
 
-                TextColumn::make('related_type')
-                    ->label('Relasi'),
+                TextColumn::make('title')
+                    ->label('Judul')
+                    ->searchable()
+                    ->formatStateUsing(function ($state, $record) {
+                        if (!$record) return $state;
+                        // Untuk task operasional, judul tanpa AI
+                        if ($record->type === 'ai_inbound_allocation_suggestion') {
+                            return 'Usulan Alokasi Inbound';
+                        }
+                        // Untuk task AI lain, tetap pakai AI
+                        if (str_starts_with($record->type, 'ai_')) {
+                            return 'AI: Konfirmasi Kebutuhan Material Proyek';
+                        }
+                        return $state;
+                    }),
+
+                TextColumn::make('project_code')
+                    ->label('Kode Proyek')
+                    ->searchable()
+                    ->visible(fn ($record) => !$record || $record->type !== 'ai_inbound_allocation_suggestion'),
 
 
                 TextColumn::make('acc_staff')
                     ->label('ACC Staff')
-                    ->getStateUsing(fn (Task $record) => data_get($record->payload, 'approval_trail.staff.status', '-'))
+                    ->getStateUsing(function ($record) {
+                        if (!$record) return '-';
+                        $status = data_get($record->payload, 'approval_trail.staff.status', '-');
+                        // Untuk task operasional, jika sudah di-ACC tampilkan status, jika belum tetap '-'
+                        if ($record->type === 'ai_inbound_allocation_suggestion') {
+                            return $record->status !== 'pending' ? ($status === '-' ? 'approved' : $status) : '-';
+                        }
+                        return $status;
+                    })
                     ->badge()
                     ->color(fn (string $state): string => $state === 'approved' ? 'success' : 'gray'),
 

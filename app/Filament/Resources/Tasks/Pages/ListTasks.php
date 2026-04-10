@@ -17,7 +17,7 @@ class ListTasks extends ListRecords
     {
         return [
             'ai' => Tab::make('Task AI')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('type', 'like', 'ai_%')->whereNot('type', 'ai_inbound_allocation_suggestion'))
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('type', 'like', 'ai_%')->where('type', '!=', 'ai_inbound_allocation_suggestion'))
                 ->badge($this->countTasksByType('ai'))
                 ->badgeColor('info'),
 
@@ -51,7 +51,7 @@ class ListTasks extends ListRecords
         $query = TaskResource::getEloquentQuery();
 
         if ($type === 'ai') {
-            $query->where('type', 'like', 'ai_%')->whereNot('type', 'ai_inbound_allocation_suggestion');
+            $query->where('type', 'like', 'ai_%')->where('type', '!=', 'ai_inbound_allocation_suggestion');
         } elseif ($type === 'operasional') {
             $query->where('type', 'ai_inbound_allocation_suggestion');
         }

@@ -6,12 +6,16 @@ use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Inbound;
 use App\Models\Project;
+use App\Models\ProjectItem;
 use App\Models\PurchaseRequest;
 use App\Models\Supplier;
 use App\Models\Task;
 use App\Models\User;
 use App\Models\UserLog;
 use Carbon\Carbon;
+use Filament\Actions\Action;
+use Filament\Notifications\Events\DatabaseNotificationsSent;
+use Filament\Notifications\Notification;
 use Illuminate\Support\Facades\DB;
 
 class TaskApprovalService
@@ -21,6 +25,7 @@ class TaskApprovalService
         DB::transaction(function () use ($task, $actor, $options) {
             match ($task->type) {
                 'ai_booking_suggestion' => $this->approveAiBookingSuggestion($task, $actor, $options),
+                'ai_inbound_allocation_suggestion' => $this->approveInboundAllocationSuggestion($task, $actor),
                 'pr_manager_approval' => $this->approveManagerPr($task, $actor),
                 'pr_finance_approval' => $this->approveFinancePr($task, $actor),
                 'pr_revision' => $this->approvePrRevision($task, $actor),
@@ -81,6 +86,14 @@ class TaskApprovalService
             'status' => 'approved',
             'by_user_id' => $actor->id,
             'at' => now()->toDateTimeString(),
+        ]);
+
+        data_set($payload, 'recommendation_lock', [
+            'locked' => true,
+            'locked_by_user_id' => $actor->id,
+            'locked_at' => now()->toDateTimeString(),
+            'reason' => 'Booking dan draft PR dari Task AI sudah dikonfirmasi, rekomendasi dikunci sebagai snapshot historis.',
+            'snapshot_ai_summary' => data_get($payload, 'ai_summary', []),
         ]);
 
         $task->update([
@@ -183,6 +196,108 @@ class TaskApprovalService
         ]);
     }
 
+    private function approveInboundAllocationSuggestion(Task $task, User $actor, array $options = []): void
+    {
+        $payload = $task->payload ?? [];
+        $pieceId = (int) data_get($payload, 'piece_id');
+        $manualAlloc = collect($options['manual_allocation'] ?? []);
+        $suggestions = $manualAlloc->isNotEmpty()
+            ? $manualAlloc->map(fn($row) => [
+                'project_id' => (int) ($row['project_id'] ?? 0),
+                'suggested_qty' => (float) ($row['qty'] ?? 0),
+            ])
+            : collect(data_get($payload, 'allocation_suggestions', []));
+
+        if ($pieceId <= 0 || $suggestions->isEmpty()) {
+            $this->markDone($task, $actor);
+
+            return;
+        }
+
+        /** @var MaterialPiece|null $piece */
+        $piece = MaterialPiece::query()->lockForUpdate()->find($pieceId);
+
+        if (!$piece || $piece->status !== 'available') {
+            data_set($payload, 'execution_result', [
+                'status' => 'skipped',
+                'reason' => 'Piece sudah tidak available saat approval diproses.',
+                'piece_id' => $pieceId,
+            ]);
+
+            $task->update([
+                'status' => 'done',
+                'handled_by' => $actor->id,
+                'handled_at' => now(),
+                'message' => 'Usulan ditutup karena piece sudah tidak available.',
+                'payload' => $payload,
+            ]);
+
+            return;
+        }
+
+        $remaining = (float) $piece->panjang;
+        $allocations = [];
+
+        foreach ($suggestions as $row) {
+            if ($remaining <= 0) {
+                break;
+            }
+
+            $projectId = (int) data_get($row, 'project_id');
+            $requestedQty = (float) data_get($row, 'suggested_qty', 0);
+
+            if ($projectId <= 0 || $requestedQty <= 0) {
+                continue;
+            }
+
+            $outstanding = $this->outstandingNeed(
+                projectId: $projectId,
+                materialId: (int) $piece->material_id,
+            );
+
+            if ($outstanding <= 0) {
+                continue;
+            }
+
+            $allocQty = min($remaining, $requestedQty, $outstanding);
+
+            if ($allocQty <= 0) {
+                continue;
+            }
+
+            $this->allocatePortionFromSinglePiece($piece, $projectId, $allocQty);
+            $piece->refresh();
+            $remaining = (float) $piece->panjang;
+
+            $allocations[] = [
+                'project_id' => $projectId,
+                'project_code' => $this->projectCodeFromPayload(['project_id' => $projectId], $projectId),
+                'allocated_qty' => round($allocQty, 2),
+            ];
+
+            if ($piece->status !== 'available') {
+                break;
+            }
+        }
+
+        data_set($payload, 'execution_result', [
+            'status' => 'processed',
+            'piece_id' => $pieceId,
+            'allocated_rows' => $allocations,
+            'remaining_piece_length' => $piece->status === 'available' ? (float) $piece->panjang : 0,
+        ]);
+
+        $task->update([
+            'status' => 'done',
+            'handled_by' => $actor->id,
+            'handled_at' => now(),
+            'message' => empty($allocations)
+                ? 'Usulan disetujui, tetapi kebutuhan proyek sudah terpenuhi sehingga tidak ada booking baru.'
+                : 'Usulan disetujui dan alokasi inbound manual sudah dibooking sesuai kebutuhan terbaru.',
+            'payload' => $payload,
+        ]);
+    }
+
     private function buildAiApprovalMessage(
         string $defaultMessage,
         bool $generatePr,
@@ -277,21 +392,27 @@ class TaskApprovalService
             'payload' => $payload,
         ]);
 
-        Task::create([
-            'for_role' => 'Manager Operasional',
-            'type' => 'po_manual_followup',
-            'title' => "Lanjutkan PO Project {$projectCode}",
-            'message' => 'Finance sudah ACC. Manager Operasional dapat melanjutkan proses pembuatan PO.',
-            'payload' => [
-                'project_id' => $projectId,
-                'project_code' => $projectCode,
-                'pr_ids' => $prIds,
-                'approval_trail' => data_get($payload, 'approval_trail', []),
-            ],
-            'status' => 'pending',
-            'related_id' => $projectId,
-            'related_type' => 'project',
-        ]);
+        $managerRecipients = User::query()
+            ->whereIn('role', ['Manager Operasional', 'Manajer Operasional'])
+            ->get();
+
+        if ($managerRecipients->isNotEmpty()) {
+            $notification = Notification::make()
+                ->title("Finance ACC - Lanjutkan PO Project {$projectCode}")
+                ->body('Finance sudah menyetujui PR. Silakan lanjutkan proses pembuatan PO.')
+                ->actions([
+                    Action::make('open_po_review')
+                        ->label('Buka Review PO')
+                        ->button()
+                        ->url('/admin/purchase-orders/review?pr_ids=' . urlencode(implode(',', $prIds))),
+                ])
+                ->success();
+
+            foreach ($managerRecipients as $recipient) {
+                $recipient->notifyNow($notification->toDatabase());
+                DatabaseNotificationsSent::dispatch($recipient);
+            }
+        }
     }
 
     private function approvePrRevision(Task $task, User $actor): void
@@ -402,6 +523,68 @@ class TaskApprovalService
             'handled_by' => $actor->id,
             'handled_at' => now(),
             'payload' => $payload,
+        ]);
+    }
+
+    private function outstandingNeed(int $projectId, int $materialId): float
+    {
+        $requested = (float) ProjectItem::query()
+            ->where('project_id', $projectId)
+            ->where('material_id', $materialId)
+            ->sum('jumlah_diminta');
+
+        if ($requested <= 0) {
+            $requested = (float) PurchaseRequest::query()
+                ->where('project_id', $projectId)
+                ->where('material_id', $materialId)
+                ->whereIn('status', ['approved', 'ordered', 'pending_finance', 'pending_manager'])
+                ->sum('quantity');
+        }
+
+        $booked = (float) MaterialPiece::query()
+            ->where('booked_for_project_id', $projectId)
+            ->where('material_id', $materialId)
+            ->whereIn('status', ['booked', 'used'])
+            ->sum('panjang');
+
+        return max(0, round($requested - $booked, 2));
+    }
+
+    private function allocatePortionFromSinglePiece(MaterialPiece $piece, int $projectId, float $allocated): void
+    {
+        if ($allocated <= 0) {
+            return;
+        }
+
+        $pieceLength = (float) $piece->panjang;
+
+        if ($pieceLength <= ($allocated + 0.00001)) {
+            $piece->update([
+                'status' => 'booked',
+                'booked_for_project_id' => $projectId,
+                'booked_at' => now(),
+                'keterangan' => trim(($piece->keterangan ?? '') . ' | Booking dari approval usulan alokasi inbound manual.'),
+            ]);
+
+            return;
+        }
+
+        $piece->update([
+            'panjang' => $this->decimal($pieceLength - $allocated),
+        ]);
+
+        MaterialPiece::create([
+            'material_id' => $piece->material_id,
+            'inbound_id' => $piece->inbound_id,
+            'booked_for_project_id' => $projectId,
+            'shelf_location_id' => $piece->shelf_location_id,
+            'supplier_id' => $piece->supplier_id,
+            'panjang' => $this->decimal($allocated),
+            'unit_price' => $piece->unit_price,
+            'status' => 'booked',
+            'sumber' => 'split_booking',
+            'booked_at' => now(),
+            'keterangan' => 'Split booking dari approval usulan alokasi inbound manual.',
         ]);
     }
 
