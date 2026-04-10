@@ -8,6 +8,8 @@ use App\Models\PurchaseRequest;
 use App\Models\Task;
 use App\Models\UserLog;
 use App\Services\AI\PurchaseRequestSubmissionService;
+use Carbon\Carbon;
+use Carbon\CarbonInterface;
 use Filament\Actions\Action;
 use Filament\Forms\Components\Textarea;
 use Filament\Notifications\Notification;
@@ -16,6 +18,121 @@ use Filament\Resources\Pages\ViewRecord;
 class ViewPurchaseRequest extends ViewRecord
 {
     protected static string $resource = PurchaseRequestResource::class;
+
+    protected string $view = 'filament.resources.purchase-requests.pages.view-purchase-request';
+
+    public function mount(int|string $record): void
+    {
+        parent::mount($record);
+
+        /** @var PurchaseRequest $pr */
+        $pr = $this->getRecord();
+        $pr->load([
+            'project:id,kode_proyek,nama_proyek',
+            'material:id,kode_material,nama_material,satuan',
+            'requester:id,name,id_custom',
+            'draftApprover:id,name,id_custom',
+            'managerApprover:id,name,id_custom',
+            'financeApprover:id,name,id_custom',
+        ]);
+    }
+
+    public function getStatusBadgeColor(): string
+    {
+        return match ((string) $this->getRecord()->status) {
+            'rejected' => 'danger',
+            'pending_manager', 'pending_finance' => 'warning',
+            'approved', 'ordered', 'received' => 'success',
+            default => 'gray',
+        };
+    }
+
+    public function getPriorityLabel(): string
+    {
+        return match ((string) $this->getRecord()->priority) {
+            'urgent' => 'CRITICAL',
+            'high' => 'HIGH',
+            'medium' => 'MEDIUM',
+            'low' => 'LOW',
+            default => strtoupper((string) $this->getRecord()->priority),
+        };
+    }
+
+    public function getPriorityBadgeColor(): string
+    {
+        return match ((string) $this->getRecord()->priority) {
+            'urgent' => 'danger',
+            'high' => 'warning',
+            'medium' => 'info',
+            'low' => 'success',
+            default => 'gray',
+        };
+    }
+
+    /**
+     * @return array<int, array<string, string>>
+     */
+    public function getApprovalTimeline(): array
+    {
+        /** @var PurchaseRequest $record */
+        $record = $this->getRecord();
+
+        $rows = [
+            [
+                'label' => 'Draft Dibuat',
+                'actor' => $this->formatActor($record->requester?->id_custom, $record->requester?->name),
+                'at' => $this->formatDateTime($record->created_at),
+                'state' => 'done',
+            ],
+            [
+                'label' => 'Draft Terkirim',
+                'actor' => $this->formatActor($record->draftApprover?->id_custom, $record->draftApprover?->name),
+                'at' => $this->formatDateTime($record->submitted_at ?: $record->draft_approved_at),
+                'state' => filled($record->submitted_at) || filled($record->draft_approved_at) ? 'done' : 'pending',
+            ],
+            [
+                'label' => 'Approval Manager',
+                'actor' => $this->formatActor($record->managerApprover?->id_custom, $record->managerApprover?->name),
+                'at' => $this->formatDateTime($record->approved_by_manager_at),
+                'state' => filled($record->approved_by_manager_at) ? 'done' : 'pending',
+            ],
+            [
+                'label' => 'Approval Finance',
+                'actor' => $this->formatActor($record->financeApprover?->id_custom, $record->financeApprover?->name),
+                'at' => $this->formatDateTime($record->approved_by_finance_at),
+                'state' => filled($record->approved_by_finance_at) ? 'done' : 'pending',
+            ],
+        ];
+
+        if (filled($record->rejected_at)) {
+            $rows[] = [
+                'label' => 'Rejected',
+                'actor' => '-',
+                'at' => $this->formatDateTime($record->rejected_at),
+                'state' => 'rejected',
+            ];
+        }
+
+        return $rows;
+    }
+
+    private function formatActor(?string $idCustom, ?string $name): string
+    {
+        if (blank($idCustom) && blank($name)) {
+            return '-';
+        }
+
+        return trim((string) $idCustom . ' - ' . (string) $name, ' -');
+    }
+
+    private function formatDateTime(mixed $value): string
+    {
+        if (!$value instanceof CarbonInterface && blank($value)) {
+            return '-';
+        }
+
+        return ($value instanceof CarbonInterface ? $value : Carbon::parse($value))->format('d M Y H:i');
+    }
 
     protected function getHeaderActions(): array
     {

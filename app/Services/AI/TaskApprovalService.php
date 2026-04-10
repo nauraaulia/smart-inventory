@@ -650,7 +650,15 @@ class TaskApprovalService
         $pieces = MaterialPiece::query()
             ->where('material_id', $materialId)
             ->where('status', 'available')
-            ->orderByDesc('panjang')
+            ->orderByRaw("CASE
+                WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 1
+                WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 2
+                ELSE 3
+            END")
+            ->orderByRaw("CASE
+                WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN panjang
+                ELSE -panjang
+            END")
             ->lockForUpdate()
             ->get();
 

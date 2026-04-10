@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Filament\Resources\Outbounds\OutboundResource;
 use App\Filament\Resources\PurchaseOrders\PurchaseOrderResource;
 use App\Models\PurchaseOrder;
 use App\Services\Inventory\PurchaseOrderInboundService;
@@ -198,7 +197,7 @@ class PurchaseOrderWorkflowController extends Controller
                 ->with('error', 'PO tidak dalam status waiting inbound atau tidak ada item yang bisa diproses.');
         }
 
-        return redirect()->to(OutboundResource::getUrl('index'))
+        return redirect()->to(PurchaseOrderResource::getUrl('index'))
             ->with('success', "PO {$purchaseOrder->po_number} berhasil diterima. Inbound dibuat: {$created} item.");
     }
 

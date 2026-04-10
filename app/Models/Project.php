@@ -180,6 +180,10 @@ class Project extends Model
             return 'Siap Diambil';
         }
 
+        if ($this->outbound_is_complete) {
+            return 'Barang Sudah Lengkap';
+        }
+
         if (!empty($this->material_confirmed_at)) {
             return 'Barang Sudah Lengkap';
         }
