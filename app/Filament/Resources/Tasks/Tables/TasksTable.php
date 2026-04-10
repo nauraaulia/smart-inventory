@@ -32,28 +32,20 @@ class TasksTable
                     ->label('Tipe')
                     ->badge()
                     ->color('info')
-                    ->searchable(),
-
-                TextColumn::make('title')
-                    ->label('Judul')
-                    ->searchable()
-                    ->limit(50),
-
-                BadgeColumn::make('status')
-                    ->colors([
-                        'warning' => 'pending',
-                        'success' => 'done',
-                        'danger' => 'rejected',
-                    ]),
+                    ->formatStateUsing(function ($state) {
+                        return match ($state) {
+                            'ai_booking_suggestion' => 'Rekomendasi Booking',
+                            'ai_inbound_allocation_suggestion' => 'Alokasi Inbound',
+                            'pr_manager_approval' => 'Approval Manager PR',
+                            'pr_finance_approval' => 'Approval Finance PR',
+                            'pr_revision' => 'Revisi PR',
+                            default => ucfirst(str_replace('_', ' ', $state)),
+                        };
+                    }),
 
                 TextColumn::make('related_type')
                     ->label('Relasi'),
 
-                TextColumn::make('project_code')
-                    ->label('Kode Proyek')
-                    ->getStateUsing(fn (Task $record) => $record->related_type === 'project'
-                        ? (data_get($record->payload, 'project_code') ?: ('#' . $record->related_id))
-                        : '-'),
 
                 TextColumn::make('acc_staff')
                     ->label('ACC Staff')
@@ -73,24 +65,65 @@ class TasksTable
                 EditAction::make()
                     ->visible(fn (Task $record) => $record->status === 'pending'
                         && self::canHandleTask($record)
-                        && $record->type !== 'ai_booking_suggestion'),
+                        && !in_array($record->type, ['ai_booking_suggestion', 'ai_inbound_allocation_suggestion'], true)),
 
                 Action::make('approve')
                     ->label('Approve')
                     ->color('success')
                     ->icon('heroicon-o-check-circle')
                     ->visible(fn (Task $record) => $record->status === 'pending' && self::canHandleTask($record))
-                    ->form([
-                        Toggle::make('generate_pr')
-                            ->label('Jika ada kekurangan stok, generate PR otomatis')
-                            ->default(true)
-                            ->inline(false),
-                    ])
+                    ->form(function (Task $record): array {
+                        if ($record->type === 'ai_booking_suggestion') {
+                            return [
+                                Toggle::make('generate_pr')
+                                    ->label('Jika ada kekurangan stok, generate PR otomatis')
+                                    ->default(true)
+                                    ->inline(false),
+                            ];
+                        }
+                        if ($record->type === 'ai_inbound_allocation_suggestion') {
+                            $suggestions = collect(data_get($record->payload, 'allocation_suggestions', []));
+                            $projectOptions = \App\Models\Project::query()
+                                ->orderBy('kode_proyek')
+                                ->pluck('kode_proyek', 'id')
+                                ->toArray();
+                            return [
+                                \Filament\Forms\Components\Repeater::make('manual_allocation')
+                                    ->label('Alokasi ke Proyek')
+                                    ->schema([
+                                        \Filament\Forms\Components\Select::make('project_id')
+                                            ->label('Proyek')
+                                            ->options($projectOptions)
+                                            ->required(),
+                                        \Filament\Forms\Components\TextInput::make('qty')
+                                            ->label('Qty')
+                                            ->numeric()
+                                            ->required(),
+                                    ])
+                                    ->columns(2)
+                                    ->default(
+                                        $suggestions->map(fn($s) => [
+                                            'project_id' => $s['project_id'],
+                                            'qty' => $s['suggested_qty'],
+                                        ])->toArray()
+                                    )
+                                    ->minItems(1)
+                                    ->maxItems(10),
+                            ];
+                        }
+                        return [];
+                    })
                     ->action(function (Task $record, array $data) {
                         $service = new TaskApprovalService();
-                        $service->approve($record, auth()->user(), [
-                            'generate_pr' => (bool) ($data['generate_pr'] ?? true),
-                        ]);
+                        if ($record->type === 'ai_booking_suggestion') {
+                            $service->approve($record, auth()->user(), [
+                                'generate_pr' => (bool) ($data['generate_pr'] ?? true),
+                            ]);
+                        } elseif ($record->type === 'ai_inbound_allocation_suggestion') {
+                            $service->approve($record, auth()->user(), [
+                                'manual_allocation' => $data['manual_allocation'] ?? [],
+                            ]);
+                        }
                     })
                     ->after(function ($livewire): void {
                         $livewire->redirect(TaskResource::getUrl('index'), navigate: true);
@@ -147,7 +180,7 @@ class TasksTable
             ],
             'manager operasional', 'manager operational', 'manajer operasional' => [
                 'Manager Operasional',
-                'Manager Operational',
+                'Manager Operasional',
                 'Manajer Operasional',
             ],
             'finance', 'keuangan' => [

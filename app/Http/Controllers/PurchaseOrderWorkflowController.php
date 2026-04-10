@@ -191,7 +191,7 @@ class PurchaseOrderWorkflowController extends Controller
 
     private function isManager(): bool
     {
-        return in_array(auth()->user()?->role, ['Manager Operasional', 'Manager Operational', 'Manajer Operasional'], true);
+        return in_array(auth()->user()?->role, ['Manager Operasional', 'Manajer Operasional'], true);
     }
 
     private function isWarehouseStaff(): bool
@@ -208,7 +208,6 @@ class PurchaseOrderWorkflowController extends Controller
 
     private function canPrintPo(): bool
     {
-        return $this->isManager()
-            || in_array(auth()->user()?->role, ['Finance', 'Keuangan'], true);
+        return $this->isManager();
     }
 }

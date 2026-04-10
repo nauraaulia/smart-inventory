@@ -23,7 +23,7 @@ class TaskResource extends Resource
 
     protected static ?int $navigationSort = 2;
 
-    protected static ?string $navigationLabel = 'Tasks AI';
+    protected static ?string $navigationLabel = 'Tasks';
 
     protected static ?string $modelLabel = 'Task';
 
@@ -154,7 +154,7 @@ class TaskResource extends Resource
             ],
             'manager operasional', 'manager operational', 'manajer operasional' => [
                 'Manager Operasional',
-                'Manager Operational',
+                'Manager Operasional',
                 'Manajer Operasional',
             ],
             'finance', 'keuangan' => [

@@ -78,7 +78,7 @@ class MaterialPiece extends Model
         // Saat stok piece bertambah/hilang, sinkron ulang AI task project yang terdampak.
         static::created(function (MaterialPiece $piece): void {
             if ($piece->status === 'available') {
-                app(InboundAutoAllocationService::class)->allocatePiece($piece);
+                app(InboundAutoAllocationService::class)->processInboundPiece($piece);
             }
 
             self::dispatchAffectedProjectSync((int) $piece->material_id);

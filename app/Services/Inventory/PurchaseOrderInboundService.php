@@ -11,7 +11,7 @@ use Illuminate\Support\Facades\DB;
 
 class PurchaseOrderInboundService
 {
-    public function receive(PurchaseOrder $purchaseOrder, User $actor, ?string $receiverName = null, ?int $shelfLocationId = null, array $receivedQuantities = []): int
+    public function receive(PurchaseOrder $purchaseOrder, User $actor, int $shelfLocationId, ?string $receiverName = null, array $receivedQuantities = []): int
     {
         return DB::transaction(function () use ($purchaseOrder, $actor, $receiverName, $shelfLocationId, $receivedQuantities) {
             $po = PurchaseOrder::query()->lockForUpdate()->with(['items.material'])->findOrFail($purchaseOrder->id);

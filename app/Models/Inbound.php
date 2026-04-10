@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Validation\ValidationException;
 
 class Inbound extends Model
 {
@@ -50,13 +51,25 @@ class Inbound extends Model
 
     protected static function booted()
     {
-        static::creating(function ($inbound) {
+        $ensureShelfLocation = function ($inbound): void {
+            if (empty($inbound->shelf_location_id)) {
+                throw ValidationException::withMessages([
+                    'shelf_location_id' => 'Lokasi rak wajib diisi untuk inbound.',
+                ]);
+            }
+        };
+
+        static::creating(function ($inbound) use ($ensureShelfLocation) {
+            $ensureShelfLocation($inbound);
+
             if (auth()->check()) {
                 $inbound->created_by = auth()->id();
             }
         });
 
-        static::updating(function ($inbound) {
+        static::updating(function ($inbound) use ($ensureShelfLocation) {
+            $ensureShelfLocation($inbound);
+
             if (auth()->check()) {
                 $inbound->updated_by = auth()->id();
             }
