@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Filament\Notifications\Notification;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -163,6 +164,145 @@ class Project extends Model
         return $this->hasMany(Outbound::class);
     }
 
+    public function scopeCategoryPerencanaan(Builder $query): Builder
+    {
+        return $query
+            ->where(function (Builder $outer): void {
+                $outer
+                    ->where(function (Builder $q): void {
+                        $q->whereNull('material_confirmed_at')
+                            ->whereNotExists(function ($sub): void {
+                                $sub->selectRaw('1')
+                                    ->from('project_items as pi_exists')
+                                    ->whereColumn('pi_exists.project_id', 'projects.id');
+                            });
+                    })
+                    ->orWhere(function (Builder $q): void {
+                        $q->whereNull('material_confirmed_at')
+                            ->whereExists(function ($sub): void {
+                                $sub->selectRaw('1')
+                                    ->from('project_items as pi_exists')
+                                    ->whereColumn('pi_exists.project_id', 'projects.id');
+                            })
+                            ->whereRaw("EXISTS (
+                                SELECT 1
+                                FROM (
+                                    SELECT pi.material_id, SUM(pi.jumlah_diminta) AS total_required
+                                    FROM project_items pi
+                                    WHERE pi.project_id = projects.id
+                                    GROUP BY pi.material_id
+                                ) req
+                                LEFT JOIN (
+                                    SELECT mp.material_id, SUM(mp.panjang) AS total_booked
+                                    FROM material_pieces mp
+                                    WHERE mp.booked_for_project_id = projects.id
+                                      AND mp.status = 'booked'
+                                    GROUP BY mp.material_id
+                                ) booked ON booked.material_id = req.material_id
+                                WHERE req.total_required > COALESCE(booked.total_booked, 0) + 0.00001
+                            )");
+                    });
+            })
+            ->whereNull('outbound_confirmed_at')
+            ->where(function (Builder $q): void {
+                $q->whereNull('completed_at')
+                    ->where('status', '!=', 'Completed');
+            });
+    }
+
+    public function scopeCategoryBarangLengkap(Builder $query): Builder
+    {
+        return $query
+            ->where(function (Builder $q): void {
+                $q->whereNotNull('material_confirmed_at')
+                    ->orWhereRaw("(
+                        EXISTS (
+                            SELECT 1
+                            FROM project_items pi_exists
+                            WHERE pi_exists.project_id = projects.id
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM (
+                                SELECT pi.material_id, SUM(pi.jumlah_diminta) AS total_required
+                                FROM project_items pi
+                                WHERE pi.project_id = projects.id
+                                GROUP BY pi.material_id
+                            ) req
+                            LEFT JOIN (
+                                SELECT mp.material_id, SUM(mp.panjang) AS total_booked
+                                FROM material_pieces mp
+                                WHERE mp.booked_for_project_id = projects.id
+                                  AND mp.status = 'booked'
+                                GROUP BY mp.material_id
+                            ) booked ON booked.material_id = req.material_id
+                            WHERE req.total_required > COALESCE(booked.total_booked, 0) + 0.00001
+                        )
+                    )");
+            })
+            ->whereNull('outbound_confirmed_at')
+            ->where(function (Builder $q): void {
+                $q->whereNull('completed_at')
+                    ->where('status', '!=', 'Completed');
+            });
+    }
+
+    public function scopeCategorySiapDiambil(Builder $query): Builder
+    {
+        return $query
+            ->whereNotNull('outbound_confirmed_at')
+            ->where(function (Builder $q): void {
+                $q->whereNull('completed_at')
+                    ->where('status', '!=', 'Completed');
+            });
+    }
+
+    public function scopeCategoryComplete(Builder $query): Builder
+    {
+        return $query
+            ->where(function (Builder $q): void {
+                $q->where('status', 'Completed')
+                    ->orWhereNotNull('completed_at');
+            });
+    }
+
+    public function getProjectCategoryAttribute(): string
+    {
+        if ($this->status === 'Completed' || !empty($this->completed_at)) {
+            return 'complete';
+        }
+
+        if (!empty($this->outbound_confirmed_at)) {
+            return 'siap_diambil';
+        }
+
+        if (!empty($this->material_confirmed_at) || $this->outbound_is_complete) {
+            return 'barang_lengkap';
+        }
+
+        return 'perencanaan';
+    }
+
+    public function getProjectCategoryLabelAttribute(): string
+    {
+        return match ($this->project_category) {
+            'barang_lengkap' => 'Barang Lengkap',
+            'siap_diambil' => 'Siap Diambil',
+            'complete' => 'Complete',
+            default => 'Perencanaan Kebutuhan',
+        };
+    }
+
+    public function getProjectCategoryColorAttribute(): string
+    {
+        return match ($this->project_category) {
+            'barang_lengkap' => 'info',
+            'siap_diambil' => 'success',
+            'complete' => 'success',
+            default => 'gray',
+        };
+    }
+
     public function getProgressLabelAttribute(): string
     {
         if ($this->prCount('pending_manager') > 0) {
@@ -186,17 +326,17 @@ class Project extends Model
         }
 
         if ($this->outbound_is_complete) {
-            return 'Barang Sudah Lengkap';
+            return 'Barang Lengkap';
         }
 
         if (!empty($this->material_confirmed_at)) {
-            return 'Barang Sudah Lengkap';
+            return 'Barang Lengkap';
         }
 
         return match ((string) $this->status) {
             'Processing' => 'Sedang Diproses Gudang',
             'Approved' => 'Menunggu Proses Gudang',
-            'Completed' => 'Selesai',
+            'Completed' => 'Complete',
             default => 'Perencanaan Kebutuhan',
         };
     }
@@ -209,10 +349,10 @@ class Project extends Model
             'Menunggu Review Draft PR' => 'gray',
             'Perlu Revisi PR' => 'danger',
             'Siap Diambil' => 'success',
-            'Barang Sudah Lengkap' => 'info',
+            'Barang Lengkap' => 'info',
             'Sedang Diproses Gudang' => 'warning',
             'Menunggu Proses Gudang' => 'gray',
-            'Selesai' => 'success',
+            'Complete' => 'success',
             default => 'gray',
         };
     }
@@ -225,10 +365,10 @@ class Project extends Model
             'Menunggu Review Draft PR' => 'Draft PR masih di tahap review internal staff gudang sebelum dikirim ke Manager.',
             'Perlu Revisi PR' => 'PR ditolak dan perlu revisi dari staff gudang sebelum diajukan ulang.',
             'Siap Diambil' => 'Semua kebutuhan sudah diproses dan outbound sudah dikonfirmasi.',
-            'Barang Sudah Lengkap' => 'Material sudah terkonfirmasi lengkap. Menunggu outbound/penyerahan.',
+            'Barang Lengkap' => 'Material sudah terkonfirmasi lengkap. Menunggu outbound/penyerahan.',
             'Sedang Diproses Gudang' => 'Gudang sedang menyiapkan material sesuai kebutuhan proyek.',
             'Menunggu Proses Gudang' => 'Approval sudah selesai, menunggu proses pemenuhan oleh gudang.',
-            'Selesai' => 'Proyek selesai diproses.',
+            'Complete' => 'Proyek selesai diproses.',
             default => 'Kebutuhan material sedang dianalisis dan menunggu proses berikutnya.',
         };
     }

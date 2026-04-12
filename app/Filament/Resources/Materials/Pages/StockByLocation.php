@@ -86,28 +86,14 @@ class StockByLocation extends Page
             ->leftJoin('materials', 'materials.id', '=', 'material_pieces.material_id')
             ->leftJoin('shelf_locations', 'shelf_locations.id', '=', 'material_pieces.shelf_location_id')
             ->whereIn('status', ['available', 'booked'])
+            ->selectRaw('material_pieces.id as piece_id')
+            ->selectRaw('material_pieces.panjang as piece_length')
+            ->selectRaw('material_pieces.status as piece_status')
             ->selectRaw("COALESCE(shelf_locations.kode_lokasi, 'TANPA RAK') as shelf_code")
             ->selectRaw("COALESCE(shelf_locations.nama_lokasi, 'Tanpa lokasi rak') as shelf_name")
             ->selectRaw('materials.kode_material as material_code')
             ->selectRaw('materials.nama_material as material_name')
-            ->selectRaw("COALESCE(materials.satuan, 'unit') as unit")
-            ->selectRaw("CASE
-                WHEN LOWER(COALESCE(materials.satuan, '')) IN ('m', 'meter', 'meters', 'mtr')
-                    AND material_pieces.sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue', 'split_inbound_remainder') THEN 'Potongan'
-                ELSE 'Utuh'
-            END as piece_type")
-            ->selectRaw("SUM(CASE WHEN material_pieces.status = 'available' THEN material_pieces.panjang ELSE 0 END) as available_qty")
-            ->selectRaw("SUM(CASE WHEN material_pieces.status = 'booked' THEN material_pieces.panjang ELSE 0 END) as booked_qty")
-            ->selectRaw('COUNT(material_pieces.id) as piece_count')
-            ->groupByRaw("COALESCE(shelf_locations.kode_lokasi, 'TANPA RAK')")
-            ->groupByRaw("COALESCE(shelf_locations.nama_lokasi, 'Tanpa lokasi rak')")
-            ->groupBy('materials.kode_material', 'materials.nama_material')
-            ->groupByRaw("COALESCE(materials.satuan, 'unit')")
-            ->groupByRaw("CASE
-                WHEN LOWER(COALESCE(materials.satuan, '')) IN ('m', 'meter', 'meters', 'mtr')
-                    AND material_pieces.sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue', 'split_inbound_remainder') THEN 'Potongan'
-                ELSE 'Utuh'
-            END");
+            ->selectRaw("COALESCE(materials.satuan, 'unit') as unit");
 
         if ($this->shelfLocationId !== '') {
             $query->where('material_pieces.shelf_location_id', (int) $this->shelfLocationId);
@@ -131,23 +117,29 @@ class StockByLocation extends Page
 
         $rows = $query
             ->orderBy('shelf_code')
+            ->orderBy('material_code')
             ->orderBy('material_name')
-            ->orderBy('piece_type')
+            ->orderByRaw("CASE WHEN material_pieces.status = 'available' THEN 0 ELSE 1 END ASC")
+            ->orderByDesc('material_pieces.panjang')
+            ->orderBy('piece_id')
             ->get()
             ->map(function ($row): array {
-                $availableQty = (float) $row->available_qty;
-                $bookedQty = (float) $row->booked_qty;
+                $pieceLength = (float) ($row->piece_length ?? 0);
+                $pieceStatus = (string) ($row->piece_status ?? 'available');
+                $availableQty = $pieceStatus === 'available' ? $pieceLength : 0.0;
+                $bookedQty = $pieceStatus === 'booked' ? $pieceLength : 0.0;
 
                 return [
                     'shelf_label' => trim(((string) $row->shelf_code) . ' - ' . ((string) $row->shelf_name)),
                     'material_code' => (string) ($row->material_code ?: '-'),
                     'material_name' => (string) ($row->material_name ?: 'Material tidak diketahui'),
                     'unit' => (string) ($row->unit ?: 'unit'),
-                    'piece_type' => (string) ($row->piece_type ?: 'Utuh'),
+                    'piece_id' => (int) ($row->piece_id ?? 0),
+                    'piece_length' => round($pieceLength, 2),
+                    'piece_status' => $pieceStatus,
                     'available_qty' => round($availableQty, 2),
                     'booked_qty' => round($bookedQty, 2),
-                    'total_qty' => round($availableQty + $bookedQty, 2),
-                    'piece_count' => (int) $row->piece_count,
+                    'total_qty' => round($pieceLength, 2),
                 ];
             })
             ->values()

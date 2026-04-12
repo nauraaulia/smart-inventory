@@ -72,13 +72,19 @@ class TaskApprovalService
         $projectId = (int) data_get($payload, 'project_id');
         $projectCode = $this->projectCodeFromPayload($payload, $projectId);
         $detail = data_get($payload, 'detail', []);
+        $materialItems = collect(data_get($payload, 'items', []));
         $generatePr = (bool) ($options['generate_pr'] ?? true);
+        $decisionsInput = collect($options['material_decisions'] ?? []);
+        $decisionsByMaterial = $decisionsInput
+            ->mapWithKeys(fn ($row): array => [(int) ($row['material_id'] ?? 0) => $row]);
         $project = $projectId > 0 ? Project::query()->find($projectId) : null;
         $bufferDays = (int) ($options['buffer_days'] ?? 3);
 
         $createdPrIds = [];
         $pendingShortages = [];
+        $createdInboundSuggestionTaskIds = [];
         $touchedMaterialIds = [];
+        $materialResults = [];
 
         // Tandai task selesai lebih awal agar hook sinkron stok tidak membuat task AI duplikat
         // ketika material piece berubah di tengah proses approval.
@@ -103,25 +109,89 @@ class TaskApprovalService
             'payload' => $payload,
         ]);
 
-        foreach ($detail as $item) {
+        if ($materialItems->isEmpty()) {
+            $materialItems = collect($detail)->map(function (array $item): array {
+                return [
+                    'material_id' => (int) ($item['material_id'] ?? 0),
+                    'material_name' => (string) ($item['nama_material'] ?? '-'),
+                    'dibutuhkan' => (float) ($item['dibutuhkan'] ?? 0),
+                    'satuan' => 'unit',
+                    'recommended_piece_ids' => [],
+                    'recommended_qty' => (float) ($item['dibutuhkan'] ?? 0),
+                    'ai_reason' => (string) ($item['alasan_ai'] ?? ''),
+                    'status' => 'pending',
+                    'tanpa_potongan' => (bool) ($item['tanpa_potongan'] ?? false),
+                ];
+            });
+        }
+
+        foreach ($materialItems as $item) {
             $materialId = (int) ($item['material_id'] ?? 0);
             $dibutuhkan = (float) ($item['dibutuhkan'] ?? 0);
             $tanpaPotongan = (bool) ($item['tanpa_potongan'] ?? false);
+            $recommendedPieceIds = collect($item['recommended_piece_ids'] ?? [])->map(fn ($id) => (int) $id)->filter()->values()->all();
+            $decision = strtolower((string) data_get($decisionsByMaterial->get($materialId, []), 'status', 'approved'));
 
             if ($materialId <= 0 || $dibutuhkan <= 0) {
                 continue;
             }
 
+            if ($decision === 'pending') {
+                $decision = 'approved';
+            }
+
             $touchedMaterialIds[] = $materialId;
 
-            $bookedQty = $this->bookFromAvailablePieces(
+            if ($decision === 'rejected') {
+                $inboundTaskId = $this->createInboundAllocationTaskFromRejectedBooking(
+                    materialId: $materialId,
+                    projectId: $projectId,
+                    qtyNeeded: $dibutuhkan,
+                    projectCode: $projectCode,
+                    materialName: (string) ($item['material_name'] ?? ('Material #' . $materialId)),
+                );
+
+                if ($inboundTaskId) {
+                    $createdInboundSuggestionTaskIds[] = $inboundTaskId;
+                }
+
+                $materialResults[] = [
+                    'material_id' => $materialId,
+                    'material_name' => (string) ($item['material_name'] ?? ('Material #' . $materialId)),
+                    'status' => 'rejected',
+                    'dibutuhkan' => $this->decimal($dibutuhkan),
+                    'booked_qty' => $this->decimal(0),
+                    'shortage_qty' => $this->decimal($dibutuhkan),
+                    'allocations' => [],
+                    'ai_reason' => (string) ($item['ai_reason'] ?? ''),
+                    'created_operational_task_id' => $inboundTaskId,
+                ];
+
+                continue;
+            }
+
+            $bookingResult = $this->bookFromAvailablePieces(
                 materialId: $materialId,
                 projectId: $projectId,
                 qtyNeeded: $dibutuhkan,
                 tanpaPotongan: $tanpaPotongan,
+                preferredPieceIds: $recommendedPieceIds,
             );
 
+            $bookedQty = (float) ($bookingResult['booked_qty'] ?? 0);
+
             $shortage = max(0, $dibutuhkan - $bookedQty);
+
+            $materialResults[] = [
+                'material_id' => $materialId,
+                'material_name' => (string) ($item['material_name'] ?? ('Material #' . $materialId)),
+                'status' => 'approved',
+                'dibutuhkan' => $this->decimal($dibutuhkan),
+                'booked_qty' => $this->decimal($bookedQty),
+                'shortage_qty' => $this->decimal($shortage),
+                'allocations' => $bookingResult['allocations'] ?? [],
+                'ai_reason' => (string) ($item['ai_reason'] ?? ($bookingResult['ai_reason'] ?? '')),
+            ];
 
             if ($shortage > 0) {
                 if (!$generatePr) {
@@ -166,7 +236,9 @@ class TaskApprovalService
             ->each(fn (Material $m) => $m->updateStokSummary());
 
         if ($projectId) {
-            $isMaterialReady = empty($pendingShortages) && count($createdPrIds) === 0;
+            $isMaterialReady = empty($pendingShortages)
+                && count($createdPrIds) === 0
+                && count($createdInboundSuggestionTaskIds) === 0;
 
             Project::whereKey($projectId)->update([
                 'material_confirmed_at' => $isMaterialReady ? now() : null,
@@ -180,7 +252,21 @@ class TaskApprovalService
             'created_draft_pr_count' => count($createdPrIds),
             'pending_shortages_without_pr' => $pendingShortages,
             'generate_pr_selected' => $generatePr,
+            'material_results' => $materialResults,
+            'created_inbound_suggestion_task_ids' => $createdInboundSuggestionTaskIds,
         ]);
+
+        $payload['items'] = collect($materialItems)
+            ->map(function (array $item) use ($decisionsByMaterial): array {
+                $materialId = (int) ($item['material_id'] ?? 0);
+                $status = strtolower((string) data_get($decisionsByMaterial->get($materialId, []), 'status', 'approved'));
+
+                $item['status'] = in_array($status, ['approved', 'rejected'], true) ? $status : 'approved';
+
+                return $item;
+            })
+            ->values()
+            ->all();
 
         $task->update([
             'status' => 'done',
@@ -194,6 +280,64 @@ class TaskApprovalService
             ),
             'payload' => $payload,
         ]);
+    }
+
+    private function createInboundAllocationTaskFromRejectedBooking(
+        int $materialId,
+        int $projectId,
+        float $qtyNeeded,
+        string $projectCode,
+        string $materialName,
+    ): ?int {
+        if ($materialId <= 0 || $projectId <= 0 || $qtyNeeded <= 0) {
+            return null;
+        }
+
+        $availablePieces = MaterialPiece::query()
+            ->with(['shelfLocation:id,kode_lokasi,nama_lokasi'])
+            ->where('material_id', $materialId)
+            ->where('status', 'available')
+            ->orderByRaw("CASE
+                WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 1
+                WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 2
+                ELSE 3
+            END ASC")
+            ->orderBy('created_at')
+            ->get();
+
+        $piecesPayload = $availablePieces->map(function (MaterialPiece $piece): array {
+            $receivedAt = $piece->inbound?->entry_date
+                ? Carbon::parse($piece->inbound->entry_date)
+                : $piece->created_at;
+
+            return [
+                'id' => (int) $piece->id,
+                'panjang' => (float) $piece->panjang,
+                'sumber' => (string) $piece->sumber,
+                'lokasi_rak' => (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-')),
+                'umur_hari' => $receivedAt ? (int) $receivedAt->diffInDays(now()) : null,
+            ];
+        })->values()->all();
+
+        $task = Task::create([
+            'for_role' => 'Staff Administrasi Gudang',
+            'type' => 'ai_inbound_allocation_suggestion',
+            'title' => "Task Operasional Material Ditolak ({$materialName})",
+            'message' => "Material {$materialName} ditolak dari rekomendasi AI. Pilih manual piece untuk pemenuhan kebutuhan proyek {$projectCode}.",
+            'payload' => [
+                'project_id' => $projectId,
+                'project_code' => $projectCode,
+                'material_id' => $materialId,
+                'material_name' => $materialName,
+                'qty_dibutuhkan' => $this->decimal($qtyNeeded),
+                'available_pieces' => $piecesPayload,
+            ],
+            'status' => 'pending',
+            'related_id' => $projectId,
+            'related_type' => 'project',
+        ]);
+
+        return (int) $task->id;
     }
 
     private function approveInboundAllocationSuggestion(Task $task, User $actor, array $options = []): void
@@ -265,7 +409,7 @@ class TaskApprovalService
 
             $outstanding = $this->outstandingNeed(
                 projectId: $projectId,
-                materialId: (int) $piece->material_id,
+                materialId: $materialId,
             );
 
             if ($outstanding <= 0) {
@@ -670,8 +814,14 @@ class TaskApprovalService
         ]);
     }
 
-    private function bookFromAvailablePieces(int $materialId, int $projectId, float $qtyNeeded, bool $tanpaPotongan = false): float
+    /**
+     * @param  array<int, int>  $preferredPieceIds
+     * @return array{booked_qty: float, allocations: array<int, array<string, mixed>>, ai_reason: string}
+     */
+    private function bookFromAvailablePieces(int $materialId, int $projectId, float $qtyNeeded, bool $tanpaPotongan = false, array $preferredPieceIds = []): array
     {
+        $allocations = [];
+
         if ($tanpaPotongan) {
             $material = Material::query()->find($materialId);
             $rollStandar = (float) ($material?->default_roll_length ?? 0);
@@ -688,10 +838,16 @@ class TaskApprovalService
                 ->first();
 
             if (!$piece) {
-                return 0.0;
+                return [
+                    'booked_qty' => 0.0,
+                    'allocations' => [],
+                    'ai_reason' => 'Mode tanpa potongan aktif, tetapi tidak ada roll utuh yang mencukupi kebutuhan.',
+                ];
             }
 
             $pieceLength = (float) $piece->panjang;
+            $entryDate = $piece->inbound?->entry_date ? Carbon::parse($piece->inbound->entry_date) : $piece->created_at;
+            $ageDays = $entryDate ? $entryDate->diffInDays(now()) : 0;
 
             if ($pieceLength <= $qtyNeeded) {
                 $piece->update([
@@ -700,7 +856,18 @@ class TaskApprovalService
                     'booked_at' => now(),
                 ]);
 
-                return round($pieceLength, 2);
+                return [
+                    'booked_qty' => round($pieceLength, 2),
+                    'allocations' => [[
+                        'piece_id' => (int) $piece->id,
+                        'taken_qty' => round($pieceLength, 2),
+                        'original_length' => round($pieceLength, 2),
+                        'remaining_length' => 0,
+                        'rack' => (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-')),
+                        'was_split' => false,
+                    ]],
+                    'ai_reason' => "Disarankan ambil piece #{$piece->id} ({$this->formatQty($pieceLength)}, masuk {$ageDays} hari lalu) karena mode tanpa potongan mewajibkan roll utuh.",
+                ];
             }
 
             $piece->update([
@@ -723,33 +890,67 @@ class TaskApprovalService
                 'keterangan' => 'Auto split booking dari task approval AI (mode tanpa potongan).',
             ]);
 
-            return round($qtyNeeded, 2);
+            return [
+                'booked_qty' => round($qtyNeeded, 2),
+                'allocations' => [[
+                    'piece_id' => (int) $piece->id,
+                    'taken_qty' => round($qtyNeeded, 2),
+                    'original_length' => round($pieceLength, 2),
+                    'remaining_length' => round($pieceLength - $qtyNeeded, 2),
+                    'rack' => (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-')),
+                    'was_split' => true,
+                ]],
+                'ai_reason' => "Disarankan potong dari piece #{$piece->id} ({$this->formatQty($pieceLength)}, masuk {$ageDays} hari lalu) karena paling efisien untuk kebutuhan {$this->formatQty($qtyNeeded)}.",
+            ];
         }
 
         $remaining = $qtyNeeded;
         $booked = 0.0;
+        $usedFirstPieceId = null;
+        $usedFirstPieceLength = null;
+        $usedFirstPieceAge = null;
 
-        $pieces = MaterialPiece::query()
-            ->where('material_id', $materialId)
-            ->where('status', 'available')
-            ->orderByRaw("CASE
-                WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 1
-                WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 2
-                ELSE 3
-            END")
-            ->orderByRaw("CASE
-                WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN panjang
-                ELSE -panjang
-            END")
-            ->lockForUpdate()
-            ->get();
+        while ($remaining > 0.00001) {
+            $pieceQuery = MaterialPiece::query()
+                ->with(['shelfLocation:id,kode_lokasi,nama_lokasi', 'inbound:id,entry_date'])
+                ->where('material_id', $materialId)
+                ->where('status', 'available')
+                ->when(!empty($preferredPieceIds), fn ($q) => $q->whereIn('id', $preferredPieceIds))
+                ->orderByRaw("CASE WHEN panjang >= ? THEN 0 ELSE 1 END ASC", [$remaining])
+                ->orderByRaw("CASE
+                    WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 1
+                    WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 2
+                    ELSE 3
+                END ASC")
+                ->orderByRaw("CASE WHEN panjang >= ? THEN panjang ELSE -panjang END ASC", [$remaining])
+                ->orderByRaw("COALESCE((SELECT entry_date FROM inbounds WHERE inbounds.id = material_pieces.inbound_id), material_pieces.created_at) ASC")
+                ->lockForUpdate();
 
-        foreach ($pieces as $piece) {
+            /** @var MaterialPiece|null $piece */
+            $piece = $pieceQuery->first();
+
+            if (!$piece && !empty($preferredPieceIds)) {
+                $preferredPieceIds = [];
+                continue;
+            }
+
+            if (!$piece) {
+                break;
+            }
+
             if ($remaining <= 0) {
                 break;
             }
 
             $pieceLength = (float) $piece->panjang;
+            $entryDate = $piece->inbound?->entry_date ? Carbon::parse($piece->inbound->entry_date) : $piece->created_at;
+            $ageDays = $entryDate ? $entryDate->diffInDays(now()) : 0;
+
+            if ($usedFirstPieceId === null) {
+                $usedFirstPieceId = (int) $piece->id;
+                $usedFirstPieceLength = $pieceLength;
+                $usedFirstPieceAge = $ageDays;
+            }
 
             if ($pieceLength <= $remaining) {
                 $piece->update([
@@ -760,6 +961,16 @@ class TaskApprovalService
 
                 $remaining -= $pieceLength;
                 $booked += $pieceLength;
+
+                $allocations[] = [
+                    'piece_id' => (int) $piece->id,
+                    'taken_qty' => round($pieceLength, 2),
+                    'original_length' => round($pieceLength, 2),
+                    'remaining_length' => 0,
+                    'rack' => (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-')),
+                    'was_split' => false,
+                ];
+
                 continue;
             }
 
@@ -782,16 +993,41 @@ class TaskApprovalService
                 'keterangan' => 'Auto split booking dari task approval AI.',
             ]);
 
+            $allocations[] = [
+                'piece_id' => (int) $piece->id,
+                'taken_qty' => round($remaining, 2),
+                'original_length' => round($pieceLength, 2),
+                'remaining_length' => round($pieceLength - $remaining, 2),
+                'rack' => (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-')),
+                'was_split' => true,
+            ];
+
             $booked += $remaining;
             $remaining = 0;
         }
 
-        return round($booked, 2);
+        $reason = 'Tidak ada piece available yang sesuai untuk dibooking.';
+
+        if ($usedFirstPieceId !== null) {
+            $leftover = max(0, round((float) ($usedFirstPieceLength ?? 0) - $qtyNeeded, 2));
+            $reason = "Disarankan potong dari piece #{$usedFirstPieceId} ({$this->formatQty((float) ($usedFirstPieceLength ?? 0))}, masuk " . (int) ($usedFirstPieceAge ?? 0) . " hari lalu) karena ukuran paling efisien untuk kebutuhan {$this->formatQty($qtyNeeded)} dengan sisa {$this->formatQty($leftover)} yang masih berguna.";
+        }
+
+        return [
+            'booked_qty' => round($booked, 2),
+            'allocations' => $allocations,
+            'ai_reason' => $reason,
+        ];
     }
 
     private function decimal(float $value): string
     {
         return number_format($value, 2, '.', '');
+    }
+
+    private function formatQty(float $value): string
+    {
+        return rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.') . 'm';
     }
 
     private function projectCodeFromPayload(array $payload, int $projectId): string

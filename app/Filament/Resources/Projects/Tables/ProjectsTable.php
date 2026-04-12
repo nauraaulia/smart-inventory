@@ -33,11 +33,10 @@ class ProjectsTable
                 TextColumn::make('tanggal_selesai')
                     ->date()
                     ->sortable(),
-                TextColumn::make('progress_label')
-                    ->label('Progress Operasional')
+                TextColumn::make('project_category_label')
+                    ->label('Kategori Proyek')
                     ->badge()
-                    ->color(fn (Project $record): string => $record->progress_color)
-                    ->description(fn (Project $record): string => $record->progress_description),
+                    ->color(fn (Project $record): string => $record->project_category_color),
                 TextColumn::make('status')
                     ->badge()
                     ->formatStateUsing(fn (string $state): string => match ($state) {

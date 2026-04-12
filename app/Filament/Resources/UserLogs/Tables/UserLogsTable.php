@@ -27,6 +27,8 @@ class UserLogsTable
 
                 TextColumn::make('user.id_custom')
                     ->label('User')
+                    ->formatStateUsing(fn ($state, UserLog $record): string => (string) ($state ?: ($record->user?->name ?: ('User #' . (string) $record->user_id))) )
+                    ->description(fn (UserLog $record): ?string => $record->user?->name)
                     ->sortable()
                     ->searchable(),
 
@@ -37,11 +39,24 @@ class UserLogsTable
                         'Create' => 'success',
                         'Update' => 'warning',
                         'Delete' => 'danger',
+                        'Activity' => 'info',
+                        'Login' => 'primary',
+                        'Outbound Taken' => 'success',
+                        'Auto Allocate' => 'info',
                         default  => 'gray',
                     }),
 
-                TextColumn::make('module')            
+                TextColumn::make('module')
+                    ->label('Modul')
+                    ->badge()
                     ->searchable(),
+
+                TextColumn::make('description')
+                    ->label('Detail Aktivitas')
+                    ->limit(90)
+                    ->tooltip(fn (UserLog $record): ?string => $record->description)
+                    ->wrap()
+                    ->toggleable(),
 
                 TextColumn::make('ip_address')        
                     ->label('IP Address'),
@@ -86,11 +101,12 @@ class UserLogsTable
 
                 SelectFilter::make('action')
                     ->label('Action')
-                    ->options([
-                        'Create' => 'Create',
-                        'Update' => 'Update',
-                        'Delete' => 'Delete',
-                    ]),
+                    ->options(fn() => UserLog::query()
+                        ->whereNotNull('action')
+                        ->where('action', '!=', '')
+                        ->distinct()
+                        ->pluck('action', 'action')
+                        ->toArray()),
 
                 SelectFilter::make('module')
                     ->label('Module')

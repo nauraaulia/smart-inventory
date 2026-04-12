@@ -9,8 +9,11 @@ use Filament\Forms\Components\Hidden;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
+use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
+use Filament\Schemas\Components\Utilities\Get;
 use Filament\Tables\Columns\BadgeColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Forms\Components\Textarea;
@@ -97,11 +100,101 @@ class TasksTable
                     ->visible(fn (Task $record) => $record->status === 'pending' && self::canHandleTask($record))
                     ->form(function (Task $record): array {
                         if ($record->type === 'ai_booking_suggestion') {
+                            $items = collect(data_get($record->payload, 'items', []));
+
+                            $materialRows = $items->map(function (array $item): array {
+                                $recommendedPieces = collect($item['recommended_pieces'] ?? [])
+                                    ->map(function (array $piece): string {
+                                        $id = (int) ($piece['id'] ?? 0);
+                                        $total = rtrim(rtrim(number_format((float) ($piece['panjang'] ?? 0), 2, '.', ''), '0'), '.');
+                                        $take = rtrim(rtrim(number_format((float) ($piece['take_qty'] ?? 0), 2, '.', ''), '0'), '.');
+                                        $sisa = rtrim(rtrim(number_format((float) ($piece['panjang'] ?? 0) - (float) ($piece['take_qty'] ?? 0), 2, '.', ''), '0'), '.');
+                                        $rack = (string) ($piece['rack_label'] ?? '-');
+                                        $age = (int) ($piece['age_days'] ?? 0);
+
+                                        $text = "Piece #{$id} | {$total}m | Rak {$rack} | Masuk {$age} hari lalu";
+                                        if ((float) ($piece['take_qty'] ?? 0) < (float) ($piece['panjang'] ?? 0)) {
+                                            $text .= " | Potong: {$take}m, Sisa: {$sisa}m";
+                                        } else {
+                                            $text .= ' | Ambil utuh';
+                                        }
+
+                                        return $text;
+                                    })
+                                    ->implode("\n");
+
+                                return [
+                                    'material_id' => (int) ($item['material_id'] ?? 0),
+                                    'material_name' => (string) ($item['material_name'] ?? '-'),
+                                    'dibutuhkan' => (float) ($item['dibutuhkan'] ?? 0),
+                                    'satuan' => (string) ($item['satuan'] ?? 'unit'),
+                                    'recommended_piece_ids' => json_encode($item['recommended_piece_ids'] ?? []),
+                                    'recommended_qty' => (float) ($item['recommended_qty'] ?? 0),
+                                    'qty_pr' => max(0, round(
+                                        (float) ($item['dibutuhkan'] ?? 0) - (float) ($item['recommended_qty'] ?? 0),
+                                        2
+                                    )),
+                                    'recommended_pieces_text' => $recommendedPieces !== '' ? $recommendedPieces : '-',
+                                    'ai_reason' => (string) ($item['ai_reason'] ?? '-'),
+                                    'status' => 'pending',
+                                ];
+                            })->values()->all();
+
                             return [
                                 Toggle::make('generate_pr')
                                     ->label('Jika ada kekurangan stok, generate PR otomatis')
                                     ->default(true)
                                     ->inline(false),
+                                Repeater::make('material_decisions')
+                                    ->label('Approval per Material')
+                                    ->schema([
+                                        Hidden::make('material_id')->required(),
+                                        Hidden::make('recommended_piece_ids'),
+                                        TextInput::make('material_name')
+                                            ->label('Material')
+                                            ->disabled()
+                                            ->dehydrated(false),
+                                        TextInput::make('dibutuhkan')
+                                            ->label('Qty Dibutuhkan')
+                                            ->suffix(fn (Get $get): string => (string) ($get('satuan') ?: 'unit'))
+                                            ->disabled()
+                                            ->dehydrated(false),
+                                        TextInput::make('recommended_qty')
+                                            ->label('Qty Booking')
+                                            ->suffix(fn (Get $get): string => (string) ($get('satuan') ?: 'unit'))
+                                            ->disabled()
+                                            ->dehydrated(false),
+                                        TextInput::make('qty_pr')
+                                            ->label('Qty PR')
+                                            ->suffix(fn (Get $get): string => (string) ($get('satuan') ?: 'unit'))
+                                            ->disabled()
+                                            ->dehydrated(false),
+                                        TextInput::make('recommended_pieces_text')
+                                            ->label('Detail Piece')
+                                            ->disabled()
+                                            ->dehydrated(false),
+                                        Textarea::make('ai_reason')
+                                            ->label('Analisis AI')
+                                            ->rows(2)
+                                            ->disabled()
+                                            ->dehydrated(false),
+                                        Select::make('status')
+                                            ->label('Keputusan')
+                                            ->options([
+                                                'pending' => 'Pending',
+                                                'approved' => 'Approve',
+                                                'rejected' => 'Tolak',
+                                            ])
+                                            ->default('pending')
+                                            ->required(),
+                                        Hidden::make('satuan')->dehydrated(false),
+                                    ])
+                                    ->columns(2)
+                                    ->default($materialRows)
+                                    ->addable(false)
+                                    ->deletable(false)
+                                    ->reorderable(false)
+                                    ->minItems(1),
                             ];
                         }
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
@@ -154,8 +247,28 @@ class TasksTable
                     ->action(function (Task $record, array $data) {
                         $service = new TaskApprovalService();
                         if ($record->type === 'ai_booking_suggestion') {
+                            $materialDecisions = collect($data['material_decisions'] ?? []);
+
+                            if ($materialDecisions->contains(fn ($row) => ($row['status'] ?? 'pending') === 'pending')) {
+                                \Filament\Notifications\Notification::make()
+                                    ->title('Masih ada material pending')
+                                    ->body('Silakan approve atau tolak semua material terlebih dahulu.')
+                                    ->warning()
+                                    ->send();
+
+                                return;
+                            }
+
                             $service->approve($record, auth()->user(), [
                                 'generate_pr' => (bool) ($data['generate_pr'] ?? true),
+                                'material_decisions' => $materialDecisions
+                                    ->map(function (array $row): array {
+                                        $row['recommended_piece_ids'] = json_decode((string) ($row['recommended_piece_ids'] ?? '[]'), true) ?: [];
+
+                                        return $row;
+                                    })
+                                    ->values()
+                                    ->all(),
                             ]);
                         } elseif ($record->type === 'ai_inbound_allocation_suggestion') {
                             $service->approve($record, auth()->user(), [

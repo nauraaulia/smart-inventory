@@ -59,7 +59,7 @@
         }
     </style>
 
-    <div class="mx-auto w-full max-w-6xl space-y-6">
+    <div class="mx-auto w-full max-w-7xl space-y-6 px-2 sm:px-4 lg:px-6">
         <section class="po-shell rounded-2xl border p-6 shadow-sm">
             <div class="grid gap-4 md:grid-cols-3">
                 <div class="po-card rounded-xl border p-4">
