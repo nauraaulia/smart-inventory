@@ -4,7 +4,7 @@
             <x-slot name="heading">Lokasi Stok</x-slot>
 
             <form method="GET" action="{{ \App\Filament\Resources\Materials\MaterialResource::getUrl('stock-by-location') }}" class="grid gap-y-5 md:grid-cols-4 md:gap-x-4" autocomplete="off">
-                <div class="space-y-2.5">
+                <div class="space-y-1.5">
                     <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">Cari Material / Rak</label>
                     <input
                         type="text"
@@ -18,7 +18,7 @@
                     >
                 </div>
 
-                <div class="space-y-2.5">
+                <div class="space-y-1.5">
                     <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">Filter Lokasi Rak</label>
                     <select
                         name="shelf_location_id"
@@ -31,7 +31,7 @@
                     </select>
                 </div>
 
-                <div class="space-y-2.5">
+                <div class="space-y-1.5">
                     <label class="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-200">Filter Material</label>
                     <select
                         name="material_id"

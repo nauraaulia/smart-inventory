@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Validation\ValidationException;
 
 class Inbound extends Model
@@ -47,6 +48,11 @@ class Inbound extends Model
     public function purchaseOrderItem(): BelongsTo
     {
         return $this->belongsTo(PurchaseOrderItem::class);
+    }
+
+    public function materialPieces(): HasMany
+    {
+        return $this->hasMany(MaterialPiece::class);
     }
 
     protected static function booted()
@@ -212,6 +218,11 @@ static::created(function ($inbound) {
                     $inbound->material->decrement('stok_rusak', $inbound->quantity);
                 }
             }
+        }
+
+        // Pastikan summary stok sinkron dengan piece yang tersisa setelah inbound dihapus.
+        if ($inbound->material) {
+            $inbound->material->updateStokSummary();
         }
 
         // CCTV

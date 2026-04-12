@@ -4,6 +4,7 @@ namespace App\Services\Inventory;
 
 use App\Models\Inbound;
 use App\Models\MaterialPiece;
+use App\Models\Project;
 use App\Models\ProjectItem;
 use App\Models\PurchaseRequest;
 use App\Models\Task;
@@ -111,35 +112,63 @@ class InboundAutoAllocationService
                 return;
             }
 
+            /** @var Inbound|null $inbound */
+            $inbound = Inbound::query()->find($lockedPiece->inbound_id);
+
+            if (!$inbound || !empty($inbound->purchase_order_id)) {
+                return;
+            }
+
+            $piecePool = MaterialPiece::query()
+                ->lockForUpdate()
+                ->where('status', 'available')
+                ->where('inbound_id', $lockedPiece->inbound_id)
+                ->where('material_id', $lockedPiece->material_id)
+                ->orderByDesc('panjang')
+                ->get();
+
+            if ($piecePool->isEmpty()) {
+                return;
+            }
+
+            $pieceIds = $piecePool->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
+            $totalAvailable = (float) $piecePool->sum('panjang');
+
             $hasPendingTask = Task::query()
                 ->where('type', 'ai_inbound_allocation_suggestion')
                 ->where('status', 'pending')
-                ->where('payload->piece_id', $lockedPiece->id)
+                ->where('payload->inbound_id', (int) $lockedPiece->inbound_id)
+                ->where('payload->material_id', (int) $lockedPiece->material_id)
                 ->exists();
 
             if ($hasPendingTask) {
                 return;
             }
 
-            $suggestions = $this->buildSuggestions($lockedPiece);
+            $suggestions = $this->buildSuggestions(
+                materialId: (int) $lockedPiece->material_id,
+                remaining: $totalAvailable,
+            );
 
             if (empty($suggestions)) {
                 return;
             }
 
-            $materialName = $lockedPiece->material?->nama ?? ('Material #' . $lockedPiece->material_id);
+            $materialName = (string) ($lockedPiece->material?->nama_material ?? ('Material #' . $lockedPiece->material_id));
 
             Task::create([
                 'for_role' => 'Staff Administrasi Gudang',
                 'type' => 'ai_inbound_allocation_suggestion',
                 'title' => "Usulan Alokasi Inbound ({$materialName})",
-                'message' => "Inbound manual material {$materialName} (panjang {$lockedPiece->panjang}) siap dialokasikan. Silakan pilih proyek tujuan.",
+                'message' => "Inbound manual material {$materialName} tersedia {$totalAvailable}. Pilih proyek tujuan dan qty alokasi.",
                 'payload' => [
                     'piece_id' => $lockedPiece->id,
+                    'piece_ids' => $pieceIds,
                     'inbound_id' => $lockedPiece->inbound_id,
                     'material_id' => $lockedPiece->material_id,
                     'material_name' => $materialName,
                     'piece_length' => (float) $lockedPiece->panjang,
+                    'total_available_qty' => round($totalAvailable, 2),
                     'allocation_suggestions' => $suggestions,
                     'ai_reasoning' => null,
                 ],
@@ -153,17 +182,15 @@ class InboundAutoAllocationService
     /**
      * @return array<int, array<string, mixed>>
      */
-    private function buildSuggestions(MaterialPiece $piece): array
+    private function buildSuggestions(int $materialId, float $remaining): array
     {
-        $remaining = (float) $piece->panjang;
-
-        if ($remaining <= 0) {
+        if ($materialId <= 0 || $remaining <= 0) {
             return [];
         }
 
-        $requests = PurchaseRequest::query()
+        $prRequests = PurchaseRequest::query()
             ->with('project:id,kode_proyek')
-            ->where('material_id', $piece->material_id)
+            ->where('material_id', $materialId)
             ->whereNotNull('project_id')
             ->whereIn('status', ['approved', 'ordered', 'pending_finance', 'pending_manager'])
             ->orderByRaw("CASE status
@@ -177,14 +204,49 @@ class InboundAutoAllocationService
             ->orderBy('created_at')
             ->get();
 
+        $projectIds = $prRequests
+            ->pluck('project_id')
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn ($id) => $id > 0)
+            ->unique()
+            ->values()
+            ->all();
+
+        $projectItemProjectIds = ProjectItem::query()
+            ->where('material_id', $materialId)
+            ->whereNotNull('project_id')
+            ->distinct()
+            ->pluck('project_id')
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn ($id) => $id > 0)
+            ->all();
+
+        $candidateProjectIds = collect(array_merge($projectIds, $projectItemProjectIds))
+            ->unique()
+            ->values();
+
+        if ($candidateProjectIds->isEmpty()) {
+            return [];
+        }
+
+        $projectCodes = Project::query()
+            ->whereIn('id', $candidateProjectIds->all())
+            ->pluck('kode_proyek', 'id');
+
+        $prStatusByProject = $prRequests
+            ->groupBy('project_id')
+            ->map(function ($rows): string {
+                return (string) ($rows->first()->status ?? '-');
+            });
+
         $result = [];
 
-        foreach ($requests as $request) {
+        foreach ($candidateProjectIds as $projectIdRaw) {
             if ($remaining <= 0) {
                 break;
             }
 
-            $projectId = (int) $request->project_id;
+            $projectId = (int) $projectIdRaw;
 
             if ($projectId <= 0) {
                 continue;
@@ -192,7 +254,7 @@ class InboundAutoAllocationService
 
             $needed = $this->outstandingNeed(
                 projectId: $projectId,
-                materialId: (int) $piece->material_id,
+                materialId: $materialId,
             );
 
             if ($needed <= 0) {
@@ -207,8 +269,8 @@ class InboundAutoAllocationService
 
             $result[] = [
                 'project_id' => $projectId,
-                'project_code' => (string) (data_get($request, 'project.kode_proyek') ?: ('#' . $projectId)),
-                'pr_status' => (string) $request->status,
+                'project_code' => (string) ($projectCodes[$projectId] ?? ('#' . $projectId)),
+                'pr_status' => (string) ($prStatusByProject[$projectId] ?? 'no_active_pr'),
                 'suggested_qty' => round($allocated, 2),
             ];
 

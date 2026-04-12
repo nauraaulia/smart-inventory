@@ -3,7 +3,10 @@
 namespace App\Filament\Resources\Outbounds\Pages;
 
 use App\Filament\Resources\Outbounds\OutboundResource;
+use App\Models\Outbound;
 use App\Models\Project;
+use Filament\Actions\Action;
+use Filament\Forms\Components\FileUpload;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\Page;
 use Illuminate\Support\Facades\DB;
@@ -14,201 +17,187 @@ class ViewOutbound extends Page
 
     protected string $view = 'filament.resources.outbounds.pages.view-outbound';
 
-    public Project $record;
-
-    /**
-     * @var array<int>
-     */
-    public array $pickedPieceIds = [];
-
-    /**
-     * @var array<int, array<string, mixed>>
-     */
-    public array $rows = [];
-
-    /**
-     * @var array<int, array<string, mixed>>
-     */
-    public array $shortageRows = [];
+    public Outbound $record;
 
     public string $currentDate = '';
 
-    public function mount(Project $record): void
+    public function mount(Outbound $record): void
     {
         abort_unless($this->canAccessOutbound(auth()->user()?->role), 403);
 
-        $this->record = $record;
-        $this->currentDate = now()->translatedFormat('d F Y');
+        $this->record = $record->load([
+            'project:id,kode_proyek,nama_proyek,status',
+            'items:id,outbound_id,material_id,qty,unit',
+            'items.material:id,nama_material,satuan',
+        ]);
 
-        $this->reloadRows();
+        $this->currentDate = now()->translatedFormat('d F Y');
     }
 
     public function getHeading(): string
     {
-        return 'Outbound - ' . ($this->record->kode_proyek ?: ('Proyek #' . $this->record->id));
+        $projectCode = $this->record->project?->kode_proyek ?: ('#' . $this->record->project_id);
+
+        return 'Outbound - ' . $projectCode;
     }
 
     public function getSubheading(): ?string
     {
-        return 'Verifikasi fisik pengambilan semua barang sebelum transaksi outbound diselesaikan.';
+        return 'Kelola status outbound dari menunggu sampai barang diambil lengkap dengan bukti.';
     }
 
-    public function isAllChecked(): bool
+    protected function getHeaderActions(): array
     {
-        $allIds = collect($this->rows)->pluck('id')->map(fn ($id) => (int) $id)->unique()->values();
+        return [
+            Action::make('mark_ready')
+                ->label('Tandai Siap')
+                ->icon('heroicon-o-check-badge')
+                ->color('info')
+                ->visible(fn (): bool => $this->canPrepare() && $this->record->status === 'pending')
+                ->requiresConfirmation()
+                ->modalHeading('Tandai outbound siap diambil?')
+                ->action(function (): void {
+                    $this->record->update([
+                        'status' => 'ready',
+                        'ready_at' => now(),
+                        'prepared_by' => auth()->id(),
+                    ]);
 
-        if ($allIds->isEmpty()) {
-            return false;
-        }
+                    Notification::make()
+                        ->title('Outbound ditandai siap')
+                        ->success()
+                        ->send();
 
-        $checkedIds = collect($this->pickedPieceIds)->map(fn ($id) => (int) $id)->unique()->values();
+                    $this->record->refresh();
+                }),
+            Action::make('mark_taken')
+                ->label('Konfirmasi Sudah Diambil')
+                ->icon('heroicon-o-camera')
+                ->color('success')
+                ->visible(fn (): bool => $this->canTake() && $this->record->status === 'ready')
+                ->form([
+                    FileUpload::make('foto_bukti')
+                        ->label('Foto Bukti Pengambilan')
+                        ->image()
+                        ->directory('outbound-proofs')
+                        ->disk('public')
+                        ->required(),
+                ])
+                ->action(function (array $data): void {
+                    DB::transaction(function () use ($data): void {
+                        $this->record->update([
+                            'status' => 'taken',
+                            'taken_at' => now(),
+                            'foto_bukti' => (string) $data['foto_bukti'],
+                            'taken_by' => auth()->id(),
+                        ]);
 
-        return $checkedIds->count() === $allIds->count() && $checkedIds->diff($allIds)->isEmpty();
+                        if (!$this->record->outbound_manual && $this->record->project_id) {
+                            DB::table('material_pieces')
+                                ->where('booked_for_project_id', $this->record->project_id)
+                                ->where('status', 'booked')
+                                ->update([
+                                    'status' => 'used',
+                                    'used_at' => now(),
+                                    'updated_at' => now(),
+                                ]);
+                        }
+
+                        $project = $this->record->project;
+                        if ($project) {
+                            $this->completeProjectIfAllTaken($project);
+                        }
+                    });
+
+                    Notification::make()
+                        ->title('Outbound berhasil dikonfirmasi diambil')
+                        ->success()
+                        ->send();
+
+                    $this->record->refresh();
+                }),
+        ];
     }
 
-    public function confirmOutbound(): void
+    public function getDisplayItems(): array
     {
-        if ($this->hasShortage()) {
-            Notification::make()
-                ->title('Barang belum lengkap')
-                ->body('Masih ada material yang belum terpenuhi dari booking stok. Lengkapi dulu sebelum outbound.')
-                ->danger()
-                ->send();
+        $this->record->loadMissing([
+            'items.material:id,nama_material,satuan',
+            'project.bookedPieces:id,booked_for_project_id,material_id,panjang,status',
+            'project.bookedPieces.material:id,nama_material,satuan',
+        ]);
 
-            return;
+        if ($this->record->items->isNotEmpty()) {
+            return $this->record->items
+                ->map(fn ($item): array => [
+                    'material' => (string) ($item->material?->nama_material ?? 'Material tidak diketahui'),
+                    'qty' => $this->formatQty((float) $item->qty, (string) ($item->unit ?: ($item->material?->satuan ?: 'unit'))),
+                ])
+                ->values()
+                ->all();
         }
 
-        if (!$this->isAllChecked()) {
-            Notification::make()
-                ->title('Checklist belum lengkap')
-                ->body('Semua barang harus dicentang sebelum outbound dikonfirmasi.')
-                ->warning()
-                ->send();
-
-            return;
+        $project = $this->record->project;
+        if (!$project) {
+            return [];
         }
 
-        $pieceIds = collect($this->rows)->pluck('id')->map(fn ($id) => (int) $id)->all();
-
-        DB::transaction(function () use ($pieceIds): void {
-            $this->record->bookedPieces()
-                ->whereIn('id', $pieceIds)
-                ->where('status', 'booked')
-                ->update([
-                    'status' => 'used',
-                    'used_at' => now(),
-                ]);
-
-            $this->record->update([
-                'status' => 'Processing',
-                'outbound_confirmed_at' => now(),
-            ]);
-        });
-
-        Notification::make()
-            ->title('Outbound berhasil dikonfirmasi')
-            ->success()
-            ->send();
-
-        $this->redirect(OutboundResource::getUrl('index'));
-    }
-
-    private function reloadRows(): void
-    {
-        $pieces = $this->record->bookedPieces()
-            ->with(['material:id,nama_material,satuan', 'shelfLocation:id,kode_lokasi,nama_lokasi'])
-            ->where('status', 'booked')
-            ->orderBy('shelf_location_id')
-            ->orderBy('material_id')
-            ->get();
-
-        $requiredByMaterial = $this->record->items()
-            ->with('material:id,nama_material,satuan')
-            ->get()
+        return $project->bookedPieces
+            ->whereIn('status', ['booked', 'used'])
             ->groupBy('material_id')
-            ->map(function ($items) {
-                $first = $items->first();
+            ->map(function ($pieces): array {
+                $first = $pieces->first();
+                $unit = (string) ($first?->material?->satuan ?: 'unit');
 
                 return [
-                    'material_name' => $first?->material?->nama_material ?: 'Material tidak diketahui',
-                    'unit' => $first?->material?->satuan ?: 'unit',
-                    'required' => (float) $items->sum('jumlah_diminta'),
-                ];
-            });
-
-        $bookedQtyByMaterial = $pieces
-            ->groupBy('material_id')
-            ->map(fn ($materialPieces) => (float) $materialPieces->sum('panjang'));
-
-        $pieceCountByMaterial = $pieces
-            ->countBy(fn ($piece) => (int) $piece->material_id);
-
-        $this->rows = $pieces->map(function ($piece) use ($pieceCountByMaterial): array {
-            $qtyNumber = rtrim(rtrim(number_format((float) $piece->panjang, 2, '.', ''), '0'), '.');
-            $unit = $piece->material?->satuan ?: 'unit';
-            $pieceCount = (int) ($pieceCountByMaterial[(int) $piece->material_id] ?? 1);
-            $isPotongan = $this->isLengthUnit($unit)
-                && $pieceCount > 1;
-
-            return [
-                'id' => (int) $piece->id,
-                'rack' => $piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-'),
-                'material_name' => $piece->material?->nama_material ?: 'Material tidak diketahui',
-                'qty' => trim($qtyNumber . ' ' . $unit),
-                'type' => $isPotongan ? 'Potongan' : 'Utuh',
-            ];
-        })->all();
-
-        $this->shortageRows = $requiredByMaterial
-            ->map(function (array $materialData, $materialId) use ($bookedQtyByMaterial): ?array {
-                $required = (float) $materialData['required'];
-
-                if ($required <= 0) {
-                    return null;
-                }
-
-                $booked = (float) ($bookedQtyByMaterial[(int) $materialId] ?? 0);
-                $shortage = max(0, round($required - $booked, 2));
-
-                if ($shortage <= 0) {
-                    return null;
-                }
-
-                $unit = (string) $materialData['unit'];
-
-                return [
-                    'material_name' => (string) $materialData['material_name'],
-                    'required' => $this->formatQty($required, $unit),
-                    'booked' => $this->formatQty($booked, $unit),
-                    'shortage' => $this->formatQty($shortage, $unit),
+                    'material' => (string) ($first?->material?->nama_material ?: 'Material tidak diketahui'),
+                    'qty' => $this->formatQty((float) $pieces->sum('panjang'), $unit),
                 ];
             })
-            ->filter()
             ->values()
             ->all();
-
-        $this->pickedPieceIds = [];
     }
 
-    public function hasShortage(): bool
+    private function completeProjectIfAllTaken(Project $project): void
     {
-        return !empty($this->shortageRows);
+        $remaining = $project->outbounds()->where('status', '!=', 'taken')->count();
+
+        if ($remaining === 0) {
+            $project->update([
+                'status' => 'Completed',
+                'completed_at' => now(),
+            ]);
+        }
     }
 
-    public function canConfirmOutbound(): bool
+    private function canPrepare(): bool
     {
-        return $this->isAllChecked() && !$this->hasShortage();
+        return in_array(auth()->user()?->role, [
+            'Staff Administrasi Gudang',
+            'Staff Adm Gudang',
+            'Staff Gudang',
+            'Administrator IT',
+        ], true);
     }
 
-    private function isLengthUnit(string $unit): bool
+    private function canTake(): bool
     {
-        $normalized = strtolower(trim($unit));
+        return in_array(auth()->user()?->role, [
+            'Manager Teknik',
+            'Manajer Teknik',
+            'Administrator IT',
+        ], true);
+    }
 
-        return in_array($normalized, [
-            'm',
-            'meter',
-            'meters',
-            'mtr',
+    private function canAccessOutbound(?string $role): bool
+    {
+        return in_array($role, [
+            'Manager Teknik',
+            'Manajer Teknik',
+            'Staff Administrasi Gudang',
+            'Staff Adm Gudang',
+            'Staff Gudang',
+            'Administrator IT',
         ], true);
     }
 
@@ -217,16 +206,5 @@ class ViewOutbound extends Page
         $number = rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.');
 
         return trim($number . ' ' . $unit);
-    }
-
-    private function canAccessOutbound(?string $role): bool
-    {
-        return in_array($role, [
-            'Manager Teknik',
-            'Staff Administrasi Gudang',
-            'Staff Adm Gudang',
-            'Staff Gudang',
-            'Administrator IT',
-        ], true);
     }
 }

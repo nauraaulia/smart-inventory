@@ -200,27 +200,40 @@ class TaskApprovalService
     {
         $payload = $task->payload ?? [];
         $pieceId = (int) data_get($payload, 'piece_id');
+        $inboundId = (int) data_get($payload, 'inbound_id');
+        $materialId = (int) data_get($payload, 'material_id');
+        $pieceIds = collect(data_get($payload, 'piece_ids', []))
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn ($id) => $id > 0)
+            ->values()
+            ->all();
+
+        if (empty($pieceIds) && $pieceId > 0) {
+            $pieceIds = [$pieceId];
+        }
+
         $manualAlloc = collect($options['manual_allocation'] ?? []);
         $suggestions = $manualAlloc->isNotEmpty()
-            ? $manualAlloc->map(fn($row) => [
-                'project_id' => (int) ($row['project_id'] ?? 0),
-                'suggested_qty' => (float) ($row['qty'] ?? 0),
-            ])
+            ? $manualAlloc
+                ->filter(fn ($row) => (bool) ($row['selected'] ?? true))
+                ->map(fn($row) => [
+                    'project_id' => (int) ($row['project_id'] ?? 0),
+                    'suggested_qty' => (float) ($row['qty'] ?? 0),
+                ])
             : collect(data_get($payload, 'allocation_suggestions', []));
 
-        if ($pieceId <= 0 || $suggestions->isEmpty()) {
+        if (($pieceId <= 0 && empty($pieceIds)) || $suggestions->isEmpty()) {
             $this->markDone($task, $actor);
 
             return;
         }
 
-        /** @var MaterialPiece|null $piece */
-        $piece = MaterialPiece::query()->lockForUpdate()->find($pieceId);
+        $availablePoolQty = $this->availablePoolQty($materialId, $inboundId, $pieceIds);
 
-        if (!$piece || $piece->status !== 'available') {
+        if ($availablePoolQty <= 0) {
             data_set($payload, 'execution_result', [
                 'status' => 'skipped',
-                'reason' => 'Piece sudah tidak available saat approval diproses.',
+                'reason' => 'Piece pool sudah tidak available saat approval diproses.',
                 'piece_id' => $pieceId,
             ]);
 
@@ -235,7 +248,7 @@ class TaskApprovalService
             return;
         }
 
-        $remaining = (float) $piece->panjang;
+        $remaining = $availablePoolQty;
         $allocations = [];
 
         foreach ($suggestions as $row) {
@@ -265,17 +278,27 @@ class TaskApprovalService
                 continue;
             }
 
-            $this->allocatePortionFromSinglePiece($piece, $projectId, $allocQty);
-            $piece->refresh();
-            $remaining = (float) $piece->panjang;
+            $allocated = $this->allocateFromAvailablePool(
+                materialId: $materialId,
+                inboundId: $inboundId > 0 ? $inboundId : null,
+                pieceIds: $pieceIds,
+                projectId: $projectId,
+                qtyNeeded: $allocQty,
+            );
+
+            if ($allocated <= 0) {
+                continue;
+            }
+
+            $remaining = $this->availablePoolQty($materialId, $inboundId, $pieceIds);
 
             $allocations[] = [
                 'project_id' => $projectId,
                 'project_code' => $this->projectCodeFromPayload(['project_id' => $projectId], $projectId),
-                'allocated_qty' => round($allocQty, 2),
+                'allocated_qty' => round($allocated, 2),
             ];
 
-            if ($piece->status !== 'available') {
+            if ($remaining <= 0) {
                 break;
             }
         }
@@ -284,7 +307,7 @@ class TaskApprovalService
             'status' => 'processed',
             'piece_id' => $pieceId,
             'allocated_rows' => $allocations,
-            'remaining_piece_length' => $piece->status === 'available' ? (float) $piece->panjang : 0,
+            'remaining_piece_length' => $remaining,
         ]);
 
         $task->update([
@@ -296,6 +319,65 @@ class TaskApprovalService
                 : 'Usulan disetujui dan alokasi inbound manual sudah dibooking sesuai kebutuhan terbaru.',
             'payload' => $payload,
         ]);
+    }
+
+    private function availablePoolQty(int $materialId, int $inboundId, array $pieceIds): float
+    {
+        $query = MaterialPiece::query()
+            ->where('status', 'available')
+            ->where('material_id', $materialId);
+
+        if ($inboundId > 0) {
+            $query->where('inbound_id', $inboundId);
+        }
+
+        if (!empty($pieceIds)) {
+            $query->whereIn('id', $pieceIds);
+        }
+
+        return round((float) $query->sum('panjang'), 2);
+    }
+
+    private function allocateFromAvailablePool(int $materialId, ?int $inboundId, array $pieceIds, int $projectId, float $qtyNeeded): float
+    {
+        $remaining = max(0, $qtyNeeded);
+        $allocated = 0.0;
+
+        while ($remaining > 0.00001) {
+            $query = MaterialPiece::query()
+                ->lockForUpdate()
+                ->where('status', 'available')
+                ->where('material_id', $materialId)
+                ->orderByDesc('panjang');
+
+            if (($inboundId ?? 0) > 0) {
+                $query->where('inbound_id', $inboundId);
+            }
+
+            if (!empty($pieceIds)) {
+                $query->whereIn('id', $pieceIds);
+            }
+
+            /** @var MaterialPiece|null $piece */
+            $piece = $query->first();
+
+            if (!$piece) {
+                break;
+            }
+
+            $chunk = min($remaining, (float) $piece->panjang);
+
+            if ($chunk <= 0) {
+                break;
+            }
+
+            $this->allocatePortionFromSinglePiece($piece, $projectId, $chunk);
+
+            $allocated += $chunk;
+            $remaining -= $chunk;
+        }
+
+        return round($allocated, 2);
     }
 
     private function buildAiApprovalMessage(

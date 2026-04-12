@@ -5,9 +5,11 @@ namespace App\Filament\Resources\Tasks\Tables;
 use App\Filament\Resources\Tasks\TaskResource;
 use App\Models\Task;
 use App\Services\AI\TaskApprovalService;
+use Filament\Forms\Components\Hidden;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
+use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Tables\Columns\BadgeColumn;
 use Filament\Tables\Columns\TextColumn;
@@ -104,42 +106,45 @@ class TasksTable
                         }
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             $suggestions = collect(data_get($record->payload, 'allocation_suggestions', []));
-
-                            $suggestedProjectIds = $suggestions->pluck('project_id')->toArray();
-
-                            $projectOptions = \App\Models\Project::query()
-                                ->whereIn('id', $suggestedProjectIds)
-                                ->orderBy('kode_proyek')
-                                ->pluck('kode_proyek', 'id')
-                                ->toArray();
+                            $defaultRows = $suggestions->map(fn ($s) => [
+                                'selected' => true,
+                                'project_id' => (int) ($s['project_id'] ?? 0),
+                                'project_code' => (string) ($s['project_code'] ?? ('#' . ($s['project_id'] ?? '-'))),
+                                'pr_status' => (string) ($s['pr_status'] ?? '-'),
+                                'qty' => (float) ($s['suggested_qty'] ?? 0),
+                            ])->values()->all();
 
                             return [
                                 \Filament\Forms\Components\Repeater::make('manual_allocation')
-                                    ->label('Alokasi ke Proyek')
+                                    ->label('Checklist Alokasi Proyek')
+                                    ->helperText('Kebutuhan proyek sudah dihitung sistem. Centang proyek yang ingin dialokasikan sekarang; sisanya tetap menjadi stok gudang available.')
                                     ->schema([
-                                        \Filament\Forms\Components\Select::make('project_id')
-                                            ->label('Proyek')
-                                            ->options($projectOptions)
-                                            ->required()
-                                            ->reactive()
-                                            ->afterStateUpdated(function ($state, callable $set) use ($suggestions) {
-                                                $match = $suggestions->firstWhere('project_id', (int) $state);
-                                                if ($match) {
-                                                    $set('qty', $match['suggested_qty']);
-                                                }
-                                            }),
-                                        \Filament\Forms\Components\TextInput::make('qty')
-                                            ->label('Qty')
-                                            ->numeric()
+                                        Hidden::make('project_id')
                                             ->required(),
+                                        Toggle::make('selected')
+                                            ->label('Alokasikan ke proyek ini')
+                                            ->default(true)
+                                            ->inline(false),
+                                        TextInput::make('project_code')
+                                            ->label('Proyek')
+                                            ->disabled()
+                                            ->dehydrated(false),
+                                        TextInput::make('pr_status')
+                                            ->label('Status PR')
+                                            ->disabled()
+                                            ->dehydrated(false),
+                                        TextInput::make('qty')
+                                            ->label('Kebutuhan Qty')
+                                            ->numeric()
+                                            ->required()
+                                            ->disabled()
+                                            ->dehydrated(),
                                     ])
-                                    ->columns(2)
-                                    ->default(
-                                        $suggestions->map(fn($s) => [
-                                            'project_id' => $s['project_id'],
-                                            'qty' => $s['suggested_qty'],
-                                        ])->toArray()
-                                    )
+                                    ->columns(4)
+                                    ->default($defaultRows)
+                                    ->addable(false)
+                                    ->deletable(false)
+                                    ->reorderable(false)
                                     ->minItems(1)
                                     ->maxItems(10),
                             ];

@@ -158,6 +158,11 @@ class Project extends Model
         return $this->hasMany(MaterialPiece::class, 'booked_for_project_id');
     }
 
+    public function outbounds(): HasMany
+    {
+        return $this->hasMany(Outbound::class);
+    }
+
     public function getProgressLabelAttribute(): string
     {
         if ($this->prCount('pending_manager') > 0) {

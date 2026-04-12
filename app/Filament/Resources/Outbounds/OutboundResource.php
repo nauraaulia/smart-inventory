@@ -5,7 +5,7 @@ namespace App\Filament\Resources\Outbounds;
 use App\Filament\Resources\Outbounds\Pages\ListOutbounds;
 use App\Filament\Resources\Outbounds\Pages\ViewOutbound;
 use App\Filament\Resources\Outbounds\Tables\OutboundsTable;
-use App\Models\Project;
+use App\Models\Outbound;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Support\Icons\Heroicon;
@@ -14,7 +14,7 @@ use Illuminate\Database\Eloquent\Builder;
 
 class OutboundResource extends Resource
 {
-    protected static ?string $model = Project::class;
+    protected static ?string $model = Outbound::class;
 
     protected static string | BackedEnum | null $navigationIcon = Heroicon::OutlinedTruck;
 
@@ -63,15 +63,12 @@ class OutboundResource extends Resource
         }
 
         return parent::getEloquentQuery()
-            ->whereIn('status', ['Pending', 'Approved'])
-            ->whereHas('bookedPieces', fn (Builder $query) => $query->where('status', 'booked'))
             ->with([
-                'items:id,project_id,material_id,jumlah_diminta',
-                'bookedPieces:id,booked_for_project_id,material_id,panjang,status',
+                'project:id,kode_proyek,nama_proyek,tanggal_mulai,status',
+                'items:id,outbound_id,material_id,qty,unit',
+                'items.material:id,nama_material,satuan',
             ])
-            ->withCount([
-                'bookedPieces as outbound_booked_count' => fn (Builder $query) => $query->where('status', 'booked'),
-            ]);
+            ->withCount('items');
     }
 
     public static function getPages(): array
@@ -86,6 +83,7 @@ class OutboundResource extends Resource
     {
         return in_array($role, [
             'Manager Teknik',
+            'Manajer Teknik',
             'Staff Administrasi Gudang',
             'Staff Adm Gudang',
             'Staff Gudang',

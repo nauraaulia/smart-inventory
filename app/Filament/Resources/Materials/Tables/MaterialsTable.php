@@ -132,7 +132,7 @@ class MaterialsTable
     {
         $rows = MaterialPiece::query()
             ->where('material_id', $record->id)
-            ->whereIn('status', ['booked', 'used'])
+            ->where('status', 'booked')
             ->whereNotNull('booked_for_project_id')
             ->with('bookedForProject:id,kode_proyek')
             ->get(['booked_for_project_id', 'panjang'])
