@@ -18,13 +18,15 @@ class GeminiService
  
     public function ask(string $prompt): string
     {
-        $maxRetries = 3;
-        $attempt = 0;
+        $maxRetries = 4;
         $lastResponse = null;
+        $lastError = null;
  
-        while ($attempt < $maxRetries) {
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
             try {
-                $response = Http::timeout(120)->post("{$this->apiUrl}?key={$this->apiKey}", [
+                $response = Http::timeout(120)
+                    ->connectTimeout(15)
+                    ->post("{$this->apiUrl}?key={$this->apiKey}", [
                     'contents' => [
                         ['parts' => [['text' => $prompt]]]
                     ],
@@ -36,18 +38,27 @@ class GeminiService
  
                 $lastResponse = $response;
  
-                if ($response->status() === 429) {
-                    Log::warning('Gemini rate limited', [
-                        'attempt' => $attempt + 1,
+                if (in_array($response->status(), [429, 503], true)) {
+                    Log::warning('Gemini transient error', [
+                        'attempt' => $attempt,
                         'status' => $response->status(),
                         'body' => $response->body(),
                     ]);
  
-                    return json_encode([
-                        'error' => 'Gemini rate limited',
-                        'status' => 429,
+                    $lastError = [
+                        'error' => $response->status() === 429
+                            ? 'Gemini rate limited'
+                            : 'Gemini sementara unavailable',
+                        'status' => $response->status(),
                         'body' => $response->json() ?? $response->body(),
-                    ]);
+                    ];
+
+                    if ($attempt < $maxRetries) {
+                        usleep(400000 * $attempt);
+                        continue;
+                    }
+
+                    return json_encode($lastError);
                 }
  
                 if ($response->failed()) {
@@ -67,13 +78,24 @@ class GeminiService
                     ?? json_encode(['error' => 'Response kosong']);
  
             } catch (\Exception $e) {
-                Log::error('Gemini Exception', ['message' => $e->getMessage()]);
-                return json_encode(['error' => $e->getMessage()]);
+                $lastError = ['error' => $e->getMessage()];
+
+                Log::error('Gemini Exception', [
+                    'attempt' => $attempt,
+                    'message' => $e->getMessage(),
+                ]);
+
+                if ($attempt < $maxRetries) {
+                    usleep(400000 * $attempt);
+                    continue;
+                }
+
+                return json_encode($lastError);
             }
         }
  
-        return json_encode([
-            'error' => 'Gemini 429 setelah retry',
+        return json_encode($lastError ?? [
+            'error' => 'Gemini gagal setelah retry',
             'status' => $lastResponse?->status(),
             'body' => $lastResponse?->json() ?? $lastResponse?->body(),
         ]);

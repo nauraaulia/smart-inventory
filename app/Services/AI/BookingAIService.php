@@ -497,6 +497,15 @@ class BookingAIService
                 'wasted_small_cuts' => $wastedCuts,
                 'projects_using_3months' => $projectCount,
             ];
+
+            // Hanya kirim material yang memang punya jejak pemakaian historis.
+            $hasRealUsage = $projectCount > 0
+                || (float) $avgBookingPerProject > 0
+                || !empty($usageBySource);
+
+            if (!$hasRealUsage) {
+                unset($history[$materialId]);
+            }
         }
 
         return $history;
@@ -533,9 +542,23 @@ class BookingAIService
                         'rack_label' => (string) ($piece['rack_label'] ?? '-'),
                         'umur_hari' => (int) ($piece['umur_hari'] ?? 0),
                     ];
-                }, (array) ($stock['pieces'] ?? []))),
+                }, array_slice((array) ($stock['pieces'] ?? []), 0, 12))),
             ];
-        })->values()->all();
+        })
+            ->filter(fn (array $row): bool => (int) ($row['material_id'] ?? 0) > 0 && (float) ($row['dibutuhkan'] ?? 0) > 0)
+            ->values()
+            ->all();
+
+        if (empty($dataset)) {
+            throw new \RuntimeException('Tidak ada material kebutuhan valid untuk dikirim ke Gemini.');
+        }
+
+        $requiredMaterialIds = collect($dataset)
+            ->pluck('material_id')
+            ->map(fn ($id): string => (string) ((int) $id))
+            ->unique()
+            ->values()
+            ->all();
 
         $dataJson = json_encode($dataset, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
         if (!is_string($dataJson) || $dataJson === '') {
@@ -649,6 +672,7 @@ PROMPT;
         Log::info('Gemini full analysis - prompt dikirim', [
             'project_id' => $projectId,
             'materials_count' => count($dataset),
+            'materials_ids' => $requiredMaterialIds,
         ]);
 
         $responseRaw = (string) $this->gemini->ask($prompt);
@@ -668,15 +692,102 @@ PROMPT;
             }
         }
 
+        if (!$this->isValidGeminiFullAnalysisResponse($decoded, $requiredMaterialIds)) {
+            $compactPrompt = <<<PROMPT
+Kamu adalah AI inventory analyst.
+
+Analisis HANYA material yang ada di daftar ini (jangan tambah material lain):
+{$dataJson}
+
+Catatan teknis manager: "{$catatanPrompt}"
+
+Output WAJIB JSON valid TANPA teks tambahan:
+{
+  "instruksi_manager": {
+    "tanpa_potongan": false,
+    "ringkas": "...",
+    "alasan": "..."
+  },
+  "ringkasan": "...",
+  "materials": {
+    "<material_id>": {
+      "aksi": "full_booking|partial|full_pr",
+      "selected_piece_ids": [1,2],
+      "alasan_per_piece": {"1":"..."},
+      "overall_reason": "...",
+      "sisa_analysis": "..."
+    }
+  }
+}
+
+ATURAN KETAT:
+- materials HARUS berisi SEMUA material_id dari daftar input
+- JANGAN hitung take_qty/sisa numerik
+- selected_piece_ids HARUS berasal dari piece di material yang sama
+- Jawaban ringkas, jangan panjang
+PROMPT;
+
+            Log::warning('Gemini full analysis response belum valid, retry prompt ringkas.', [
+                'project_id' => $projectId,
+                'required_material_ids' => $requiredMaterialIds,
+            ]);
+
+            $retryRaw = (string) $this->gemini->ask($compactPrompt);
+            $retryClean = trim((string) preg_replace('/```json|```/i', '', $retryRaw));
+
+            Log::info('Gemini full analysis - retry raw response', [
+                'project_id' => $projectId,
+                'response_length' => strlen($retryRaw),
+                'response_preview' => mb_substr($retryClean, 0, 3000),
+            ]);
+
+            $retryDecoded = json_decode($retryClean, true);
+            if (!is_array($retryDecoded) && preg_match('/\{(?:[^{}]|(?R))*\}/s', $retryClean, $match)) {
+                $retryDecoded = json_decode((string) $match[0], true);
+            }
+
+            $decoded = is_array($retryDecoded) ? $retryDecoded : $decoded;
+        }
+
         if (!is_array($decoded)) {
             throw new \RuntimeException('Response Gemini full analysis bukan JSON valid.');
         }
 
-        if (!is_array($decoded['materials'] ?? null)) {
+        if (!$this->isValidGeminiFullAnalysisResponse($decoded, $requiredMaterialIds)) {
             throw new \RuntimeException('Response Gemini tidak memiliki key materials yang valid.');
         }
 
         return $decoded;
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $decoded
+     * @param  array<int, string>  $requiredMaterialIds
+     */
+    private function isValidGeminiFullAnalysisResponse(?array $decoded, array $requiredMaterialIds): bool
+    {
+        if (!is_array($decoded)) {
+            return false;
+        }
+
+        $materials = $decoded['materials'] ?? null;
+        if (!is_array($materials)) {
+            return false;
+        }
+
+        foreach ($requiredMaterialIds as $materialId) {
+            $node = $materials[$materialId] ?? null;
+            if (!is_array($node)) {
+                return false;
+            }
+
+            $aksi = (string) ($node['aksi'] ?? '');
+            if (!in_array($aksi, ['full_booking', 'partial', 'full_pr'], true)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
