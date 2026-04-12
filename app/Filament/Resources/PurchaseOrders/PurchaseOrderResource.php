@@ -84,6 +84,24 @@ class PurchaseOrderResource extends Resource
         ];
     }
 
+    public static function getNavigationBadge(): ?string
+    {
+        if (!self::canViewPo()) {
+            return null;
+        }
+
+        $count = PurchaseOrder::query()
+            ->where('status', 'waiting_inbound')
+            ->count();
+
+        return $count > 0 ? (string) $count : null;
+    }
+
+    public static function getNavigationBadgeColor(): ?string
+    {
+        return 'warning';
+    }
+
     private static function canViewPo(): bool
     {
         $role = auth()->user()?->role;

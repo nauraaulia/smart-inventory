@@ -44,6 +44,9 @@ class TasksTable
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             return 'Alokasi Inbound';
                         }
+                        if ($record->type === 'ai_deadstock_recommendation') {
+                            return 'Screening Deadstock';
+                        }
                         return $state;
                     }),
 
@@ -55,8 +58,11 @@ class TasksTable
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             return 'Usulan Alokasi Inbound';
                         }
+                        if ($record->type === 'ai_deadstock_recommendation') {
+                            return $state ?: 'AI: Screening Deadstock';
+                        }
                         if (str_starts_with($record->type, 'ai_')) {
-                            return 'AI: Konfirmasi Kebutuhan Material Proyek';
+                            return $state ?: 'AI: Konfirmasi Kebutuhan Material Proyek';
                         }
                         return $state;
                     }),
@@ -242,6 +248,15 @@ class TasksTable
                                     ->maxItems(10),
                             ];
                         }
+                        if ($record->type === 'ai_deadstock_recommendation') {
+                            return [
+                                Textarea::make('deadstock_flow_note')
+                                    ->label('Info Alur')
+                                    ->default('Approve di sini hanya untuk ACC screening AI. Keputusan final per material (termasuk qty keep/dispose) dilakukan di menu Aging Material.')
+                                    ->disabled()
+                                    ->dehydrated(false),
+                            ];
+                        }
                         return [];
                     })
                     ->action(function (Task $record, array $data) {
@@ -274,6 +289,8 @@ class TasksTable
                             $service->approve($record, auth()->user(), [
                                 'manual_allocation' => $data['manual_allocation'] ?? [],
                             ]);
+                        } elseif ($record->type === 'ai_deadstock_recommendation') {
+                            $service->approve($record, auth()->user());
                         }
                     })
                     ->after(function ($livewire): void {

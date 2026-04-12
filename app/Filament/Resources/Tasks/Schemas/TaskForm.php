@@ -48,7 +48,7 @@ class TaskForm
                             ->rows(3),
                     ])->columns(1),
 
-                Section::make('Detail Rekomendasi AI')
+                Section::make('Detail Rekomendasi')
                     ->schema([
                         Repeater::make('payload.items')
                             ->visible(fn (?Task $record): bool => $record?->type === 'ai_booking_suggestion')
@@ -234,6 +234,43 @@ class TaskForm
                                     ->disabled(),
                             ])
                             ->columns(2),
+
+                        Repeater::make('payload.deadstock_items')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_deadstock_recommendation')
+                            ->label('Screening Deadstock')
+                            ->addable(false)
+                            ->deletable(false)
+                            ->reorderable(false)
+                            ->schema([
+                                TextInput::make('material_name')
+                                    ->label('Material')
+                                    ->disabled(),
+                                TextInput::make('available_qty')
+                                    ->label('Stok Saat Ini')
+                                    ->suffix(fn (Get $get): string => (string) ($get('satuan') ?: 'unit'))
+                                    ->disabled(),
+                                TextInput::make('last_used_days')
+                                    ->label('Tidak Terpakai (hari)')
+                                    ->disabled(),
+                                TextInput::make('oldest_available_days')
+                                    ->label('Umur Stok Tertua (hari)')
+                                    ->disabled(),
+                                TextInput::make('rekomendasi')
+                                    ->label('Saran Gemini')
+                                    ->disabled(),
+                                TextInput::make('prioritas')
+                                    ->label('Prioritas')
+                                    ->disabled(),
+                                Textarea::make('alasan')
+                                    ->label('Alasan')
+                                    ->rows(2)
+                                    ->disabled()
+                                    ->columnSpanFull(),
+                                TextInput::make('manager_decision')
+                                    ->label('Keputusan Manager')
+                                    ->disabled(),
+                            ])
+                            ->columns(3),
                     ]),
             ]);
     }

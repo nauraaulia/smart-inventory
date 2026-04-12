@@ -17,6 +17,7 @@ use Filament\Actions\Action;
 use Filament\Notifications\Events\DatabaseNotificationsSent;
 use Filament\Notifications\Notification;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class TaskApprovalService
 {
@@ -26,6 +27,7 @@ class TaskApprovalService
             match ($task->type) {
                 'ai_booking_suggestion' => $this->approveAiBookingSuggestion($task, $actor, $options),
                 'ai_inbound_allocation_suggestion' => $this->approveInboundAllocationSuggestion($task, $actor, $options),
+                'ai_deadstock_recommendation' => $this->approveDeadstockRecommendation($task, $actor, $options),
                 'pr_manager_approval' => $this->approveManagerPr($task, $actor),
                 'pr_finance_approval' => $this->approveFinancePr($task, $actor),
                 'pr_revision' => $this->approvePrRevision($task, $actor),
@@ -476,6 +478,212 @@ class TaskApprovalService
                 : 'Keterangan: ' . $this->decimal($allocatedTotalQty) . ' unit dialokasikan, ' . $this->decimal($returnedToStockQty) . ' unit masuk ke stok available.',
             'payload' => $payload,
         ]);
+    }
+
+    private function approveDeadstockRecommendation(Task $task, User $actor, array $options = []): void
+    {
+        $payload = $task->payload ?? [];
+        data_set($payload, 'approval_trail.manager_operasional', [
+            'status' => 'approved',
+            'by_user_id' => $actor->id,
+            'at' => now()->toDateTimeString(),
+            'note' => 'Task deadstock disetujui dan menunggu keputusan final pada menu Aging Material.',
+        ]);
+        data_set($payload, 'workflow_state', 'approved_for_aging');
+
+        $task->update([
+            'status' => 'approved',
+            'handled_by' => $actor->id,
+            'handled_at' => now(),
+            'message' => 'Keterangan: Screening deadstock di-ACC. Lanjutkan keputusan final di menu Aging Material.',
+            'payload' => $payload,
+        ]);
+    }
+
+    public function finalizeDeadstockAging(Task $task, User $actor, array $options = []): void
+    {
+        DB::transaction(function () use ($task, $actor, $options): void {
+            if ($task->type !== 'ai_deadstock_recommendation') {
+                throw ValidationException::withMessages([
+                    'deadstock_decisions' => 'Task ini bukan task deadstock.',
+                ]);
+            }
+
+            if ($task->status !== 'approved') {
+                throw ValidationException::withMessages([
+                    'deadstock_decisions' => 'Task harus di-ACC dulu di menu Tasks sebelum diproses di Aging Material.',
+                ]);
+            }
+
+            $payload = $task->payload ?? [];
+            $rows = collect($options['deadstock_decisions'] ?? [])
+                ->filter(fn ($row): bool => is_array($row) && (int) ($row['material_id'] ?? 0) > 0)
+                ->values();
+
+            if ($rows->isEmpty()) {
+                throw ValidationException::withMessages([
+                    'deadstock_decisions' => 'Keputusan per material wajib diisi sebelum submit.',
+                ]);
+            }
+
+            $normalizedRows = $rows->map(function (array $row) use ($actor): array {
+                $decision = (string) ($row['manager_decision'] ?? 'monitor');
+                if (!in_array($decision, ['buang', 'jual_murah', 'clearance', 'return_distributor', 'monitor'], true)) {
+                    $decision = 'monitor';
+                }
+
+                $availableQty = round(max(0, (float) ($row['available_qty'] ?? 0)), 2);
+                $qtyKept = round(max(0, (float) ($row['qty_kept'] ?? $availableQty)), 2);
+                $qtyDisposed = round(max(0, (float) ($row['qty_disposed'] ?? 0)), 2);
+
+                if ($decision === 'monitor') {
+                    $qtyDisposed = 0.0;
+                    $qtyKept = $availableQty;
+                } elseif (($qtyKept + $qtyDisposed) <= 0.00001) {
+                    $qtyDisposed = $availableQty;
+                    $qtyKept = 0.0;
+                }
+
+                if (abs(($qtyKept + $qtyDisposed) - $availableQty) > 0.01) {
+                    throw ValidationException::withMessages([
+                        'deadstock_decisions' => 'Qty Keep + Qty Buang harus sama dengan stok untuk material ' . (string) ($row['material_name'] ?? ('#' . (int) ($row['material_id'] ?? 0))) . '.',
+                    ]);
+                }
+
+                $removedFromStock = 0.0;
+                if (in_array($decision, ['buang', 'jual_murah', 'clearance', 'return_distributor'], true) && $qtyDisposed > 0) {
+                    $removedFromStock = $this->reduceAvailableStockForDeadstock(
+                        materialId: (int) ($row['material_id'] ?? 0),
+                        qtyToRemove: $qtyDisposed,
+                        decision: $decision,
+                        actorId: (int) $actor->id,
+                    );
+
+                    $qtyDisposed = $removedFromStock;
+                    $qtyKept = round(max(0, $availableQty - $removedFromStock), 2);
+                }
+
+                return [
+                    'material_id' => (int) ($row['material_id'] ?? 0),
+                    'material_name' => (string) ($row['material_name'] ?? ('Material #' . (int) ($row['material_id'] ?? 0))),
+                    'available_qty' => $availableQty,
+                    'satuan' => (string) ($row['satuan'] ?? 'unit'),
+                    'last_used_days' => (int) ($row['last_used_days'] ?? 0),
+                    'prioritas' => (string) ($row['prioritas'] ?? 'sedang'),
+                    'rekomendasi' => (string) ($row['rekomendasi'] ?? 'monitor'),
+                    'alasan' => (string) ($row['alasan'] ?? ''),
+                    'manager_decision' => $decision,
+                    'qty_kept' => round($qtyKept, 2),
+                    'qty_disposed' => round($qtyDisposed, 2),
+                    'removed_from_stock_qty' => round($removedFromStock, 2),
+                ];
+            })->values();
+
+            data_set($payload, 'workflow_state', 'completed_in_aging');
+            data_set($payload, 'deadstock_items', $normalizedRows->all());
+            data_set($payload, 'execution_result', [
+                'decisions' => $normalizedRows
+                    ->map(fn (array $row): array => [
+                        'material_id' => (int) $row['material_id'],
+                        'material_name' => (string) $row['material_name'],
+                        'decision' => (string) $row['manager_decision'],
+                        'qty_kept' => (float) ($row['qty_kept'] ?? 0),
+                        'qty_disposed' => (float) ($row['qty_disposed'] ?? 0),
+                    ])
+                    ->all(),
+                'decision_counts' => $normalizedRows->countBy(fn (array $row): string => (string) ($row['manager_decision'] ?? 'monitor')),
+                'total_qty_kept' => round((float) $normalizedRows->sum(fn (array $row): float => (float) ($row['qty_kept'] ?? 0)), 2),
+                'total_qty_disposed' => round((float) $normalizedRows->sum(fn (array $row): float => (float) ($row['qty_disposed'] ?? 0)), 2),
+                'finalized_by' => $actor->id,
+                'finalized_at' => now()->toDateTimeString(),
+            ]);
+
+            $counts = collect(data_get($payload, 'execution_result.decision_counts', []));
+            $summary = 'Keterangan: Aging material selesai diproses.';
+            if ($counts->isNotEmpty()) {
+                $summary = 'Keterangan: Aging selesai. ' . $counts
+                    ->map(fn ($count, $key): string => $key . ' ' . $count . ' material')
+                    ->implode(', ') . '. Total buang/jual/return ' . $this->decimal((float) data_get($payload, 'execution_result.total_qty_disposed', 0)) . ' unit.';
+            }
+
+            $task->update([
+                'status' => 'done',
+                'handled_by' => $actor->id,
+                'handled_at' => now(),
+                'message' => $summary,
+                'payload' => $payload,
+            ]);
+        });
+
+        $this->logUserAction(
+            actor: $actor,
+            action: 'Approve',
+            module: 'Aging Material',
+            description: "Finalize aging task {$task->type} (ID {$task->id}).",
+        );
+    }
+
+    private function reduceAvailableStockForDeadstock(int $materialId, float $qtyToRemove, string $decision, int $actorId): float
+    {
+        if ($materialId <= 0 || $qtyToRemove <= 0) {
+            return 0.0;
+        }
+
+        $remaining = round($qtyToRemove, 2);
+        $removed = 0.0;
+
+        while ($remaining > 0.00001) {
+            /** @var MaterialPiece|null $piece */
+            $piece = MaterialPiece::query()
+                ->where('material_id', $materialId)
+                ->where('status', 'available')
+                ->orderBy('created_at')
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->first();
+
+            if (!$piece) {
+                break;
+            }
+
+            $pieceLength = round((float) $piece->panjang, 2);
+
+            if ($pieceLength <= ($remaining + 0.00001)) {
+                $piece->update([
+                    'status' => 'used',
+                    'used_at' => now(),
+                    'keterangan' => trim((string) ($piece->keterangan ?? '') . ' | Aging: ' . $decision . ' oleh user #' . $actorId),
+                ]);
+
+                $removed += $pieceLength;
+                $remaining = round(max(0, $remaining - $pieceLength), 2);
+                continue;
+            }
+
+            $piece->update([
+                'panjang' => $this->decimal($pieceLength - $remaining),
+                'keterangan' => trim((string) ($piece->keterangan ?? '') . ' | Sisa split dari aging (' . $decision . ').'),
+            ]);
+
+            MaterialPiece::create([
+                'material_id' => $piece->material_id,
+                'inbound_id' => $piece->inbound_id,
+                'booked_for_project_id' => null,
+                'shelf_location_id' => $piece->shelf_location_id,
+                'supplier_id' => $piece->supplier_id,
+                'panjang' => $this->decimal($remaining),
+                'unit_price' => $piece->unit_price,
+                'status' => 'used',
+                'sumber' => 'aging_clearance',
+                'used_at' => now(),
+                'keterangan' => 'Pengurangan stok dari keputusan aging: ' . $decision . ' oleh user #' . $actorId,
+            ]);
+
+            $removed += $remaining;
+            $remaining = 0.0;
+        }
+
+        return round($removed, 2);
     }
 
     /**

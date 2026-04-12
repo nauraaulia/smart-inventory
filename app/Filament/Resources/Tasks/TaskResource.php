@@ -50,6 +50,7 @@ class TaskResource extends Resource
 
         return self::isAdminIt($role)
             || self::isManagerTeknik($role)
+            || self::isManagerOperasional($role)
             || self::isStaffAdministrasiGudang($role);
     }
 
@@ -65,7 +66,7 @@ class TaskResource extends Resource
             return false;
         }
 
-        if (!self::isManagerTeknik($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
+        if (!self::isManagerTeknik($user->role) && !self::isManagerOperasional($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
             return false;
         }
 
@@ -101,8 +102,14 @@ class TaskResource extends Resource
             return $query;
         }
 
-        if (!self::isManagerTeknik($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
+        if (!self::isManagerTeknik($user->role) && !self::isManagerOperasional($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
             return $query->whereRaw('1 = 0');
+        }
+
+        if (self::isManagerOperasional($user->role)) {
+            return $query
+                ->whereIn('for_role', self::roleAliases($user->role))
+                ->where('type', 'like', 'ai_%');
         }
 
         return $query->whereIn('for_role', self::roleAliases($user->role));
@@ -181,6 +188,13 @@ class TaskResource extends Resource
         $normalized = mb_strtolower(trim((string) $role));
 
         return in_array($normalized, ['manager teknik', 'manajer teknik'], true);
+    }
+
+    private static function isManagerOperasional(?string $role): bool
+    {
+        $normalized = mb_strtolower(trim((string) $role));
+
+        return in_array($normalized, ['manager operasional', 'manager operational', 'manajer operasional'], true);
     }
 
     private static function isStaffAdministrasiGudang(?string $role): bool

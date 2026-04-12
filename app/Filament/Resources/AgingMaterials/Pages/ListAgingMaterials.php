@@ -1,0 +1,31 @@
+<?php
+
+namespace App\Filament\Resources\AgingMaterials\Pages;
+
+use App\Filament\Resources\AgingMaterials\AgingMaterialResource;
+use Filament\Resources\Pages\ListRecords;
+use Filament\Schemas\Components\Tabs\Tab;
+use Illuminate\Database\Eloquent\Builder;
+
+class ListAgingMaterials extends ListRecords
+{
+    protected static string $resource = AgingMaterialResource::class;
+
+    protected ?string $pollingInterval = '2s';
+
+    public function getTabs(): array
+    {
+        return [
+            'approved' => Tab::make('Siap Diproses')
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'approved')),
+            'done' => Tab::make('Done')
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'done')),
+            'all' => Tab::make('Semua'),
+        ];
+    }
+
+    protected function getHeaderActions(): array
+    {
+        return [];
+    }
+}

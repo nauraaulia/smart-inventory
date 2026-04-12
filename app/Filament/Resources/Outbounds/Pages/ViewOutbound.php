@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Outbounds\Pages;
 
 use App\Filament\Resources\Outbounds\OutboundResource;
+use App\Jobs\AnalyzeDeadstockAfterOutboundJob;
 use App\Models\Outbound;
 use App\Models\Project;
 use App\Models\Task;
@@ -162,6 +163,8 @@ class ViewOutbound extends Page
                         ->title('Outbound berhasil dikonfirmasi diambil')
                         ->success()
                         ->send();
+
+                    AnalyzeDeadstockAfterOutboundJob::dispatchAfterResponse((int) $this->record->id);
 
                     $this->record->refresh();
                 }),

@@ -62,6 +62,7 @@ class BookingAIService
 
         $geminiFailedTotal = false;
         $geminiResponse = [];
+        $geminiFailureReason = '';
 
         try {
             $historicalContext = $this->prepareHistoricalContext($kebutuhanDelta);
@@ -76,6 +77,7 @@ class BookingAIService
             );
         } catch (\Throwable $e) {
             $geminiFailedTotal = true;
+            $geminiFailureReason = trim((string) $e->getMessage());
 
             Log::warning('Gemini full analysis gagal total, fallback lokal untuk semua material.', [
                 'project_id' => $projectId,
@@ -132,6 +134,9 @@ class BookingAIService
             }
 
             $ringkasanGemini = 'Gemini sedang sibuk, sistem tetap menyiapkan rekomendasi agar operasional tidak berhenti.';
+            if ($geminiFailureReason !== '') {
+                $ringkasanGemini .= ' (' . $geminiFailureReason . ')';
+            }
             $rekomendasiGemini = [];
         } else {
             $instruksiNode = is_array($geminiResponse['instruksi_manager'] ?? null)
@@ -692,6 +697,15 @@ PROMPT;
             }
         }
 
+        if ($this->isGeminiTransientErrorPayload($decoded)) {
+            $retrySeconds = $this->extractGeminiRetrySeconds($decoded);
+            throw new \RuntimeException(
+                $retrySeconds > 0
+                    ? ('Gemini cooldown aktif ' . $retrySeconds . ' detik (rate limit/high demand).')
+                    : 'Gemini sementara tidak tersedia (rate limit/high demand).'
+            );
+        }
+
         if (!$this->isValidGeminiFullAnalysisResponse($decoded, $requiredMaterialIds)) {
             $compactPrompt = <<<PROMPT
 Kamu adalah AI inventory analyst.
@@ -746,6 +760,15 @@ PROMPT;
                 $retryDecoded = json_decode((string) $match[0], true);
             }
 
+            if ($this->isGeminiTransientErrorPayload(is_array($retryDecoded) ? $retryDecoded : null)) {
+                $retrySeconds = $this->extractGeminiRetrySeconds(is_array($retryDecoded) ? $retryDecoded : null);
+                throw new \RuntimeException(
+                    $retrySeconds > 0
+                        ? ('Gemini cooldown aktif ' . $retrySeconds . ' detik (rate limit/high demand).')
+                        : 'Gemini sementara tidak tersedia (rate limit/high demand).'
+                );
+            }
+
             $decoded = is_array($retryDecoded) ? $retryDecoded : $decoded;
         }
 
@@ -788,6 +811,53 @@ PROMPT;
         }
 
         return true;
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $decoded
+     */
+    private function isGeminiTransientErrorPayload(?array $decoded): bool
+    {
+        if (!is_array($decoded)) {
+            return false;
+        }
+
+        $status = (int) ($decoded['status'] ?? 0);
+        if (in_array($status, [429, 503], true)) {
+            return true;
+        }
+
+        $errorText = mb_strtolower(trim((string) ($decoded['error'] ?? '')));
+
+        return str_contains($errorText, 'rate')
+            || str_contains($errorText, 'quota')
+            || str_contains($errorText, 'unavailable')
+            || str_contains($errorText, 'cooldown');
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $decoded
+     */
+    private function extractGeminiRetrySeconds(?array $decoded): int
+    {
+        if (!is_array($decoded)) {
+            return 0;
+        }
+
+        $retryAfter = (int) ($decoded['retry_after_seconds'] ?? 0);
+        if ($retryAfter > 0) {
+            return $retryAfter;
+        }
+
+        $retryDelay = data_get($decoded, 'body.error.details.2.retryDelay')
+            ?? data_get($decoded, 'error.details.2.retryDelay')
+            ?? data_get($decoded, 'retryDelay');
+
+        if (is_string($retryDelay) && preg_match('/(\d+)/', $retryDelay, $match)) {
+            return max(0, (int) $match[1]);
+        }
+
+        return 0;
     }
 
     /**

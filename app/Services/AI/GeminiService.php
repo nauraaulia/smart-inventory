@@ -2,6 +2,7 @@
  
 namespace App\Services\AI;
  
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
  
@@ -18,6 +19,17 @@ class GeminiService
  
     public function ask(string $prompt): string
     {
+        $cooldownUntil = (int) Cache::get('gemini:cooldown_until_ts', 0);
+        $nowTs = now()->timestamp;
+
+        if ($cooldownUntil > $nowTs) {
+            return json_encode([
+                'error' => 'Gemini cooldown aktif',
+                'status' => 429,
+                'retry_after_seconds' => $cooldownUntil - $nowTs,
+            ]);
+        }
+
         $maxRetries = 4;
         $lastResponse = null;
         $lastError = null;
@@ -39,18 +51,24 @@ class GeminiService
                 $lastResponse = $response;
  
                 if (in_array($response->status(), [429, 503], true)) {
+                    $responseBody = $response->json();
+                    $retrySeconds = $this->extractRetrySeconds(is_array($responseBody) ? $responseBody : null, $response->status());
+
                     Log::warning('Gemini transient error', [
                         'attempt' => $attempt,
                         'status' => $response->status(),
                         'body' => $response->body(),
                     ]);
+
+                    Cache::put('gemini:cooldown_until_ts', now()->timestamp + $retrySeconds, now()->addSeconds($retrySeconds));
  
                     $lastError = [
                         'error' => $response->status() === 429
                             ? 'Gemini rate limited'
                             : 'Gemini sementara unavailable',
                         'status' => $response->status(),
-                        'body' => $response->json() ?? $response->body(),
+                        'body' => $responseBody ?? $response->body(),
+                        'retry_after_seconds' => $retrySeconds,
                     ];
 
                     if ($attempt < $maxRetries) {
@@ -80,6 +98,8 @@ class GeminiService
             } catch (\Exception $e) {
                 $lastError = ['error' => $e->getMessage()];
 
+                Cache::put('gemini:cooldown_until_ts', now()->timestamp + 15, now()->addSeconds(15));
+
                 Log::error('Gemini Exception', [
                     'attempt' => $attempt,
                     'message' => $e->getMessage(),
@@ -99,6 +119,21 @@ class GeminiService
             'status' => $lastResponse?->status(),
             'body' => $lastResponse?->json() ?? $lastResponse?->body(),
         ]);
+    }
+
+    private function extractRetrySeconds(?array $body, int $status): int
+    {
+        $default = $status === 429 ? 45 : 20;
+
+        $retryDelay = data_get($body, 'body.error.details.2.retryDelay')
+            ?? data_get($body, 'error.details.2.retryDelay')
+            ?? data_get($body, 'retryDelay');
+
+        if (is_string($retryDelay) && preg_match('/(\d+)/', $retryDelay, $match)) {
+            return max(5, (int) $match[1]);
+        }
+
+        return $default;
     }
 }
  

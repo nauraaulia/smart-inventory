@@ -154,7 +154,7 @@ class PurchaseRequestResource extends Resource
         }
 
         if (self::isManager($user->role)) {
-            return $query->where('status', 'approved');
+            return $query->whereIn('status', ['pending_manager', 'pending_finance', 'approved', 'ordered', 'received']);
         }
 
         if (self::isFinance($user->role)) {
