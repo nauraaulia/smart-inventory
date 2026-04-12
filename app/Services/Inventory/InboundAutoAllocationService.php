@@ -134,16 +134,13 @@ class InboundAutoAllocationService
             $pieceIds = $piecePool->pluck('id')->map(fn ($id) => (int) $id)->values()->all();
             $totalAvailable = (float) $piecePool->sum('panjang');
 
-            $hasPendingTask = Task::query()
+            $existingPendingTask = Task::query()
                 ->where('type', 'ai_inbound_allocation_suggestion')
                 ->where('status', 'pending')
                 ->where('payload->inbound_id', (int) $lockedPiece->inbound_id)
                 ->where('payload->material_id', (int) $lockedPiece->material_id)
-                ->exists();
-
-            if ($hasPendingTask) {
-                return;
-            }
+                ->latest('id')
+                ->first();
 
             $suggestions = $this->buildSuggestions(
                 materialId: (int) $lockedPiece->material_id,
@@ -156,22 +153,35 @@ class InboundAutoAllocationService
 
             $materialName = (string) ($lockedPiece->material?->nama_material ?? ('Material #' . $lockedPiece->material_id));
 
+            $payload = [
+                'piece_id' => $lockedPiece->id,
+                'piece_ids' => $pieceIds,
+                'inbound_id' => $lockedPiece->inbound_id,
+                'material_id' => $lockedPiece->material_id,
+                'material_name' => $materialName,
+                'qty_dibutuhkan' => round((float) collect($suggestions)->sum(fn ($row): float => (float) ($row['suggested_qty'] ?? 0)), 2),
+                'piece_length' => (float) $lockedPiece->panjang,
+                'total_available_qty' => round($totalAvailable, 2),
+                'allocation_suggestions' => $suggestions,
+                'ai_reasoning' => null,
+            ];
+
+            if ($existingPendingTask) {
+                $existingPendingTask->update([
+                    'title' => "Usulan Alokasi Inbound ({$materialName})",
+                    'message' => "Inbound manual material {$materialName} tersedia {$totalAvailable}. Pilih proyek tujuan dan qty alokasi.",
+                    'payload' => $payload,
+                ]);
+
+                return;
+            }
+
             Task::create([
                 'for_role' => 'Staff Administrasi Gudang',
                 'type' => 'ai_inbound_allocation_suggestion',
                 'title' => "Usulan Alokasi Inbound ({$materialName})",
                 'message' => "Inbound manual material {$materialName} tersedia {$totalAvailable}. Pilih proyek tujuan dan qty alokasi.",
-                'payload' => [
-                    'piece_id' => $lockedPiece->id,
-                    'piece_ids' => $pieceIds,
-                    'inbound_id' => $lockedPiece->inbound_id,
-                    'material_id' => $lockedPiece->material_id,
-                    'material_name' => $materialName,
-                    'piece_length' => (float) $lockedPiece->panjang,
-                    'total_available_qty' => round($totalAvailable, 2),
-                    'allocation_suggestions' => $suggestions,
-                    'ai_reasoning' => null,
-                ],
+                'payload' => $payload,
                 'status' => 'pending',
                 'related_id' => $lockedPiece->inbound_id,
                 'related_type' => 'inbound',

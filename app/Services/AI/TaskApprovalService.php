@@ -25,7 +25,7 @@ class TaskApprovalService
         DB::transaction(function () use ($task, $actor, $options) {
             match ($task->type) {
                 'ai_booking_suggestion' => $this->approveAiBookingSuggestion($task, $actor, $options),
-                'ai_inbound_allocation_suggestion' => $this->approveInboundAllocationSuggestion($task, $actor),
+                'ai_inbound_allocation_suggestion' => $this->approveInboundAllocationSuggestion($task, $actor, $options),
                 'pr_manager_approval' => $this->approveManagerPr($task, $actor),
                 'pr_finance_approval' => $this->approveFinancePr($task, $actor),
                 'pr_revision' => $this->approvePrRevision($task, $actor),
@@ -319,6 +319,12 @@ class TaskApprovalService
             ];
         })->values()->all();
 
+        $allocationSuggestions = $this->buildManualAllocationSuggestions(
+            materialId: $materialId,
+            qtyNeeded: $qtyNeeded,
+            preferredProjectId: $projectId,
+        );
+
         $task = Task::create([
             'for_role' => 'Staff Administrasi Gudang',
             'type' => 'ai_inbound_allocation_suggestion',
@@ -330,7 +336,9 @@ class TaskApprovalService
                 'material_id' => $materialId,
                 'material_name' => $materialName,
                 'qty_dibutuhkan' => $this->decimal($qtyNeeded),
+                'total_available_qty' => round((float) $availablePieces->sum('panjang'), 2),
                 'available_pieces' => $piecesPayload,
+                'allocation_suggestions' => $allocationSuggestions,
             ],
             'status' => 'pending',
             'related_id' => $projectId,
@@ -447,10 +455,15 @@ class TaskApprovalService
             }
         }
 
+        $allocatedTotalQty = round((float) collect($allocations)->sum(fn ($row): float => (float) ($row['allocated_qty'] ?? 0)), 2);
+        $returnedToStockQty = round(max(0, (float) $remaining), 2);
+
         data_set($payload, 'execution_result', [
             'status' => 'processed',
             'piece_id' => $pieceId,
             'allocated_rows' => $allocations,
+            'allocated_total_qty' => $allocatedTotalQty,
+            'returned_to_stock_qty' => $returnedToStockQty,
             'remaining_piece_length' => $remaining,
         ]);
 
@@ -459,10 +472,77 @@ class TaskApprovalService
             'handled_by' => $actor->id,
             'handled_at' => now(),
             'message' => empty($allocations)
-                ? 'Usulan disetujui, tetapi kebutuhan proyek sudah terpenuhi sehingga tidak ada booking baru.'
-                : 'Usulan disetujui dan alokasi inbound manual sudah dibooking sesuai kebutuhan terbaru.',
+                ? 'Keterangan: Tidak ada alokasi baru. 0 unit dialokasikan, ' . $this->decimal($returnedToStockQty) . ' unit masuk ke stok available.'
+                : 'Keterangan: ' . $this->decimal($allocatedTotalQty) . ' unit dialokasikan, ' . $this->decimal($returnedToStockQty) . ' unit masuk ke stok available.',
             'payload' => $payload,
         ]);
+    }
+
+    /**
+     * @return array<int, array{project_id:int, project_code:string, pr_status:string, suggested_qty:float}>
+     */
+    private function buildManualAllocationSuggestions(int $materialId, float $qtyNeeded, ?int $preferredProjectId = null): array
+    {
+        if ($materialId <= 0 || $qtyNeeded <= 0) {
+            return [];
+        }
+
+        $remaining = $qtyNeeded;
+        $projectCodes = Project::query()->pluck('kode_proyek', 'id');
+        $suggestions = [];
+
+        if (($preferredProjectId ?? 0) > 0) {
+            $preferredOutstanding = $this->outstandingNeed((int) $preferredProjectId, $materialId);
+            if ($preferredOutstanding > 0) {
+                $qty = min($remaining, $preferredOutstanding);
+                $suggestions[] = [
+                    'project_id' => (int) $preferredProjectId,
+                    'project_code' => (string) ($projectCodes[(int) $preferredProjectId] ?? ('#' . (int) $preferredProjectId)),
+                    'pr_status' => 'priority_project',
+                    'suggested_qty' => round($qty, 2),
+                ];
+                $remaining -= $qty;
+            }
+        }
+
+        if ($remaining <= 0.00001) {
+            return $suggestions;
+        }
+
+        $projectItemProjectIds = ProjectItem::query()
+            ->where('material_id', $materialId)
+            ->whereNotNull('project_id')
+            ->distinct()
+            ->pluck('project_id')
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn ($id) => $id > 0)
+            ->values();
+
+        foreach ($projectItemProjectIds as $projectId) {
+            if ($remaining <= 0.00001) {
+                break;
+            }
+
+            if ($preferredProjectId && (int) $projectId === (int) $preferredProjectId) {
+                continue;
+            }
+
+            $needed = $this->outstandingNeed((int) $projectId, $materialId);
+            if ($needed <= 0) {
+                continue;
+            }
+
+            $qty = min($remaining, $needed);
+            $suggestions[] = [
+                'project_id' => (int) $projectId,
+                'project_code' => (string) ($projectCodes[(int) $projectId] ?? ('#' . (int) $projectId)),
+                'pr_status' => 'project_need',
+                'suggested_qty' => round($qty, 2),
+            ];
+            $remaining -= $qty;
+        }
+
+        return $suggestions;
     }
 
     private function availablePoolQty(int $materialId, int $inboundId, array $pieceIds): float

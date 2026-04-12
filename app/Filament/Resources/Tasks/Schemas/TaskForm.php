@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Tasks\Schemas;
 
+use App\Models\MaterialPiece;
 use App\Models\Task;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
@@ -20,10 +21,7 @@ class TaskForm
                 Section::make('Informasi Task')
                     ->schema([
                         TextInput::make('title')->label('Judul Task')->disabled(),
-                        Textarea::make('message')->label('Ringkasan dari AI')->rows(3)->disabled(),
-                        TextInput::make('payload.ai_instruction.ringkas')
-                            ->label('Interpretasi Instruksi AI')
-                            ->disabled(),
+                        Textarea::make('message')->label('Keterangan')->rows(3)->disabled(),
                         Select::make('status')
                             ->options([
                                 'pending' => 'Pending (Menunggu Konfirmasi)',
@@ -53,6 +51,7 @@ class TaskForm
                 Section::make('Detail Rekomendasi AI')
                     ->schema([
                         Repeater::make('payload.items')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_booking_suggestion')
                             ->label('')
                             ->addable(false)
                             ->deletable(false)
@@ -123,6 +122,118 @@ class TaskForm
                                     ->default('pending')
                                     ->required(),
                             ])->columns(2),
+
+                        TextInput::make('payload.material_name')
+                            ->label('Material')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
+                            ->disabled(),
+                        TextInput::make('payload.qty_dibutuhkan')
+                            ->label('Qty Dibutuhkan')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
+                            ->formatStateUsing(fn ($state, Get $get): float => round(
+                                (float) ($state ?? collect($get('payload.allocation_suggestions') ?? [])->sum(
+                                    fn ($row): float => (float) ($row['suggested_qty'] ?? 0)
+                                )),
+                                2
+                            ))
+                            ->suffix('unit')
+                            ->disabled(),
+                        TextInput::make('payload.total_available_qty')
+                            ->label('Stok Tersedia untuk Dialokasikan')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
+                            ->formatStateUsing(function ($state, Get $get): float {
+                                $materialId = (int) ($get('payload.material_id') ?? 0);
+                                $inboundId = (int) ($get('payload.inbound_id') ?? 0);
+
+                                if ($materialId > 0 && $inboundId > 0) {
+                                    return round((float) MaterialPiece::query()
+                                        ->where('material_id', $materialId)
+                                        ->where('inbound_id', $inboundId)
+                                        ->sum('panjang'), 2);
+                                }
+
+                                return round((float) ($state ?? 0), 2);
+                            })
+                            ->suffix('unit')
+                            ->disabled(),
+
+                        Repeater::make('payload.allocation_suggestions')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
+                            ->label('Kebutuhan Proyek (Sebelum Approve)')
+                            ->addable(false)
+                            ->deletable(false)
+                            ->reorderable(false)
+                            ->schema([
+                                TextInput::make('project_code')
+                                    ->label('Proyek')
+                                    ->disabled(),
+                                TextInput::make('suggested_qty')
+                                    ->label('Qty Dibutuhkan Proyek')
+                                    ->suffix('unit')
+                                    ->disabled(),
+                                TextInput::make('pr_status')
+                                    ->label('Keterangan')
+                                    ->disabled(),
+                            ])
+                            ->columns(3),
+
+                        TextInput::make('payload.execution_result.allocated_total_qty')
+                            ->label('Total Qty Dialokasikan')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
+                            ->formatStateUsing(fn ($state, Get $get): float => round(
+                                (float) ($state ?? collect($get('payload.execution_result.allocated_rows') ?? [])->sum(
+                                    fn ($row): float => (float) ($row['allocated_qty'] ?? 0)
+                                )),
+                                2
+                            ))
+                            ->suffix('unit')
+                            ->disabled(),
+
+                        TextInput::make('payload.execution_result.returned_to_stock_qty')
+                            ->label('Qty Masuk ke Stok Available')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
+                            ->formatStateUsing(function ($state, Get $get): float {
+                                if ($state !== null) {
+                                    return round((float) $state, 2);
+                                }
+
+                                $allocated = round((float) collect($get('payload.execution_result.allocated_rows') ?? [])->sum(
+                                    fn ($row): float => (float) ($row['allocated_qty'] ?? 0)
+                                ), 2);
+
+                                $materialId = (int) ($get('payload.material_id') ?? 0);
+                                $inboundId = (int) ($get('payload.inbound_id') ?? 0);
+
+                                if ($materialId > 0 && $inboundId > 0) {
+                                    $totalInbound = (float) MaterialPiece::query()
+                                        ->where('material_id', $materialId)
+                                        ->where('inbound_id', $inboundId)
+                                        ->sum('panjang');
+
+                                    return round(max(0, $totalInbound - $allocated), 2);
+                                }
+
+                                return round((float) ($get('payload.execution_result.remaining_piece_length') ?? 0), 2);
+                            })
+                            ->suffix('unit')
+                            ->disabled(),
+
+                        Repeater::make('payload.execution_result.allocated_rows')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
+                            ->label('Realisasi Alokasi')
+                            ->addable(false)
+                            ->deletable(false)
+                            ->reorderable(false)
+                            ->schema([
+                                TextInput::make('project_code')
+                                    ->label('Proyek Tujuan')
+                                    ->disabled(),
+                                TextInput::make('allocated_qty')
+                                    ->label('Qty Dialokasikan')
+                                    ->suffix('unit')
+                                    ->disabled(),
+                            ])
+                            ->columns(2),
                     ]),
             ]);
     }

@@ -225,7 +225,7 @@ class ViewOutbound extends Page
         $instructionsByMaterial = $this->aiInstructionsByMaterial();
 
         return $materialIds
-            ->map(function ($materialId) use ($requiredByMaterial, $piecesByMaterial): array {
+            ->map(function ($materialId) use ($requiredByMaterial, $piecesByMaterial, $instructionsByMaterial): array {
                 $pieces = collect($piecesByMaterial->get($materialId, []));
                 $first = $pieces->first();
                 $requiredData = $requiredByMaterial->get($materialId, []);
