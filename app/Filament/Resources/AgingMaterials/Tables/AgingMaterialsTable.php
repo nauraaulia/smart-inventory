@@ -31,10 +31,28 @@ class AgingMaterialsTable
                     ->badge()
                     ->color(fn (string $state): string => match ($state) {
                         'pending' => 'warning',
-                        'approved' => 'info',
                         'done' => 'success',
                         'rejected' => 'danger',
                         default => 'gray',
+                    }),
+                TextColumn::make('total_material')
+                    ->label('Total Material')
+                    ->getStateUsing(fn (Task $record): int => collect(data_get($record->payload, 'deadstock_items', []))->count()),
+                TextColumn::make('total_qty_keep')
+                    ->label('Total Qty Keep')
+                    ->getStateUsing(function (Task $record): string {
+                        $total = (float) collect(data_get($record->payload, 'deadstock_items', []))
+                            ->sum(fn (array $row): float => (float) ($row['qty_kept'] ?? ($row['available_qty'] ?? 0)));
+
+                        return number_format($total, 2, '.', '');
+                    }),
+                TextColumn::make('total_qty_disposed')
+                    ->label('Total Qty Buang/Jual/Return')
+                    ->getStateUsing(function (Task $record): string {
+                        $total = (float) collect(data_get($record->payload, 'deadstock_items', []))
+                            ->sum(fn (array $row): float => (float) ($row['qty_disposed'] ?? 0));
+
+                        return number_format($total, 2, '.', '');
                     }),
                 TextColumn::make('created_at')
                     ->label('Dibuat')
@@ -47,7 +65,7 @@ class AgingMaterialsTable
                     ->label('Proses Aging')
                     ->icon('heroicon-o-check-circle')
                     ->color('success')
-                    ->visible(fn (Task $record): bool => $record->status === 'approved' && self::canHandle())
+                    ->visible(fn (Task $record): bool => $record->status === 'pending' && (string) data_get($record->payload, 'workflow_state', '') === 'approved_for_aging' && self::canHandle())
                     ->form(function (Task $record): array {
                         $rows = collect(data_get($record->payload, 'deadstock_items', []))
                             ->map(function (array $row): array {
@@ -55,6 +73,22 @@ class AgingMaterialsTable
                                 $availableQty = round((float) ($row['available_qty'] ?? 0), 2);
                                 $defaultDisposed = $rekomendasi === 'monitor' ? 0.0 : $availableQty;
                                 $defaultKept = round(max(0, $availableQty - $defaultDisposed), 2);
+                                $legacyDecision = (string) ($row['manager_decision'] ?? '');
+
+                                $qtyBuang = (float) ($row['qty_buang'] ?? 0);
+                                $qtyJualMurah = (float) ($row['qty_jual_murah'] ?? 0);
+                                $qtyReturn = (float) ($row['qty_return_distributor'] ?? 0);
+
+                                if (($qtyBuang + $qtyJualMurah + $qtyReturn) <= 0.00001 && (float) ($row['qty_disposed'] ?? 0) > 0) {
+                                    $legacyDisposed = (float) $row['qty_disposed'];
+                                    if ($legacyDecision === 'buang') {
+                                        $qtyBuang = $legacyDisposed;
+                                    } elseif ($legacyDecision === 'jual_murah' || $legacyDecision === 'clearance') {
+                                        $qtyJualMurah = $legacyDisposed;
+                                    } elseif ($legacyDecision === 'return_distributor') {
+                                        $qtyReturn = $legacyDisposed;
+                                    }
+                                }
 
                                 return [
                                     'material_id' => (int) ($row['material_id'] ?? 0),
@@ -65,9 +99,10 @@ class AgingMaterialsTable
                                     'prioritas' => (string) ($row['prioritas'] ?? 'sedang'),
                                     'alasan' => (string) ($row['alasan'] ?? '-'),
                                     'rekomendasi' => $rekomendasi,
-                                    'manager_decision' => (string) ($row['manager_decision'] ?? $rekomendasi),
                                     'qty_kept' => (float) ($row['qty_kept'] ?? $defaultKept),
-                                    'qty_disposed' => (float) ($row['qty_disposed'] ?? $defaultDisposed),
+                                    'qty_buang' => round($qtyBuang, 2),
+                                    'qty_jual_murah' => round($qtyJualMurah, 2),
+                                    'qty_return_distributor' => round($qtyReturn, 2),
                                 ];
                             })
                             ->values()
@@ -101,30 +136,37 @@ class AgingMaterialsTable
                                         ->disabled()
                                         ->dehydrated(false)
                                         ->columnSpanFull(),
-                                    Select::make('manager_decision')
-                                        ->label('Status Aging Final')
-                                        ->options([
-                                            'monitor' => 'Disimpan / Monitor',
-                                            'jual_murah' => 'Jual Murah',
-                                            'clearance' => 'Clearance (Hapus Stok)',
-                                            'return_distributor' => 'Kembalikan ke Supplier',
-                                            'buang' => 'Buang / Deadstock',
-                                        ])
-                                        ->required(),
                                     TextInput::make('qty_kept')
-                                        ->label('Qty Keep')
+                                        ->label('Disimpan / Monitor')
                                         ->numeric()
                                         ->minValue(0)
+                                        ->maxValue(fn ($get): float => (float) ($get('available_qty') ?? 0))
                                         ->required()
                                         ->suffix(fn ($get): string => (string) ($get('satuan') ?: 'unit')),
-                                    TextInput::make('qty_disposed')
-                                        ->label('Qty Buang/Jual/Return')
+                                    TextInput::make('qty_buang')
+                                        ->label('Buang')
                                         ->numeric()
                                         ->minValue(0)
+                                        ->maxValue(fn ($get): float => (float) ($get('available_qty') ?? 0))
+                                        ->required()
+                                        ->suffix(fn ($get): string => (string) ($get('satuan') ?: 'unit')),
+                                    TextInput::make('qty_jual_murah')
+                                        ->label('Jual Murah')
+                                        ->numeric()
+                                        ->minValue(0)
+                                        ->maxValue(fn ($get): float => (float) ($get('available_qty') ?? 0))
+                                        ->required()
+                                        ->suffix(fn ($get): string => (string) ($get('satuan') ?: 'unit')),
+                                    TextInput::make('qty_return_distributor')
+                                        ->label('Kembalikan ke Supplier')
+                                        ->numeric()
+                                        ->minValue(0)
+                                        ->maxValue(fn ($get): float => (float) ($get('available_qty') ?? 0))
                                         ->required()
                                         ->suffix(fn ($get): string => (string) ($get('satuan') ?: 'unit')),
                                 ])
                                 ->columns(3)
+                                ->helperText('Isi qty per status. Total Disimpan + Buang + Jual + Return harus sama dengan Stok.')
                                 ->default($rows)
                                 ->addable(false)
                                 ->deletable(false)

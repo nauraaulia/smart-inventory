@@ -6,8 +6,12 @@ use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Outbound;
 use App\Models\Task;
+use App\Models\User;
 use Carbon\Carbon;
+use Filament\Notifications\Notification;
+use Illuminate\Notifications\DatabaseNotification as DatabaseNotificationModel;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class DeadstockAIService
 {
@@ -86,6 +90,8 @@ class DeadstockAIService
                 'payload' => $payload,
             ]);
 
+            $this->notifyManagerOperasional($title, $message, (int) $existing->id);
+
             return (int) $existing->id;
         }
 
@@ -100,7 +106,41 @@ class DeadstockAIService
             'related_id' => $outboundId,
         ]);
 
+        $this->notifyManagerOperasional($title, $message, (int) $task->id);
+
         return (int) $task->id;
+    }
+
+    private function notifyManagerOperasional(string $title, string $message, int $taskId): void
+    {
+        $users = User::query()
+            ->whereIn('role', ['Manager Operasional', 'Manager Operational', 'Manajer Operasional'])
+            ->get(['id']);
+
+        if ($users->isEmpty()) {
+            return;
+        }
+
+        $databaseMessage = Notification::make()
+            ->title($title)
+            ->body($message)
+            ->warning()
+            ->getDatabaseMessage();
+
+        foreach ($users as $user) {
+            DatabaseNotificationModel::query()->create([
+                'id' => (string) Str::uuid(),
+                'type' => \Filament\Notifications\DatabaseNotification::class,
+                'notifiable_type' => User::class,
+                'notifiable_id' => $user->id,
+                'data' => array_merge($databaseMessage, [
+                    'deadstock_task_id' => $taskId,
+                ]),
+                'read_at' => null,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
     }
 
     /**

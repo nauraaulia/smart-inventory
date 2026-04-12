@@ -34,7 +34,14 @@ class AgingMaterialResource extends Resource
     {
         $role = auth()->user()?->role;
 
-        return in_array($role, ['Manager Operasional', 'Manager Operational', 'Manajer Operasional', 'Administrator IT'], true);
+        return in_array($role, [
+            'Manager Operasional',
+            'Manager Operational',
+            'Manajer Operasional',
+            'Finance',
+            'Keuangan',
+            'Administrator IT',
+        ], true);
     }
 
     public static function canCreate(): bool
@@ -56,7 +63,14 @@ class AgingMaterialResource extends Resource
     {
         return parent::getEloquentQuery()
             ->where('type', 'ai_deadstock_recommendation')
-            ->whereIn('status', ['approved', 'done']);
+            ->where(function (Builder $query): void {
+                $query
+                    ->where(function (Builder $q): void {
+                        $q->where('status', 'pending')
+                            ->whereRaw("payload->>'workflow_state' = ?", ['approved_for_aging']);
+                    })
+                    ->orWhere('status', 'done');
+            });
     }
 
     public static function getNavigationBadge(): ?string
@@ -67,7 +81,8 @@ class AgingMaterialResource extends Resource
 
         $count = Task::query()
             ->where('type', 'ai_deadstock_recommendation')
-            ->where('status', 'approved')
+            ->where('status', 'pending')
+            ->whereRaw("payload->>'workflow_state' = ?", ['approved_for_aging'])
             ->count();
 
         return $count > 0 ? (string) $count : null;

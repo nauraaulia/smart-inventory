@@ -492,12 +492,19 @@ class TaskApprovalService
         data_set($payload, 'workflow_state', 'approved_for_aging');
 
         $task->update([
-            'status' => 'approved',
+            'status' => 'pending',
             'handled_by' => $actor->id,
             'handled_at' => now(),
             'message' => 'Keterangan: Screening deadstock di-ACC. Lanjutkan keputusan final di menu Aging Material.',
             'payload' => $payload,
         ]);
+
+        $this->logUserAction(
+            actor: $actor,
+            action: 'Approve',
+            module: 'Aging Material',
+            description: "ACC screening deadstock task ID {$task->id}. Menunggu proses final di menu Aging Material.",
+        );
     }
 
     public function finalizeDeadstockAging(Task $task, User $actor, array $options = []): void
@@ -509,7 +516,7 @@ class TaskApprovalService
                 ]);
             }
 
-            if ($task->status !== 'approved') {
+            if ($task->status !== 'pending' || (string) data_get($task->payload ?? [], 'workflow_state', '') !== 'approved_for_aging') {
                 throw ValidationException::withMessages([
                     'deadstock_decisions' => 'Task harus di-ACC dulu di menu Tasks sebelum diproses di Aging Material.',
                 ]);
@@ -527,40 +534,64 @@ class TaskApprovalService
             }
 
             $normalizedRows = $rows->map(function (array $row) use ($actor): array {
-                $decision = (string) ($row['manager_decision'] ?? 'monitor');
-                if (!in_array($decision, ['buang', 'jual_murah', 'clearance', 'return_distributor', 'monitor'], true)) {
-                    $decision = 'monitor';
-                }
-
                 $availableQty = round(max(0, (float) ($row['available_qty'] ?? 0)), 2);
                 $qtyKept = round(max(0, (float) ($row['qty_kept'] ?? $availableQty)), 2);
-                $qtyDisposed = round(max(0, (float) ($row['qty_disposed'] ?? 0)), 2);
+                $qtyBuang = round(max(0, (float) ($row['qty_buang'] ?? 0)), 2);
+                $qtyJualMurah = round(max(0, (float) ($row['qty_jual_murah'] ?? 0)), 2);
+                $qtyReturnDistributor = round(max(0, (float) ($row['qty_return_distributor'] ?? 0)), 2);
+                $totalInput = round($qtyKept + $qtyBuang + $qtyJualMurah + $qtyReturnDistributor, 2);
 
-                if ($decision === 'monitor') {
-                    $qtyDisposed = 0.0;
-                    $qtyKept = $availableQty;
-                } elseif (($qtyKept + $qtyDisposed) <= 0.00001) {
-                    $qtyDisposed = $availableQty;
-                    $qtyKept = 0.0;
-                }
-
-                if (abs(($qtyKept + $qtyDisposed) - $availableQty) > 0.01) {
+                if (abs($totalInput - $availableQty) > 0.01) {
                     throw ValidationException::withMessages([
-                        'deadstock_decisions' => 'Qty Keep + Qty Buang harus sama dengan stok untuk material ' . (string) ($row['material_name'] ?? ('#' . (int) ($row['material_id'] ?? 0))) . '.',
+                        'deadstock_decisions' => 'Total qty status harus sama dengan stok untuk material ' . (string) ($row['material_name'] ?? ('#' . (int) ($row['material_id'] ?? 0))) . '.',
                     ]);
                 }
 
-                $removedFromStock = 0.0;
-                if (in_array($decision, ['buang', 'jual_murah', 'clearance', 'return_distributor'], true) && $qtyDisposed > 0) {
-                    $removedFromStock = $this->reduceAvailableStockForDeadstock(
+                $removedBuang = 0.0;
+                $removedJual = 0.0;
+                $removedReturn = 0.0;
+
+                if ($qtyBuang > 0) {
+                    $removedBuang = $this->reduceAvailableStockForDeadstock(
                         materialId: (int) ($row['material_id'] ?? 0),
-                        qtyToRemove: $qtyDisposed,
-                        decision: $decision,
+                        qtyToRemove: $qtyBuang,
+                        decision: 'buang',
                         actorId: (int) $actor->id,
                     );
+                }
 
-                    $qtyDisposed = $removedFromStock;
-                    $qtyKept = round(max(0, $availableQty - $removedFromStock), 2);
+                if ($qtyJualMurah > 0) {
+                    $removedJual = $this->reduceAvailableStockForDeadstock(
+                        materialId: (int) ($row['material_id'] ?? 0),
+                        qtyToRemove: $qtyJualMurah,
+                        decision: 'jual_murah',
+                        actorId: (int) $actor->id,
+                    );
+                }
+
+                if ($qtyReturnDistributor > 0) {
+                    $removedReturn = $this->reduceAvailableStockForDeadstock(
+                        materialId: (int) ($row['material_id'] ?? 0),
+                        qtyToRemove: $qtyReturnDistributor,
+                        decision: 'return_distributor',
+                        actorId: (int) $actor->id,
+                    );
+                }
+
+                $qtyDisposed = round($removedBuang + $removedJual + $removedReturn, 2);
+                $qtyKept = round(max(0, $availableQty - $qtyDisposed), 2);
+                $decision = 'monitor';
+
+                $activeDisposals = collect([
+                    'buang' => $removedBuang,
+                    'jual_murah' => $removedJual,
+                    'return_distributor' => $removedReturn,
+                ])->filter(fn (float $qty): bool => $qty > 0.00001);
+
+                if ($activeDisposals->count() > 1 || ($activeDisposals->count() >= 1 && $qtyKept > 0.00001)) {
+                    $decision = 'mixed';
+                } elseif ($activeDisposals->count() === 1) {
+                    $decision = (string) $activeDisposals->keys()->first();
                 }
 
                 return [
@@ -575,7 +606,10 @@ class TaskApprovalService
                     'manager_decision' => $decision,
                     'qty_kept' => round($qtyKept, 2),
                     'qty_disposed' => round($qtyDisposed, 2),
-                    'removed_from_stock_qty' => round($removedFromStock, 2),
+                    'qty_buang' => round($removedBuang, 2),
+                    'qty_jual_murah' => round($removedJual, 2),
+                    'qty_return_distributor' => round($removedReturn, 2),
+                    'removed_from_stock_qty' => round($qtyDisposed, 2),
                 ];
             })->values();
 
@@ -619,7 +653,7 @@ class TaskApprovalService
             actor: $actor,
             action: 'Approve',
             module: 'Aging Material',
-            description: "Finalize aging task {$task->type} (ID {$task->id}).",
+            description: "Finalize aging task {$task->type} (ID {$task->id}) dengan keputusan qty keep/dispose.",
         );
     }
 

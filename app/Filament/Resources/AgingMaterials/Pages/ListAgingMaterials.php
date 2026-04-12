@@ -17,7 +17,9 @@ class ListAgingMaterials extends ListRecords
     {
         return [
             'approved' => Tab::make('Siap Diproses')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'approved')),
+                ->modifyQueryUsing(fn (Builder $query) => $query
+                    ->where('status', 'pending')
+                    ->whereRaw("payload->>'workflow_state' = ?", ['approved_for_aging'])),
             'done' => Tab::make('Done')
                 ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'done')),
             'all' => Tab::make('Semua'),

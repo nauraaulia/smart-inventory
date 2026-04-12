@@ -70,12 +70,23 @@ class TasksTable
                 TextColumn::make('project_code')
                     ->label('Kode Proyek')
                     ->searchable()
+                    ->getStateUsing(function (Task $record): string {
+                        if ($record->type === 'ai_deadstock_recommendation') {
+                            return '';
+                        }
+
+                        return (string) ($record->project_code ?? '');
+                    })
+                    ->placeholder('-')
                     ->hidden(fn ($livewire) => $livewire->activeTab === 'operasional'),
 
                 TextColumn::make('acc_staff')
-                    ->label('ACC Staff')
+                    ->label('ACC')
                     ->getStateUsing(function ($record) {
                         if (!$record) return '-';
+                        if ($record->type === 'ai_deadstock_recommendation') {
+                            return (string) data_get($record->payload, 'approval_trail.manager_operasional.status', '-');
+                        }
                         $status = data_get($record->payload, 'approval_trail.staff.status', '-');
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             return $record->status !== 'pending' ? ($status === '-' ? 'approved' : $status) : '-';
@@ -103,7 +114,10 @@ class TasksTable
                     ->label('Approve')
                     ->color('success')
                     ->icon('heroicon-o-check-circle')
-                    ->visible(fn (Task $record) => $record->status === 'pending' && self::canHandleTask($record))
+                    ->visible(fn (Task $record) => $record->status === 'pending'
+                        && self::canHandleTask($record)
+                        && !($record->type === 'ai_deadstock_recommendation'
+                            && (string) data_get($record->payload, 'workflow_state', '') === 'approved_for_aging'))
                     ->form(function (Task $record): array {
                         if ($record->type === 'ai_booking_suggestion') {
                             $items = collect(data_get($record->payload, 'items', []));
@@ -301,7 +315,10 @@ class TasksTable
                     ->label('Reject')
                     ->color('danger')
                     ->icon('heroicon-o-x-circle')
-                    ->visible(fn (Task $record) => $record->status === 'pending' && self::canHandleTask($record))
+                    ->visible(fn (Task $record) => $record->status === 'pending'
+                        && self::canHandleTask($record)
+                        && !($record->type === 'ai_deadstock_recommendation'
+                            && (string) data_get($record->payload, 'workflow_state', '') === 'approved_for_aging'))
                     ->form([
                         Textarea::make('reason')
                             ->label('Alasan Reject')
