@@ -117,9 +117,7 @@ class Project extends Model
             ]);
         }
 
-        if ($item->wasChanged(['catatan_teknis', 'h_minus_persiapan', 'tanggal_mulai'])) {
-            \App\Jobs\ProsesKebutuhanProyekJob::dispatchAfterResponse($item->id);
-        }
+        // Trigger AI booking tidak dijalankan dari update Project untuk menghindari duplicate burst.
     });
 
     // 3. CCTV Saat Proyek Dihapus (Delete)

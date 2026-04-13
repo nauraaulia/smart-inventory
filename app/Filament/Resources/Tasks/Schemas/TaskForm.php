@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Tasks\Schemas;
 
+use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Task;
 use Filament\Forms\Components\Select;
@@ -22,6 +23,13 @@ class TaskForm
                     ->schema([
                         TextInput::make('title')->label('Judul Task')->disabled(),
                         Textarea::make('message')->label('Keterangan')->rows(3)->disabled(),
+                        Textarea::make('payload.project_special_instruction')
+                            ->label('Instruksi Khusus (Akan dibaca AI)')
+                            ->rows(3)
+                            ->placeholder('-')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_booking_suggestion')
+                            ->disabled()
+                            ->dehydrated(false),
                         Select::make('status')
                             ->options([
                                 'pending' => 'Pending (Menunggu Konfirmasi)',
@@ -64,6 +72,23 @@ class TaskForm
                                     ->disabled(),
                                 TextInput::make('recommended_qty')
                                     ->label('Qty Booking')
+                                    ->suffix(fn (Get $get): string => (string) ($get('satuan') ?: 'unit'))
+                                    ->disabled(),
+                                TextInput::make('available_qty')
+                                    ->label('Stok Terkini')
+                                    ->formatStateUsing(function ($state, Get $get): float {
+                                        $materialId = (int) ($get('material_id') ?? 0);
+
+                                        if ($materialId > 0) {
+                                            $material = Material::query()->find($materialId, ['id', 'stok', 'booked', 'stok_rusak']);
+
+                                            if ($material) {
+                                                return round((float) $material->available, 2);
+                                            }
+                                        }
+
+                                        return round((float) ($state ?? 0), 2);
+                                    })
                                     ->suffix(fn (Get $get): string => (string) ($get('satuan') ?: 'unit'))
                                     ->disabled(),
                                 TextInput::make('qty_pr')

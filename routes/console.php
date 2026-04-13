@@ -11,3 +11,7 @@ Artisan::command('inspire', function () {
 Schedule::command('ai:sync-standby --minutes=180 --limit=40')
     ->everyMinute()
     ->withoutOverlapping();
+
+Schedule::command('project:check-material-readiness')
+    ->daily()
+    ->withoutOverlapping();

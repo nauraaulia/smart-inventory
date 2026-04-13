@@ -53,12 +53,17 @@ class ViewOutbound extends Page
 
     public function getSubheading(): ?string
     {
-        return 'Kelola status outbound dari menunggu sampai barang diambil lengkap dengan bukti.';
+        return null;
     }
 
     protected function getHeaderActions(): array
     {
         return [
+            Action::make('close')
+                ->label('Close')
+                ->icon('heroicon-o-x-mark')
+                ->color('gray')
+                ->url(OutboundResource::getUrl('index')),
             Action::make('mark_ready')
                 ->label('Tandai Siap')
                 ->icon('heroicon-o-check-badge')

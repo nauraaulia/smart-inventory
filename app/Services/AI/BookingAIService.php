@@ -2,12 +2,14 @@
 
 namespace App\Services\AI;
 
+use App\Jobs\RetryBookingAIJob;
 use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Project;
 use App\Models\PurchaseRequest;
 use App\Models\ShelfLocation;
 use App\Models\Task;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 class BookingAIService
@@ -24,30 +26,39 @@ class BookingAIService
      * Entry point: dipanggil saat proyek baru masuk
      * $kebutuhan = [['material_id' => 1, 'qty' => 100], ...]
      */
-    public function prosesKebutuhanProyek(int $projectId, array $kebutuhan): array
+    public function prosesKebutuhanProyek(int $projectId, array $kebutuhan, bool $allowRetryOnTransient = true): array
     {
-        $project = Project::query()->find($projectId);
-        $projectCode = (string) ($project?->kode_proyek ?: ('#' . $projectId));
-        $catatanTeknis = (string) ($project?->catatan_teknis ?? '');
-        $kebutuhanDelta = $this->hitungDeltaKebutuhan($projectId, $kebutuhan);
+        $lock = Cache::lock('ai_booking_project_' . $projectId, 60);
 
-        if (empty($kebutuhanDelta)) {
-            $this->sinkronTaskTanpaTambahan($projectId);
+        if (!$lock->get()) {
+            Log::info('AI booking skip - sedang diproses', ['project_id' => $projectId]);
+
             return [];
         }
 
-        $stockData = $this->prepareStockDataForGemini($kebutuhanDelta);
-        $kebutuhanItems = collect($kebutuhanDelta)->map(function (array $item): array {
-            $material = Material::query()->find((int) $item['material_id']);
+        try {
+            $project = Project::query()->find($projectId);
+            $projectCode = (string) ($project?->kode_proyek ?: ('#' . $projectId));
+            $catatanTeknis = (string) ($project?->catatan_teknis ?? '');
+            $kebutuhanDelta = $this->hitungDeltaKebutuhan($projectId, $kebutuhan);
 
-            return [
-                'material_id' => (int) ($item['material_id'] ?? 0),
-                'material_name' => (string) ($material?->nama_material ?: ('Material #' . (int) ($item['material_id'] ?? 0))),
-                'qty' => round((float) ($item['qty'] ?? 0), 2),
-                'satuan' => (string) ($material?->satuan ?: 'unit'),
-                'qty_original' => round((float) ($item['qty_original'] ?? $item['qty'] ?? 0), 2),
-            ];
-        })->values()->all();
+            if (empty($kebutuhanDelta)) {
+                $this->sinkronTaskTanpaTambahan($projectId);
+                return [];
+            }
+
+            $stockData = $this->prepareStockDataForGemini($kebutuhanDelta);
+            $kebutuhanItems = collect($kebutuhanDelta)->map(function (array $item): array {
+                $material = Material::query()->find((int) $item['material_id']);
+
+                return [
+                    'material_id' => (int) ($item['material_id'] ?? 0),
+                    'material_name' => (string) ($material?->nama_material ?: ('Material #' . (int) ($item['material_id'] ?? 0))),
+                    'qty' => round((float) ($item['qty'] ?? 0), 2),
+                    'satuan' => (string) ($material?->satuan ?: 'unit'),
+                    'qty_original' => round((float) ($item['qty_original'] ?? $item['qty'] ?? 0), 2),
+                ];
+            })->values()->all();
 
         $hasilAnalisis = [];
         $instruksiAi = [
@@ -60,85 +71,125 @@ class BookingAIService
         $ringkasanGemini = 'Silakan review rekomendasi booking/PR dari AI untuk project ini.';
         $rekomendasiGemini = [];
 
-        $geminiFailedTotal = false;
-        $geminiResponse = [];
-        $geminiFailureReason = '';
+            $geminiFailedTotal = false;
+            $geminiResponse = [];
+            $geminiFailureReason = '';
 
-        try {
-            $historicalContext = $this->prepareHistoricalContext($kebutuhanDelta);
+            try {
+                $historicalContext = $this->prepareHistoricalContext($kebutuhanDelta);
 
-            $geminiResponse = $this->askGeminiFullAnalysis(
-                projectId: $projectId,
-                projectCode: $projectCode,
-                catatanTeknis: $catatanTeknis,
-                kebutuhanItems: $kebutuhanItems,
-                materialsStock: $stockData,
-                historicalContext: $historicalContext,
-            );
-        } catch (\Throwable $e) {
-            $geminiFailedTotal = true;
-            $geminiFailureReason = trim((string) $e->getMessage());
+                $geminiResponse = $this->askGeminiFullAnalysis(
+                    projectId: $projectId,
+                    projectCode: $projectCode,
+                    catatanTeknis: $catatanTeknis,
+                    kebutuhanItems: $kebutuhanItems,
+                    materialsStock: $stockData,
+                    historicalContext: $historicalContext,
+                );
+            } catch (\Throwable $e) {
+                $isTransient = $this->isTransientGeminiException($e->getMessage());
 
-            Log::warning('Gemini full analysis gagal total, fallback lokal untuk semua material.', [
-                'project_id' => $projectId,
-                'error' => $e->getMessage(),
-            ]);
-        }
+                if ($isTransient && $allowRetryOnTransient) {
+                    $retrySeconds = max(30, $this->extractRetrySecondsFromMessage($e->getMessage()));
 
-        if ($geminiFailedTotal) {
-            $instruksiAi = $this->parseInstruksiOperasionalDariCatatan($catatanTeknis, $projectId);
-            $tanpaPotonganDariPrompt = (bool) ($instruksiAi['tanpa_potongan'] ?? false);
+                    Cache::put(
+                        'ai_booking_retry_payload_' . $projectId,
+                        [
+                            'project_id' => $projectId,
+                            'kebutuhan' => $kebutuhanDelta,
+                            'scheduled_at' => now()->toDateTimeString(),
+                            'retry_after_seconds' => $retrySeconds,
+                        ],
+                        now()->addMinutes(30),
+                    );
 
-            foreach ($kebutuhanDelta as $item) {
-                $material = Material::query()->find((int) $item['material_id']);
-                if (!$material) {
-                    continue;
+                    $retryScheduled = Cache::add(
+                        'ai_booking_retry_scheduled_' . $projectId,
+                        1,
+                        now()->addSeconds($retrySeconds + 30),
+                    );
+
+                    if ($retryScheduled) {
+                        RetryBookingAIJob::dispatch($projectId, $kebutuhanDelta)
+                            ->delay(now()->addSeconds($retrySeconds));
+                    }
+
+                    $this->sinkronTaskMenungguRetry($projectId, $kebutuhanDelta, $retrySeconds);
+
+                    Log::info('Gemini cooldown detected, retry job dijadwalkan.', [
+                        'project_id' => $projectId,
+                        'retry_seconds' => $retrySeconds,
+                        'retry_dispatched' => $retryScheduled,
+                        'error' => $e->getMessage(),
+                    ]);
+
+                    return [];
                 }
 
-                $fallbackAnalisa = $this->analisaSatuItem(
-                    material: $material,
-                    dibutuhkan: (float) ($item['qty'] ?? 0),
-                    projectId: $projectId,
-                    tanpaPotongan: $tanpaPotonganDariPrompt,
-                    alasanInstruksi: (string) ($instruksiAi['alasan'] ?? ''),
-                );
+                $geminiFailedTotal = true;
+                $geminiFailureReason = trim((string) $e->getMessage());
 
-                $fallbackSelection = $this->fallbackPieceSelection(
-                    materialId: (int) $material->id,
-                    dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                    materialName: (string) ($material->nama_material ?? ''),
-                    satuan: (string) ($material->satuan ?? 'unit'),
-                );
-
-                $pieceById = collect((array) data_get($stockData, (string) $material->id . '.pieces', []))
-                    ->keyBy(fn (array $piece): int => (int) ($piece['id'] ?? 0));
-
-                ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(
-                    selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(),
-                    pieceById: $pieceById,
-                    dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                );
-
-                $fallbackAnalisa['recommended_piece_ids'] = collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
-                $fallbackAnalisa['recommended_qty'] = round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - max(0, $remaining), 2);
-                $fallbackAnalisa['recommended_pieces'] = $chosen;
-                $fallbackAnalisa['alasan_ai'] = trim(implode('. ', array_filter([
-                    (string) ($fallbackSelection['overall_reason'] ?? ''),
-                    (string) ($fallbackAnalisa['alasan_ai'] ?? ''),
-                ])));
-                $fallbackAnalisa['kebutuhan_asli'] = (float) ($item['qty_original'] ?? $item['qty'] ?? 0);
-                $fallbackAnalisa['kebutuhan_setelah_buffer'] = (float) ($item['qty'] ?? 0);
-                $fallbackAnalisa['kebutuhan_belum_tercover'] = max(0, (float) ($fallbackAnalisa['qty_pr'] ?? 0));
-
-                $hasilAnalisis[] = $fallbackAnalisa;
+                Log::warning('Gemini full analysis gagal total, fallback lokal untuk semua material.', [
+                    'project_id' => $projectId,
+                    'error' => $e->getMessage(),
+                    'allow_retry_on_transient' => $allowRetryOnTransient,
+                ]);
             }
 
-            $ringkasanGemini = 'Gemini sedang sibuk, sistem tetap menyiapkan rekomendasi agar operasional tidak berhenti.';
-            if ($geminiFailureReason !== '') {
-                $ringkasanGemini .= ' (' . $geminiFailureReason . ')';
-            }
-            $rekomendasiGemini = [];
-        } else {
+            if ($geminiFailedTotal) {
+                $instruksiAi = $this->parseInstruksiOperasionalDariCatatan($catatanTeknis, $projectId);
+                $tanpaPotonganDariPrompt = (bool) ($instruksiAi['tanpa_potongan'] ?? false);
+
+                foreach ($kebutuhanDelta as $item) {
+                    $material = Material::query()->find((int) $item['material_id']);
+                    if (!$material) {
+                        continue;
+                    }
+
+                    $fallbackAnalisa = $this->analisaSatuItem(
+                        material: $material,
+                        dibutuhkan: (float) ($item['qty'] ?? 0),
+                        projectId: $projectId,
+                        tanpaPotongan: $tanpaPotonganDariPrompt,
+                        alasanInstruksi: (string) ($instruksiAi['alasan'] ?? ''),
+                    );
+
+                    $fallbackSelection = $this->fallbackPieceSelection(
+                        materialId: (int) $material->id,
+                        dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+                        materialName: (string) ($material->nama_material ?? ''),
+                        satuan: (string) ($material->satuan ?? 'unit'),
+                    );
+
+                    $pieceById = collect((array) data_get($stockData, (string) $material->id . '.pieces', []))
+                        ->keyBy(fn (array $piece): int => (int) ($piece['id'] ?? 0));
+
+                    ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(
+                        selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(),
+                        pieceById: $pieceById,
+                        dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+                    );
+
+                    $fallbackAnalisa['recommended_piece_ids'] = collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
+                    $fallbackAnalisa['recommended_qty'] = round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - max(0, $remaining), 2);
+                    $fallbackAnalisa['recommended_pieces'] = $chosen;
+                    $fallbackAnalisa['alasan_ai'] = trim(implode('. ', array_filter([
+                        (string) ($fallbackSelection['overall_reason'] ?? ''),
+                        (string) ($fallbackAnalisa['alasan_ai'] ?? ''),
+                    ])));
+                    $fallbackAnalisa['kebutuhan_asli'] = (float) ($item['qty_original'] ?? $item['qty'] ?? 0);
+                    $fallbackAnalisa['kebutuhan_setelah_buffer'] = (float) ($item['qty'] ?? 0);
+                    $fallbackAnalisa['kebutuhan_belum_tercover'] = max(0, (float) ($fallbackAnalisa['qty_pr'] ?? 0));
+
+                    $hasilAnalisis[] = $fallbackAnalisa;
+                }
+
+                $ringkasanGemini = 'Retry AI gagal, sistem menggunakan rekomendasi lokal agar operasional tetap berjalan.';
+                if ($geminiFailureReason !== '') {
+                    $ringkasanGemini .= ' (' . $geminiFailureReason . ')';
+                }
+                $rekomendasiGemini = [];
+            } else {
             $instruksiNode = is_array($geminiResponse['instruksi_manager'] ?? null)
                 ? $geminiResponse['instruksi_manager']
                 : [];
@@ -342,26 +393,50 @@ class BookingAIService
                     'detail' => $reason,
                 ];
             }
+            }
+
+            if (empty($hasilAnalisis)) {
+                $this->sinkronTaskTanpaTambahan($projectId);
+                return [];
+            }
+
+            $summary = json_encode([
+                'ringkasan' => $ringkasanGemini,
+                'rekomendasi' => $rekomendasiGemini,
+                'perlu_konfirmasi' => true,
+            ], JSON_UNESCAPED_UNICODE);
+
+            if (!is_string($summary) || trim($summary) === '') {
+                $summary = '{"ringkasan":"Silakan review rekomendasi booking/PR dari AI untuk project ini.","rekomendasi":[],"perlu_konfirmasi":true}';
+            }
+
+            $this->sinkronTaskUntukStaff($summary, $projectId, $hasilAnalisis, $instruksiAi);
+
+            return $hasilAnalisis;
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function isTransientGeminiException(string $message): bool
+    {
+        $text = mb_strtolower(trim($message));
+
+        return str_contains($text, 'cooldown aktif')
+            || str_contains($text, 'sementara tidak tersedia')
+            || str_contains($text, 'rate limit')
+            || str_contains($text, 'high demand')
+            || str_contains($text, '429')
+            || str_contains($text, '503');
+    }
+
+    private function extractRetrySecondsFromMessage(string $message): int
+    {
+        if (preg_match('/(\d+)\s*detik/i', $message, $match)) {
+            return max(0, (int) ($match[1] ?? 0));
         }
 
-        if (empty($hasilAnalisis)) {
-            $this->sinkronTaskTanpaTambahan($projectId);
-            return [];
-        }
-
-        $summary = json_encode([
-            'ringkasan' => $ringkasanGemini,
-            'rekomendasi' => $rekomendasiGemini,
-            'perlu_konfirmasi' => true,
-        ], JSON_UNESCAPED_UNICODE);
-
-        if (!is_string($summary) || trim($summary) === '') {
-            $summary = '{"ringkasan":"Silakan review rekomendasi booking/PR dari AI untuk project ini.","rekomendasi":[],"perlu_konfirmasi":true}';
-        }
-
-        $this->sinkronTaskUntukStaff($summary, $projectId, $hasilAnalisis, $instruksiAi);
-
-        return $hasilAnalisis;
+        return 0;
     }
 
     /**
@@ -1052,7 +1127,11 @@ PROMPT;
     private function sinkronTaskUntukStaff(string $summaryJson, int $projectId, array $detail, array $instruksiAi = []): void
     {
         $decoded = json_decode($summaryJson, true);
-        $projectCode = Project::query()->whereKey($projectId)->value('kode_proyek') ?: "#{$projectId}";
+        $project = Project::query()
+            ->find($projectId, ['id', 'kode_proyek', 'catatan_teknis']);
+
+        $projectCode = (string) ($project?->kode_proyek ?: "#{$projectId}");
+        $projectSpecialInstruction = trim((string) ($project?->catatan_teknis ?? ''));
 
         if (!is_array($decoded)) {
             $decoded = [
@@ -1074,6 +1153,7 @@ PROMPT;
         $payload = [
             'project_id'   => $projectId,
             'project_code' => $projectCode,
+            'project_special_instruction' => $projectSpecialInstruction,
             'detail'       => $detail,
             'items'        => $this->buildPerMaterialItemsPayload($detail),
             'ai_summary'   => $decoded,
@@ -1395,7 +1475,9 @@ PROMPT;
 
     private function sinkronTaskTanpaTambahan(int $projectId): void
     {
-        $projectCode = Project::query()->whereKey($projectId)->value('kode_proyek') ?: "#{$projectId}";
+        $project = Project::query()->find($projectId, ['id', 'kode_proyek', 'catatan_teknis']);
+        $projectCode = (string) ($project?->kode_proyek ?: "#{$projectId}");
+        $projectSpecialInstruction = trim((string) ($project?->catatan_teknis ?? ''));
 
         $taskPending = Task::query()
             ->where('type', 'ai_booking_suggestion')
@@ -1410,6 +1492,7 @@ PROMPT;
         }
 
         $payload = $taskPending->payload ?? [];
+        data_set($payload, 'project_special_instruction', $projectSpecialInstruction);
         data_set($payload, 'detail', []);
         data_set($payload, 'ai_summary.rekomendasi', []);
         data_set($payload, 'ai_summary.ringkasan', 'Tidak ada tambahan kebutuhan baru. Data kebutuhan sebelumnya sudah ter-cover booking/PR.');
@@ -1422,6 +1505,123 @@ PROMPT;
             'message' => 'Tidak ada tambahan kebutuhan baru. Task ditutup otomatis.',
             'payload' => $payload,
         ]);
+    }
+
+    /**
+     * @param  array<int, array{material_id:int,qty:float,qty_original?:float}>  $kebutuhanDelta
+     */
+    private function sinkronTaskMenungguRetry(int $projectId, array $kebutuhanDelta, int $retrySeconds): void
+    {
+        $project = Project::query()
+            ->find($projectId, ['id', 'kode_proyek', 'catatan_teknis']);
+
+        $projectCode = (string) ($project?->kode_proyek ?: '#'.$projectId);
+        $projectSpecialInstruction = trim((string) ($project?->catatan_teknis ?? ''));
+
+        $message = 'AI sedang sibuk, sistem akan retry otomatis dalam '
+            . $retrySeconds
+            . ' detik. Jika gagal, rekomendasi lokal akan digunakan.';
+
+        $payload = [
+            'project_id' => $projectId,
+            'project_code' => $projectCode,
+            'project_special_instruction' => $projectSpecialInstruction,
+            'items' => $this->buildPendingItemsPayloadFromKebutuhan($kebutuhanDelta),
+            'ai_summary' => [
+                'ringkasan' => $message,
+                'rekomendasi' => [],
+                'perlu_konfirmasi' => true,
+            ],
+            'ai_instruction' => [
+                'tanpa_potongan' => false,
+                'ringkas' => 'Menunggu retry AI setelah cooldown.',
+                'alasan' => 'Gemini mengembalikan cooldown/rate limit.',
+                'sumber' => 'cooldown_retry_pending',
+                'confidence' => 'rendah',
+            ],
+            'retry' => [
+                'scheduled' => true,
+                'retry_after_seconds' => $retrySeconds,
+                'scheduled_at' => now()->toDateTimeString(),
+            ],
+            'approval_trail' => [
+                'staff' => null,
+                'manager' => null,
+                'finance' => null,
+            ],
+            'last_synced_at' => now()->toDateTimeString(),
+        ];
+
+        $taskPending = Task::query()
+            ->where('type', 'ai_booking_suggestion')
+            ->where('related_type', 'project')
+            ->where('related_id', $projectId)
+            ->where('status', 'pending')
+            ->latest('id')
+            ->first();
+
+        if ($taskPending) {
+            $taskPending->update([
+                'title' => 'AI: Konfirmasi Kebutuhan Material Proyek ' . $projectCode,
+                'message' => $message,
+                'payload' => $payload,
+            ]);
+
+            return;
+        }
+
+        Task::query()->create([
+            'for_role' => 'Staff Administrasi Gudang',
+            'type' => 'ai_booking_suggestion',
+            'title' => 'AI: Konfirmasi Kebutuhan Material Proyek ' . $projectCode,
+            'message' => $message,
+            'payload' => $payload,
+            'status' => 'pending',
+            'related_id' => $projectId,
+            'related_type' => 'project',
+        ]);
+    }
+
+    /**
+     * @param  array<int, array{material_id:int,qty:float,qty_original?:float}>  $kebutuhanDelta
+     * @return array<int, array<string, mixed>>
+     */
+    private function buildPendingItemsPayloadFromKebutuhan(array $kebutuhanDelta): array
+    {
+        return collect($kebutuhanDelta)
+            ->map(function (array $item): ?array {
+                $materialId = (int) ($item['material_id'] ?? 0);
+
+                if ($materialId <= 0) {
+                    return null;
+                }
+
+                $material = Material::query()->find($materialId);
+
+                if (!$material) {
+                    return null;
+                }
+
+                $qty = round((float) ($item['qty'] ?? 0), 2);
+
+                return [
+                    'material_id' => $materialId,
+                    'material_name' => (string) $material->nama_material,
+                    'dibutuhkan' => $qty,
+                    'satuan' => (string) ($material->satuan ?: 'unit'),
+                    'available_qty' => round((float) $material->available, 2),
+                    'recommended_booking_qty' => 0.0,
+                    'recommended_pr_qty' => $qty,
+                    'recommended_piece_ids' => [],
+                    'recommended_qty' => 0.0,
+                    'recommended_pieces' => [],
+                    'ai_reason' => 'Menunggu retry Gemini setelah cooldown.',
+                    'status' => 'pending',
+                ];
+            })
+            ->filter()
+            ->values()
+            ->all();
     }
 
     private function normalisasiRekomendasi(array $rekomendasi, array $detail): array
