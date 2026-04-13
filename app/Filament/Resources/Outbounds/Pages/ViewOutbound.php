@@ -8,6 +8,8 @@ use App\Models\Outbound;
 use App\Models\Project;
 use App\Models\Task;
 use App\Models\UserLog;
+use App\Services\AI\DeadstockAIService;
+use App\Services\AI\GeminiService;
 use Filament\Actions\Action;
 use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\FileUpload;
@@ -17,6 +19,7 @@ use Filament\Forms\Components\Textarea;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\Page;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class ViewOutbound extends Page
 {
@@ -164,7 +167,26 @@ class ViewOutbound extends Page
                         ->success()
                         ->send();
 
-                    AnalyzeDeadstockAfterOutboundJob::dispatchAfterResponse((int) $this->record->id);
+                    $outboundId = (int) $this->record->id;
+
+                    try {
+                        $taskId = (new DeadstockAIService(new GeminiService()))->analyzeAfterOutbound($outboundId);
+
+                        if ($taskId) {
+                            Notification::make()
+                                ->title('Screening deadstock selesai')
+                                ->body('Task AI deadstock berhasil dibuat otomatis.')
+                                ->success()
+                                ->send();
+                        }
+                    } catch (\Throwable $e) {
+                        Log::warning('Screening deadstock sync gagal, fallback ke queue', [
+                            'outbound_id' => $outboundId,
+                            'error' => $e->getMessage(),
+                        ]);
+
+                        AnalyzeDeadstockAfterOutboundJob::dispatchAfterResponse($outboundId);
+                    }
 
                     $this->record->refresh();
                 }),

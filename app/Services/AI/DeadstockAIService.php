@@ -31,7 +31,17 @@ class DeadstockAIService
             return null;
         }
 
-        $analysis = $this->askGeminiDeadstockAnalysis($outboundId, $materials);
+        try {
+            $analysis = $this->askGeminiDeadstockAnalysis($outboundId, $materials);
+        } catch (\Throwable $e) {
+            Log::warning('Gemini deadstock gagal, gunakan fallback heuristik lokal.', [
+                'outbound_id' => $outboundId,
+                'error' => $e->getMessage(),
+            ]);
+
+            $analysis = $this->buildFallbackDeadstockAnalysis($materials);
+        }
+
         $items = collect($analysis['items'] ?? [])->filter(fn ($row) => is_array($row))->values();
 
         if ($items->isEmpty()) {
@@ -141,6 +151,61 @@ class DeadstockAIService
                 'updated_at' => now(),
             ]);
         }
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $materials
+     * @return array<string, mixed>
+     */
+    private function buildFallbackDeadstockAnalysis(array $materials): array
+    {
+        $items = collect($materials)
+            ->map(function (array $row): ?array {
+                $materialId = (int) ($row['material_id'] ?? 0);
+                $lastUsedDays = (int) ($row['last_used_days'] ?? 0);
+                $oldestDays = (int) ($row['oldest_available_days'] ?? 0);
+                $avgDailyUsage = (float) ($row['avg_daily_usage_90_days'] ?? 0);
+                $deadPieceCount = (int) ($row['dead_piece_count_120_days'] ?? 0);
+
+                $score = 0;
+                $score += $lastUsedDays >= 120 ? 2 : ($lastUsedDays >= 60 ? 1 : 0);
+                $score += $oldestDays >= 120 ? 2 : ($oldestDays >= 60 ? 1 : 0);
+                $score += $avgDailyUsage <= 0.05 ? 1 : 0;
+                $score += $deadPieceCount >= 3 ? 1 : 0;
+
+                if ($materialId <= 0 || $score < 3) {
+                    return null;
+                }
+
+                $rekomendasi = 'monitor';
+                if ($lastUsedDays >= 180 || $oldestDays >= 180) {
+                    $rekomendasi = $avgDailyUsage <= 0.02 ? 'return_distributor' : 'clearance';
+                } elseif ($lastUsedDays >= 120 || $oldestDays >= 120) {
+                    $rekomendasi = 'jual_murah';
+                }
+
+                $prioritas = $score >= 5 ? 'tinggi' : ($score >= 4 ? 'sedang' : 'rendah');
+
+                return [
+                    'material_id' => $materialId,
+                    'material_name' => (string) ($row['material_name'] ?? ('Material #' . $materialId)),
+                    'rekomendasi' => $rekomendasi,
+                    'prioritas' => $prioritas,
+                    'alasan' => 'Fallback lokal: last_used_days=' . $lastUsedDays
+                        . ', oldest_available_days=' . $oldestDays
+                        . ', avg_daily_usage_90_days=' . round($avgDailyUsage, 2)
+                        . ', dead_piece_count_120_days=' . $deadPieceCount . '.',
+                ];
+            })
+            ->filter()
+            ->values()
+            ->take(60)
+            ->all();
+
+        return [
+            'ringkasan' => 'Fallback lokal aktif karena AI eksternal tidak tersedia. Screening deadstock tetap dijalankan otomatis.',
+            'items' => $items,
+        ];
     }
 
     /**

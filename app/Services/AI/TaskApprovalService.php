@@ -79,6 +79,24 @@ class TaskApprovalService
         $decisionsInput = collect($options['material_decisions'] ?? []);
         $decisionsByMaterial = $decisionsInput
             ->mapWithKeys(fn ($row): array => [(int) ($row['material_id'] ?? 0) => $row]);
+        $materialIdsForSnapshot = $materialItems
+            ->pluck('material_id')
+            ->map(fn ($id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->unique()
+            ->values()
+            ->all();
+        $stockAtApprovalByMaterial = [];
+        if (!empty($materialIdsForSnapshot)) {
+            $stockAtApprovalByMaterial = MaterialPiece::query()
+                ->selectRaw('material_id, COALESCE(SUM(panjang), 0) as total_available')
+                ->whereIn('material_id', $materialIdsForSnapshot)
+                ->where('status', 'available')
+                ->groupBy('material_id')
+                ->get()
+                ->mapWithKeys(fn ($row): array => [(int) $row->material_id => round((float) $row->total_available, 2)])
+                ->all();
+        }
         $project = $projectId > 0 ? Project::query()->find($projectId) : null;
         $bufferDays = (int) ($options['buffer_days'] ?? 3);
 
@@ -259,11 +277,12 @@ class TaskApprovalService
         ]);
 
         $payload['items'] = collect($materialItems)
-            ->map(function (array $item) use ($decisionsByMaterial): array {
+            ->map(function (array $item) use ($decisionsByMaterial, $stockAtApprovalByMaterial): array {
                 $materialId = (int) ($item['material_id'] ?? 0);
                 $status = strtolower((string) data_get($decisionsByMaterial->get($materialId, []), 'status', 'approved'));
 
                 $item['status'] = in_array($status, ['approved', 'rejected'], true) ? $status : 'approved';
+                $item['stock_at_approval'] = (float) ($stockAtApprovalByMaterial[$materialId] ?? ($item['available_qty'] ?? 0));
 
                 return $item;
             })

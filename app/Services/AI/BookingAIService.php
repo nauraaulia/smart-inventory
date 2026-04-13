@@ -1174,6 +1174,7 @@ PROMPT;
                     'material_name' => $materialName,
                     'dibutuhkan' => round($dibutuhkan, 2),
                     'satuan' => $satuan,
+                    'available_qty' => round((float) ($row['available'] ?? $row['available_qty'] ?? 0), 2),
                     'recommended_booking_qty' => round((float) ($row['qty_booking'] ?? 0), 2),
                     'recommended_pr_qty' => round((float) ($row['qty_pr'] ?? 0), 2),
                     'recommended_piece_ids' => $recommendedIds,

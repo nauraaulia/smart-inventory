@@ -1,226 +1,610 @@
 <x-filament-panels::page>
-    <div class="space-y-6">
-        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-            <div class="grid gap-3 md:grid-cols-5">
-                <div>
-                    <label class="mb-1 block text-xs font-medium">Dari Tanggal</label>
-                    <input type="date" wire:model="dateFrom" class="w-full rounded-lg border-gray-300 text-sm dark:border-gray-700 dark:bg-gray-800" />
+    <style>
+        .laporan-operasional .table-wrap { border: 1px solid #e5e7eb; border-radius: 0.5rem; overflow-x: auto; }
+        .laporan-operasional .table-head { background: #f3f4f6; color: #374151; }
+        .laporan-operasional .table-body { background: #ffffff; color: #111827; }
+        .laporan-operasional .table-row { border-top: 1px solid #e5e7eb; }
+
+        .dark .laporan-operasional .table-wrap,
+        .fi-theme-dark .laporan-operasional .table-wrap,
+        [data-theme="dark"] .laporan-operasional .table-wrap {
+            border-color: #374151 !important;
+        }
+
+        .dark .laporan-operasional .table-head,
+        .fi-theme-dark .laporan-operasional .table-head,
+        [data-theme="dark"] .laporan-operasional .table-head {
+            background: #27272a !important;
+            color: #e4e4e7 !important;
+        }
+
+        .dark .laporan-operasional .table-body,
+        .fi-theme-dark .laporan-operasional .table-body,
+        [data-theme="dark"] .laporan-operasional .table-body {
+            background: #18181b !important;
+            color: #f4f4f5 !important;
+        }
+
+        .dark .laporan-operasional .table-row,
+        .fi-theme-dark .laporan-operasional .table-row,
+        [data-theme="dark"] .laporan-operasional .table-row {
+            border-color: #374151 !important;
+        }
+
+        .fi-theme-dark .laporan-operasional .bg-white,
+        [data-theme="dark"] .laporan-operasional .bg-white {
+            background-color: #18181b !important;
+        }
+
+        .dark .laporan-operasional .bg-white {
+            background-color: #18181b !important;
+        }
+
+        .fi-theme-dark .laporan-operasional .text-gray-900,
+        [data-theme="dark"] .laporan-operasional .text-gray-900 {
+            color: #f9fafb !important;
+        }
+
+        .dark .laporan-operasional .text-gray-900 {
+            color: #f9fafb !important;
+        }
+
+        .dark .laporan-operasional .border-gray-200,
+        .fi-theme-dark .laporan-operasional .border-gray-200,
+        [data-theme="dark"] .laporan-operasional .border-gray-200 {
+            border-color: #374151 !important;
+        }
+
+        .dark .laporan-operasional .border-gray-300,
+        .fi-theme-dark .laporan-operasional .border-gray-300,
+        [data-theme="dark"] .laporan-operasional .border-gray-300 {
+            border-color: #4b5563 !important;
+        }
+
+        .dark .laporan-operasional input,
+        .dark .laporan-operasional select,
+        .fi-theme-dark .laporan-operasional input,
+        .fi-theme-dark .laporan-operasional select,
+        [data-theme="dark"] .laporan-operasional input,
+        [data-theme="dark"] .laporan-operasional select {
+            background-color: #27272a !important;
+            color: #f9fafb !important;
+            border-color: #52525b !important;
+        }
+
+        .dark .laporan-operasional .text-gray-500,
+        .dark .laporan-operasional .text-gray-400,
+        .fi-theme-dark .laporan-operasional .text-gray-500,
+        .fi-theme-dark .laporan-operasional .text-gray-400,
+        [data-theme="dark"] .laporan-operasional .text-gray-500,
+        [data-theme="dark"] .laporan-operasional .text-gray-400 {
+            color: #d1d5db !important;
+        }
+
+        .laporan-operasional input[type="date"] {
+            color-scheme: light;
+        }
+
+        .dark .laporan-operasional input[type="date"],
+        .fi-theme-dark .laporan-operasional input[type="date"],
+        [data-theme="dark"] .laporan-operasional input[type="date"] {
+            color-scheme: dark;
+        }
+    </style>
+
+    @php
+        $financeData = $roleReportData['finance'] ?? [];
+        $opsData = $roleReportData['manager_operasional'] ?? [];
+        $teknikData = $roleReportData['manager_teknik'] ?? [];
+        $gudangData = $roleReportData['staff_administrasi_gudang'] ?? [];
+
+        $financeActivity = (string) ($filters['finance_activity'] ?? 'all');
+        $opsActivity = (string) ($filters['ops_activity'] ?? 'all');
+        $teknikActivity = (string) ($filters['teknik_activity'] ?? 'all');
+        $gudangActivity = (string) ($filters['gudang_activity'] ?? 'all');
+
+        $statusBadge = static function (string $status): string {
+            return match (strtolower($status)) {
+                'approved', 'ordered', 'accepted', 'done', 'validated', 'sudah outbound', 'taken' => 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200',
+                'pending', 'pending_finance', 'pending_manager', 'draft', 'ready' => 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200',
+                'rejected', 'belum outbound' => 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-200',
+                default => 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-200',
+            };
+        };
+    @endphp
+
+    <div class="laporan-operasional space-y-6">
+        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
+            <div class="flex flex-wrap items-end gap-4">
+                <div class="flex flex-col gap-1">
+                    <label class="text-xs font-medium text-gray-500 dark:text-gray-400">Dari Tanggal</label>
+                    <input
+                        type="date"
+                        wire:model="filters.date_from"
+                        class="w-44 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                    />
                 </div>
-                <div>
-                    <label class="mb-1 block text-xs font-medium">Sampai Tanggal</label>
-                    <input type="date" wire:model="dateTo" class="w-full rounded-lg border-gray-300 text-sm dark:border-gray-700 dark:bg-gray-800" />
+                <div class="flex flex-col gap-1">
+                    <label class="text-xs font-medium text-gray-500 dark:text-gray-400">Sampai Tanggal</label>
+                    <input
+                        type="date"
+                        wire:model="filters.date_to"
+                        class="w-44 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                    />
                 </div>
-                <div>
-                    <label class="mb-1 block text-xs font-medium">Module</label>
-                    <select wire:model="module" class="w-full rounded-lg border-gray-300 text-sm dark:border-gray-700 dark:bg-gray-800">
-                        <option value="">Semua Module</option>
-                        @foreach ($this->moduleOptions() as $module)
-                            <option value="{{ $module }}">{{ $module }}</option>
-                        @endforeach
-                    </select>
+                <div class="flex flex-wrap items-center gap-2 md:ml-2">
+                    <x-filament::button size="sm" color="primary" wire:click="applyFilters">Apply Filter</x-filament::button>
+                    <x-filament::button size="sm" color="gray" wire:click="exportPdf">Export PDF</x-filament::button>
+                    <x-filament::button size="sm" color="success" wire:click="exportExcel">Export Excel</x-filament::button>
                 </div>
-                <div>
-                    <label class="mb-1 block text-xs font-medium">Action</label>
-                    <select wire:model="actionFilter" class="w-full rounded-lg border-gray-300 text-sm dark:border-gray-700 dark:bg-gray-800">
-                        <option value="">Semua Action</option>
-                        @foreach ($this->actionOptions() as $action)
-                            <option value="{{ $action }}">{{ $action }}</option>
-                        @endforeach
-                    </select>
-                </div>
-                <div>
-                    <label class="mb-1 block text-xs font-medium">Role User</label>
-                    <select wire:model="userRole" class="w-full rounded-lg border-gray-300 text-sm dark:border-gray-700 dark:bg-gray-800">
-                        <option value="">Semua Role</option>
-                        @foreach ($this->roleOptions() as $role)
-                            <option value="{{ $role }}">{{ $role }}</option>
-                        @endforeach
-                    </select>
-                </div>
-            </div>
-            <div class="mt-3">
-                <x-filament::button color="primary" wire:click="applyFilters">Apply Filter</x-filament::button>
             </div>
         </div>
 
         @if ($this->canViewFinanceSection())
-            @php $finance = $this->financeStats(); @endphp
-            <div class="rounded-xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-900 dark:bg-blue-950/30">
-                <h3 class="text-sm font-semibold">Laporan Finance</h3>
-                <div class="mt-3 grid gap-3 md:grid-cols-3">
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Total ACC Finance</p>
-                        <p class="text-2xl font-semibold">{{ number_format($finance['acc_count']) }}</p>
+            <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900 space-y-4">
+                <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Laporan Finance</h3>
+
+                @if ($financeActivity === 'all' || $financeActivity === 'pr')
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">PR Disetujui Finance</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm">
+                                <thead class="table-head"><tr><th class="px-3 py-2 text-left">No PR</th><th class="px-3 py-2 text-left">Material</th><th class="px-3 py-2 text-left">Qty</th><th class="px-3 py-2 text-left">Diajukan Oleh</th><th class="px-3 py-2 text-left">Tgl ACC Finance</th></tr></thead>
+                                <tbody class="table-body">
+                                    @forelse (($financeData['pr_disetujui_finance'] ?? []) as $row)
+                                        <tr class="table-row"><td class="px-3 py-2">{{ $row['no_pr'] }}</td><td class="px-3 py-2">{{ $row['material'] }}</td><td class="px-3 py-2">{{ $row['qty'] }}</td><td class="px-3 py-2">{{ $row['diajukan_oleh'] }}</td><td class="px-3 py-2">{{ $row['tgl_acc_finance'] }}</td></tr>
+                                    @empty
+                                        <tr><td colspan="5" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data.</td></tr>
+                                    @endforelse
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Total Pengadaan (PO)</p>
-                        <p class="text-2xl font-semibold">{{ number_format($finance['pengadaan_count']) }}</p>
+                @endif
+
+                @if ($financeActivity === 'all' || $financeActivity === 'po')
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">PO Terbit</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm">
+                                <thead class="table-head"><tr><th class="px-3 py-2 text-left">No PO</th><th class="px-3 py-2 text-left">Supplier</th><th class="px-3 py-2 text-left">Total Item</th><th class="px-3 py-2 text-left">Tgl Terbit</th></tr></thead>
+                                <tbody class="table-body">
+                                    @forelse (($financeData['po_terbit'] ?? []) as $row)
+                                        <tr class="table-row"><td class="px-3 py-2">{{ $row['no_po'] }}</td><td class="px-3 py-2">{{ $row['supplier'] }}</td><td class="px-3 py-2">{{ $row['total_item'] }}</td><td class="px-3 py-2">{{ $row['tgl_terbit'] }}</td></tr>
+                                    @empty
+                                        <tr><td colspan="4" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data.</td></tr>
+                                    @endforelse
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">PO Selesai</p>
-                        <p class="text-2xl font-semibold">{{ number_format($finance['po_selesai_count']) }}</p>
-                    </div>
-                </div>
+                @endif
             </div>
         @endif
 
         @if ($this->canViewOperasionalSection())
-            @php $ops = $this->operasionalStats(); @endphp
-            <div class="rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900 dark:bg-amber-950/30">
-                <h3 class="text-sm font-semibold">Laporan Manager Operasional</h3>
-                <div class="mt-3 grid gap-3 md:grid-cols-4">
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Total ACC Manager Ops</p>
-                        <p class="text-2xl font-semibold">{{ number_format($ops['acc_count']) }}</p>
-                    </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">PO ke Supplier</p>
-                        <p class="text-2xl font-semibold">{{ number_format($ops['po_ke_supplier']) }}</p>
-                    </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Aging Siap Diproses</p>
-                        <p class="text-2xl font-semibold">{{ number_format($ops['aging_siap_proses']) }}</p>
-                    </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Aging Selesai</p>
-                        <p class="text-2xl font-semibold">{{ number_format($ops['aging_selesai']) }}</p>
+            <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900 space-y-4">
+                <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Laporan Manager Operasional</h3>
+
+                @if ($opsActivity === 'all' || $opsActivity === 'pr')
+                <div>
+                    <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Purchase Request yang Disetujui</h4>
+                    <div class="table-wrap">
+                        <table class="min-w-full text-sm">
+                            <thead class="table-head">
+                                <tr>
+                                    <th class="px-3 py-2 text-left w-10"></th>
+                                    <th class="px-3 py-2 text-left">No PR</th>
+                                    <th class="px-3 py-2 text-left">Material</th>
+                                    <th class="px-3 py-2 text-left">Qty</th>
+                                    <th class="px-3 py-2 text-left">Status</th>
+                                    <th class="px-3 py-2 text-left">Tgl ACC</th>
+                                </tr>
+                            </thead>
+                            <tbody class="table-body">
+                                @forelse (($opsData['pr_disetujui_manager_ops'] ?? []) as $pr)
+                                    <tr class="table-row">
+                                        <td class="px-3 py-2">
+                                            <button type="button" wire:click="toggleExpand({{ (int) $pr['id'] }})" class="inline-flex items-center justify-center rounded p-1 text-gray-700 dark:text-gray-200">
+                                                @if (in_array((int) $pr['id'], $this->expandedRows, true))
+                                                    <x-heroicon-o-chevron-down class="h-4 w-4" />
+                                                @else
+                                                    <x-heroicon-o-chevron-right class="h-4 w-4" />
+                                                @endif
+                                            </button>
+                                        </td>
+                                        <td class="px-3 py-2">{{ $pr['no_pr'] }}</td>
+                                        <td class="px-3 py-2">{{ $pr['material'] }}</td>
+                                        <td class="px-3 py-2">{{ $pr['qty'] }}</td>
+                                        <td class="px-3 py-2"><span class="inline-flex rounded-full px-2 py-0.5 text-xs font-medium {{ $statusBadge((string) $pr['status_lanjut']) }}">{{ $pr['status_lanjut'] }}</span></td>
+                                        <td class="px-3 py-2">{{ $pr['tgl_acc'] }}</td>
+                                    </tr>
+                                    @if (in_array((int) $pr['id'], $this->expandedRows, true))
+                                        <tr class="table-row bg-gray-50 dark:bg-gray-800/40">
+                                            <td></td>
+                                            <td colspan="5" class="px-3 py-3">
+                                                <div class="table-wrap">
+                                                    <table class="min-w-full text-xs">
+                                                        <thead class="table-head">
+                                                            <tr>
+                                                                <th class="px-2 py-1 text-left">Nama Material</th>
+                                                                <th class="px-2 py-1 text-left">Qty</th>
+                                                                <th class="px-2 py-1 text-left">Satuan</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody class="table-body">
+                                                            @foreach (($pr['items'] ?? []) as $item)
+                                                                <tr class="table-row">
+                                                                    <td class="px-2 py-1">{{ $item['nama_material'] ?? '-' }}</td>
+                                                                    <td class="px-2 py-1">{{ $item['qty'] ?? '-' }}</td>
+                                                                    <td class="px-2 py-1">{{ $item['satuan'] ?? '-' }}</td>
+                                                                </tr>
+                                                            @endforeach
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    @endif
+                                @empty
+                                    <tr><td colspan="6" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data.</td></tr>
+                                @endforelse
+                            </tbody>
+                        </table>
                     </div>
                 </div>
+                @endif
+
+                @if ($opsActivity === 'all' || $opsActivity === 'aging')
+                <div>
+                    <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Aging Material - Rekomendasi AI</h4>
+                    <div class="table-wrap">
+                        <table class="min-w-full text-sm">
+                            <thead class="table-head"><tr><th class="px-3 py-2 text-left">Nama Material</th><th class="px-3 py-2 text-left">Kategori Aging</th><th class="px-3 py-2 text-left">Rekomendasi AI</th><th class="px-3 py-2 text-left">Status Validasi</th></tr></thead>
+                            <tbody class="table-body">
+                                @forelse (($opsData['aging_rekomendasi_ai'] ?? []) as $row)
+                                    <tr class="table-row"><td class="px-3 py-2">{{ $row['nama_material'] }}</td><td class="px-3 py-2">{{ $row['kategori_aging'] }}</td><td class="px-3 py-2">{{ $row['rekomendasi_ai'] }}</td><td class="px-3 py-2"><span class="inline-flex rounded-full px-2 py-0.5 text-xs font-medium {{ $statusBadge((string) $row['status_validasi']) }}">{{ $row['status_validasi'] }}</span></td></tr>
+                                @empty
+                                    <tr><td colspan="4" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data.</td></tr>
+                                @endforelse
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                @endif
+
+                @if ($opsActivity === 'all' || $opsActivity === 'material_rusak')
+                <div>
+                    <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Material Rusak (stok_rusak &gt; 0)</h4>
+                    <div class="table-wrap">
+                        <table class="min-w-full text-sm">
+                            <thead class="table-head"><tr><th class="px-3 py-2 text-left">Kode</th><th class="px-3 py-2 text-left">Nama Material</th><th class="px-3 py-2 text-left">Kategori</th><th class="px-3 py-2 text-left">Stok Rusak</th></tr></thead>
+                            <tbody class="table-body">
+                                @forelse (($opsData['material_rusak'] ?? []) as $row)
+                                    <tr class="table-row"><td class="px-3 py-2">{{ $row['kode'] }}</td><td class="px-3 py-2">{{ $row['nama_material'] }}</td><td class="px-3 py-2">{{ $row['kategori'] }}</td><td class="px-3 py-2">{{ $row['stok_rusak'] }}</td></tr>
+                                @empty
+                                    <tr><td colspan="4" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data.</td></tr>
+                                @endforelse
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                @endif
             </div>
         @endif
 
         @if ($this->canViewTeknikSection())
-            @php $teknik = $this->teknikStats(); @endphp
-            <div class="rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900 dark:bg-emerald-950/30">
-                <h3 class="text-sm font-semibold">Laporan Manager Teknik</h3>
-                <div class="mt-3 grid gap-3 md:grid-cols-4">
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Total Proyek</p>
-                        <p class="text-2xl font-semibold">{{ number_format($teknik['project_total']) }}</p>
+            <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900 space-y-4">
+                <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Laporan Manager Teknik</h3>
+
+                @if ($teknikActivity === 'all' || $teknikActivity === 'project')
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Daftar Project</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm">
+                                <thead class="table-head"><tr><th class="px-3 py-2 text-left w-16">Aksi</th><th class="px-3 py-2 text-left">Kode Project</th><th class="px-3 py-2 text-left">Nama Project</th><th class="px-3 py-2 text-left">Status</th><th class="px-3 py-2 text-left">Tgl Mulai</th><th class="px-3 py-2 text-left">Tgl Selesai</th><th class="px-3 py-2 text-left">Jumlah Material</th></tr></thead>
+                                <tbody class="table-body">
+                                    @forelse (($teknikData['daftar_project'] ?? []) as $row)
+                                        <tr class="table-row">
+                                            <td class="px-3 py-2">
+                                                <button type="button" wire:click="toggleProjectExpand({{ (int) $row['project_id'] }})" class="inline-flex items-center gap-1 rounded px-1 py-0.5 text-gray-700 dark:text-gray-200" title="Tampilkan detail material">
+                                                    @if (in_array((int) $row['project_id'], $this->expandedProjectRows, true))
+                                                        <x-heroicon-o-minus-circle class="h-4 w-4" />
+                                                        <span class="text-xs font-semibold">-</span>
+                                                    @else
+                                                        <x-heroicon-o-plus-circle class="h-4 w-4" />
+                                                        <span class="text-xs font-semibold">+</span>
+                                                    @endif
+                                                </button>
+                                            </td>
+                                            <td class="px-3 py-2">{{ $row['kode_project'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['nama_project'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['status'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['tgl_mulai'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['tgl_selesai'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['material_count'] }}</td>
+                                        </tr>
+                                        @if (in_array((int) $row['project_id'], $this->expandedProjectRows, true))
+                                            <tr class="table-row bg-gray-50 dark:bg-gray-800/40">
+                                                <td></td>
+                                                <td colspan="6" class="px-3 py-3">
+                                                    <div class="table-wrap">
+                                                        <table class="min-w-full text-xs">
+                                                            <thead class="table-head"><tr><th class="px-2 py-1 text-left">Nama Material</th><th class="px-2 py-1 text-left">Qty</th><th class="px-2 py-1 text-left">Satuan</th></tr></thead>
+                                                            <tbody class="table-body">
+                                                                @forelse (($row['materials'] ?? []) as $material)
+                                                                    <tr class="table-row">
+                                                                        <td class="px-2 py-1">{{ $material['nama_material'] ?? '-' }}</td>
+                                                                        <td class="px-2 py-1">{{ $material['qty'] ?? '-' }}</td>
+                                                                        <td class="px-2 py-1">{{ $material['satuan'] ?? '-' }}</td>
+                                                                    </tr>
+                                                                @empty
+                                                                    <tr><td colspan="3" class="px-2 py-2 text-center text-gray-500 dark:text-gray-400">Tidak ada material.</td></tr>
+                                                                @endforelse
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        @endif
+                                    @empty
+                                        <tr><td colspan="7" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data.</td></tr>
+                                    @endforelse
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Proyek Menunggu</p>
-                        <p class="text-2xl font-semibold">{{ number_format($teknik['project_waiting']) }}</p>
+                @endif
+
+                @if (($teknikActivity === 'all' || $teknikActivity === 'outbound') && !empty($teknikData['outbound_per_project']))
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Rekap Outbound per Project</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm">
+                                <thead class="table-head"><tr><th class="px-3 py-2 text-left w-10"></th><th class="px-3 py-2 text-left">Kode Project</th><th class="px-3 py-2 text-left">Nama Project</th><th class="px-3 py-2 text-left">Jumlah Transaksi</th><th class="px-3 py-2 text-left">Jumlah Material</th></tr></thead>
+                                <tbody class="table-body">
+                                    @foreach (($teknikData['outbound_per_project'] ?? []) as $row)
+                                        <tr class="table-row">
+                                            <td class="px-3 py-2">
+                                                <button type="button" wire:click="toggleOutboundProjectExpand({{ (int) $row['project_id'] }})" class="inline-flex items-center rounded p-0.5 text-gray-700 dark:text-gray-200">
+                                                    @if (in_array((int) $row['project_id'], $this->expandedOutboundProjectRows, true))
+                                                        <x-heroicon-o-plus-small class="h-4 w-4 mr-1 rotate-45" />
+                                                    @else
+                                                        <x-heroicon-o-plus-small class="h-4 w-4 mr-1" />
+                                                    @endif
+                                                </button>
+                                            </td>
+                                            <td class="px-3 py-2">{{ $row['kode_project'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['nama_project'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['total_outbound'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['material_count'] }}</td>
+                                        </tr>
+                                        @if (in_array((int) $row['project_id'], $this->expandedOutboundProjectRows, true))
+                                            <tr class="table-row bg-gray-50 dark:bg-gray-800/40">
+                                                <td></td>
+                                                <td colspan="4" class="px-3 py-3">
+                                                    <div class="table-wrap">
+                                                        <table class="min-w-full text-xs">
+                                                            <thead class="table-head"><tr><th class="px-2 py-1 text-left">Nama Material</th><th class="px-2 py-1 text-left">Qty</th><th class="px-2 py-1 text-left">Satuan</th></tr></thead>
+                                                            <tbody class="table-body">
+                                                                @forelse (($row['materials'] ?? []) as $material)
+                                                                    <tr class="table-row">
+                                                                        <td class="px-2 py-1">{{ $material['nama_material'] ?? '-' }}</td>
+                                                                        <td class="px-2 py-1">{{ $material['qty'] ?? '-' }}</td>
+                                                                        <td class="px-2 py-1">{{ $material['satuan'] ?? '-' }}</td>
+                                                                    </tr>
+                                                                @empty
+                                                                    <tr><td colspan="3" class="px-2 py-2 text-center text-gray-500 dark:text-gray-400">Tidak ada material outbound.</td></tr>
+                                                                @endforelse
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        @endif
+                                    @endforeach
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Proyek Selesai</p>
-                        <p class="text-2xl font-semibold">{{ number_format($teknik['project_completed']) }}</p>
-                    </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Rata-rata Tunggu (hari)</p>
-                        <p class="text-2xl font-semibold">{{ number_format((float) $teknik['avg_wait_days'], 1, '.', '') }}</p>
-                    </div>
-                </div>
+                @endif
             </div>
         @endif
 
         @if ($this->canViewGudangSection())
-            @php $gudang = $this->gudangStats(); @endphp
-            <div class="rounded-xl border border-violet-200 bg-violet-50 p-4 dark:border-violet-900 dark:bg-violet-950/30">
-                <h3 class="text-sm font-semibold">Laporan Gudang</h3>
-                <div class="mt-3 grid gap-3 md:grid-cols-4">
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Inbound Tercatat</p>
-                        <p class="text-2xl font-semibold">{{ number_format($gudang['inbound_count']) }}</p>
+            <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900 space-y-4">
+                <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Laporan Staff Gudang</h3>
+
+                @if ($gudangActivity === 'all' || $gudangActivity === 'ai_matching')
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Rekomendasi AI Matching</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm">
+                                <thead class="table-head"><tr><th class="px-3 py-2 text-left w-16">Aksi</th><th class="px-3 py-2 text-left">Material</th><th class="px-3 py-2 text-left">Project</th><th class="px-3 py-2 text-left">Qty Rekomendasi</th><th class="px-3 py-2 text-left">Rekomendasi Booking</th><th class="px-3 py-2 text-left">Rekomendasi Generate PR</th><th class="px-3 py-2 text-left">Stok Saat ACC</th><th class="px-3 py-2 text-left">Status</th></tr></thead>
+                                <tbody class="table-body">
+                                    @forelse (($gudangData['rekomendasi_ai_matching'] ?? []) as $row)
+                                        <tr class="table-row">
+                                            <td class="px-3 py-2">
+                                                <button type="button" wire:click="toggleAiMatchingExpand('{{ (string) ($row['row_key'] ?? '') }}')" class="inline-flex items-center gap-1 rounded px-1 py-0.5 text-gray-700 dark:text-gray-200" title="Tampilkan detail Gemini">
+                                                    @if (in_array((string) ($row['row_key'] ?? ''), $this->expandedAiMatchingRows, true))
+                                                        <x-heroicon-o-minus-circle class="h-4 w-4" />
+                                                        <span class="text-xs font-semibold">-</span>
+                                                    @else
+                                                        <x-heroicon-o-plus-circle class="h-4 w-4" />
+                                                        <span class="text-xs font-semibold">+</span>
+                                                    @endif
+                                                </button>
+                                            </td>
+                                            <td class="px-3 py-2">{{ $row['material'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['project'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['qty_rekomendasi'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['rekom_book'] ?? '-' }}</td>
+                                            <td class="px-3 py-2">{{ $row['rekom_pr'] ?? '-' }}</td>
+                                            <td class="px-3 py-2">{{ $row['stok_saat_acc'] ?? $row['stok_aktual'] }}</td>
+                                            <td class="px-3 py-2"><span class="inline-flex rounded-full px-2 py-0.5 text-xs font-medium {{ $statusBadge((string) $row['status']) }}">{{ $row['status'] }}</span></td>
+                                        </tr>
+                                        @if (in_array((string) ($row['row_key'] ?? ''), $this->expandedAiMatchingRows, true))
+                                            <tr class="table-row bg-gray-50 dark:bg-gray-800/30">
+                                                <td></td>
+                                                <td colspan="7" class="px-3 py-3">
+                                                    <div class="grid gap-2 md:grid-cols-2 text-xs">
+                                                        <div>
+                                                            <p class="font-semibold text-gray-900 dark:text-white">Waktu ACC</p>
+                                                            <p class="text-gray-700 dark:text-gray-300">{{ $row['waktu_acc'] ?? '-' }}</p>
+                                                        </div>
+                                                        <div>
+                                                            <p class="font-semibold text-gray-900 dark:text-white">Stok Saat ACC</p>
+                                                            <p class="text-gray-700 dark:text-gray-300">{{ $row['stok_saat_acc'] ?? '-' }}</p>
+                                                        </div>
+                                                        <div class="md:col-span-2">
+                                                            <p class="font-semibold text-gray-900 dark:text-white">Alasan Gemini</p>
+                                                            <p class="text-gray-700 dark:text-gray-300">{{ $row['alasan_gemini'] ?? '-' }}</p>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        @endif
+                                    @empty
+                                        <tr><td colspan="8" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data.</td></tr>
+                                    @endforelse
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Outbound Diambil</p>
-                        <p class="text-2xl font-semibold">{{ number_format($gudang['outbound_taken_count']) }}</p>
+                @endif
+
+                @if ($gudangActivity === 'all' || $gudangActivity === 'task_operasional')
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Task Operasional (Inbound Manual + Alokasi Manual)</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm">
+                                <thead class="table-head"><tr><th class="px-3 py-2 text-left">ID</th><th class="px-3 py-2 text-left">Tipe</th><th class="px-3 py-2 text-left">Judul</th><th class="px-3 py-2 text-left">Untuk</th><th class="px-3 py-2 text-left">Kebutuhan</th><th class="px-3 py-2 text-left">Alokasi</th><th class="px-3 py-2 text-left">Status</th><th class="px-3 py-2 text-left">Dibuat</th></tr></thead>
+                                <tbody class="table-body">
+                                    @forelse (($gudangData['task_operasional'] ?? []) as $row)
+                                        <tr class="table-row"><td class="px-3 py-2">{{ $row['id'] }}</td><td class="px-3 py-2">{{ $row['tipe'] }}</td><td class="px-3 py-2">{{ $row['judul'] }}</td><td class="px-3 py-2">{{ $row['untuk'] }}</td><td class="px-3 py-2">{{ $row['kebutuhan'] ?? '-' }}</td><td class="px-3 py-2">{{ $row['alokasi'] ?? '-' }}</td><td class="px-3 py-2"><span class="inline-flex rounded-full px-2 py-0.5 text-xs font-medium {{ $statusBadge((string) $row['status']) }}">{{ $row['status'] }}</span></td><td class="px-3 py-2">{{ $row['dibuat'] }}</td></tr>
+                                    @empty
+                                        <tr><td colspan="8" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada task operasional.</td></tr>
+                                    @endforelse
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Task Pending</p>
-                        <p class="text-2xl font-semibold">{{ number_format($gudang['task_pending_count']) }}</p>
+                @endif
+
+                @if ($gudangActivity === 'all' || $gudangActivity === 'stok')
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Laporan Stok Gudang</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm">
+                                <thead class="table-head"><tr><th class="px-3 py-2 text-left">Nama Material</th><th class="px-3 py-2 text-left">Kode</th><th class="px-3 py-2 text-left">Kategori</th><th class="px-3 py-2 text-left">Stok</th><th class="px-3 py-2 text-left">Min Stok</th><th class="px-3 py-2 text-left">Satuan</th><th class="px-3 py-2 text-left">Status</th></tr></thead>
+                                <tbody class="table-body">
+                                    @forelse (($gudangData['laporan_stok_gudang'] ?? []) as $row)
+                                        <tr class="table-row">
+                                            <td class="px-3 py-2">{{ $row['nama_material'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['kode'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['kategori'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['stok'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['stok_minimum'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['satuan'] }}</td>
+                                            <td class="px-3 py-2">
+                                                @if (($row['level'] ?? 'normal') === 'critical')
+                                                    <span class="inline-flex rounded-full bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700 dark:bg-rose-900/40 dark:text-rose-200">Hampir Habis</span>
+                                                @elseif (($row['level'] ?? 'normal') === 'warning')
+                                                    <span class="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-200">Mendekati Batas</span>
+                                                @else
+                                                    <span class="inline-flex rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200">Aman</span>
+                                                @endif
+                                            </td>
+                                        </tr>
+                                    @empty
+                                        <tr><td colspan="7" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Data stok tidak tersedia.</td></tr>
+                                    @endforelse
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                    <div class="rounded-lg bg-white p-3 dark:bg-gray-900">
-                        <p class="text-xs text-gray-500">Task Done</p>
-                        <p class="text-2xl font-semibold">{{ number_format($gudang['task_done_count']) }}</p>
+                @endif
+
+                @if ($gudangActivity === 'all' || $gudangActivity === 'outbound')
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Outbound</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm">
+                                <thead class="table-head"><tr><th class="px-3 py-2 text-left w-16">Aksi</th><th class="px-3 py-2 text-left">Tgl</th><th class="px-3 py-2 text-left">Project</th><th class="px-3 py-2 text-left">Status</th><th class="px-3 py-2 text-left">Jumlah Material</th></tr></thead>
+                                <tbody class="table-body">
+                                    @forelse (($gudangData['outbound'] ?? []) as $row)
+                                        <tr class="table-row">
+                                            <td class="px-3 py-2">
+                                                <button type="button" wire:click="toggleOutboundExpand({{ (int) ($row['id'] ?? 0) }})" class="inline-flex items-center gap-1 rounded px-1 py-0.5 text-gray-700 dark:text-gray-200" title="Tampilkan detail material outbound">
+                                                    @if (in_array((int) ($row['id'] ?? 0), $this->expandedOutboundRows, true))
+                                                        <x-heroicon-o-minus-circle class="h-4 w-4" />
+                                                        <span class="text-xs font-semibold">-</span>
+                                                    @else
+                                                        <x-heroicon-o-plus-circle class="h-4 w-4" />
+                                                        <span class="text-xs font-semibold">+</span>
+                                                    @endif
+                                                </button>
+                                            </td>
+                                            <td class="px-3 py-2">{{ $row['tgl'] }}</td>
+                                            <td class="px-3 py-2">{{ $row['project'] }}</td>
+                                            <td class="px-3 py-2"><span class="inline-flex rounded-full px-2 py-0.5 text-xs font-medium {{ $statusBadge((string) $row['status']) }}">{{ $row['status'] }}</span></td>
+                                            <td class="px-3 py-2">{{ $row['material_count'] }}</td>
+                                        </tr>
+                                        @if (in_array((int) ($row['id'] ?? 0), $this->expandedOutboundRows, true))
+                                            <tr class="table-row bg-gray-50 dark:bg-gray-800/40">
+                                                <td></td>
+                                                <td colspan="4" class="px-3 py-3">
+                                                    <div class="table-wrap">
+                                                        <table class="min-w-full text-xs">
+                                                            <thead class="table-head"><tr><th class="px-2 py-1 text-left">Material</th><th class="px-2 py-1 text-left">Qty</th><th class="px-2 py-1 text-left">Satuan</th></tr></thead>
+                                                            <tbody class="table-body">
+                                                                @forelse (($row['material_items'] ?? []) as $materialItem)
+                                                                    <tr class="table-row"><td class="px-2 py-1">{{ $materialItem['nama_material'] ?? '-' }}</td><td class="px-2 py-1">{{ $materialItem['qty'] ?? '-' }}</td><td class="px-2 py-1">{{ $materialItem['satuan'] ?? '-' }}</td></tr>
+                                                                @empty
+                                                                    <tr><td colspan="3" class="px-2 py-2 text-center text-gray-500 dark:text-gray-400">Tidak ada rincian material.</td></tr>
+                                                                @endforelse
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        @endif
+                                    @empty
+                                        <tr><td colspan="5" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data outbound.</td></tr>
+                                    @endforelse
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                </div>
+                @endif
+
+                @if ($gudangActivity === 'all' || $gudangActivity === 'inbound')
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Inbound</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm"><thead class="table-head"><tr><th class="px-3 py-2 text-left">Tgl</th><th class="px-3 py-2 text-left">No PO</th><th class="px-3 py-2 text-left">Material</th><th class="px-3 py-2 text-left">Qty</th><th class="px-3 py-2 text-left">Sumber</th></tr></thead><tbody class="table-body">@forelse (($gudangData['inbound'] ?? []) as $row)<tr class="table-row"><td class="px-3 py-2">{{ $row['tgl'] }}</td><td class="px-3 py-2">{{ $row['no_po'] }}</td><td class="px-3 py-2">{{ $row['material'] }}</td><td class="px-3 py-2">{{ $row['qty'] }}</td><td class="px-3 py-2">{{ $row['sumber'] }}</td></tr>@empty<tr><td colspan="5" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data.</td></tr>@endforelse</tbody></table>
+                        </div>
+                    </div>
+                @endif
+
+                @if ($gudangActivity === 'all' || $gudangActivity === 'booking')
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Booking Aktif</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm"><thead class="table-head"><tr><th class="px-3 py-2 text-left">Material</th><th class="px-3 py-2 text-left">Project</th><th class="px-3 py-2 text-left">Qty Booked</th><th class="px-3 py-2 text-left">Tgl Booking</th></tr></thead><tbody class="table-body">@forelse (($gudangData['booking_aktif'] ?? []) as $row)<tr class="table-row"><td class="px-3 py-2">{{ $row['material'] }}</td><td class="px-3 py-2">{{ $row['project'] }}</td><td class="px-3 py-2">{{ $row['qty_booked'] }}</td><td class="px-3 py-2">{{ $row['tgl_booking'] }}</td></tr>@empty<tr><td colspan="4" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data.</td></tr>@endforelse</tbody></table>
+                        </div>
+                    </div>
+                @endif
+
+                @if ($gudangActivity === 'all' || $gudangActivity === 'retur')
+                    <div>
+                        <h4 class="mb-2 text-sm font-medium text-gray-900 dark:text-white">Retur</h4>
+                        <div class="table-wrap">
+                            <table class="min-w-full text-sm"><thead class="table-head"><tr><th class="px-3 py-2 text-left">Tgl</th><th class="px-3 py-2 text-left">Material</th><th class="px-3 py-2 text-left">Qty</th><th class="px-3 py-2 text-left">Keterangan</th></tr></thead><tbody class="table-body">@forelse (($gudangData['retur'] ?? []) as $row)<tr class="table-row"><td class="px-3 py-2">{{ $row['tgl'] }}</td><td class="px-3 py-2">{{ $row['material'] }}</td><td class="px-3 py-2">{{ $row['qty'] }}</td><td class="px-3 py-2">{{ $row['keterangan'] }}</td></tr>@empty<tr><td colspan="4" class="px-3 py-3 text-center text-gray-500 dark:text-gray-400">Tidak ada data.</td></tr>@endforelse</tbody></table>
+                        </div>
+                    </div>
+                @endif
             </div>
         @endif
-
-        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-            <h3 class="mb-3 text-sm font-semibold">Matriks Akses Role</h3>
-            <div class="overflow-x-auto">
-                <table class="min-w-full text-sm">
-                    <thead>
-                        <tr class="border-b border-gray-200 dark:border-gray-700">
-                            <th class="px-2 py-2 text-left">Role</th>
-                            <th class="px-2 py-2 text-left">Akses Modul</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach ($this->roleAccessRows() as $row)
-                            <tr class="border-b border-gray-100 dark:border-gray-800">
-                                <td class="px-2 py-2 font-medium">{{ $row['role'] }}</td>
-                                <td class="px-2 py-2">{{ $row['modules'] }}</td>
-                            </tr>
-                        @endforeach
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-            <h3 class="mb-3 text-sm font-semibold">Laporan Akses per Aktor</h3>
-            <div class="overflow-x-auto">
-                <table class="min-w-full text-sm">
-                    <thead>
-                        <tr class="border-b border-gray-200 dark:border-gray-700">
-                            <th class="px-2 py-2 text-left">Nama</th>
-                            <th class="px-2 py-2 text-left">Email</th>
-                            <th class="px-2 py-2 text-left">Role</th>
-                            <th class="px-2 py-2 text-left">Akses Modul</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach ($this->actorAccessRows() as $row)
-                            <tr class="border-b border-gray-100 dark:border-gray-800">
-                                <td class="px-2 py-2 font-medium">{{ $row['name'] }}</td>
-                                <td class="px-2 py-2">{{ $row['email'] }}</td>
-                                <td class="px-2 py-2">{{ $row['role'] }}</td>
-                                <td class="px-2 py-2">{{ $row['modules'] }}</td>
-                            </tr>
-                        @endforeach
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-            <h3 class="mb-3 text-sm font-semibold">Detail Aktivitas (Filtered)</h3>
-            <div class="overflow-x-auto">
-                <table class="min-w-full text-sm">
-                    <thead>
-                        <tr class="border-b border-gray-200 dark:border-gray-700">
-                            <th class="px-2 py-2 text-left">Waktu</th>
-                            <th class="px-2 py-2 text-left">User</th>
-                            <th class="px-2 py-2 text-left">Role</th>
-                            <th class="px-2 py-2 text-left">Module</th>
-                            <th class="px-2 py-2 text-left">Action</th>
-                            <th class="px-2 py-2 text-left">Description</th>
-                            <th class="px-2 py-2 text-left">IP</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @forelse ($rows as $row)
-                            <tr class="border-b border-gray-100 dark:border-gray-800">
-                                <td class="px-2 py-2">{{ $row['created_at'] }}</td>
-                                <td class="px-2 py-2">{{ $row['user_name'] }}</td>
-                                <td class="px-2 py-2">{{ $row['user_role'] }}</td>
-                                <td class="px-2 py-2">{{ $row['module'] }}</td>
-                                <td class="px-2 py-2">{{ $row['action'] }}</td>
-                                <td class="px-2 py-2">{{ $row['description'] }}</td>
-                                <td class="px-2 py-2">{{ $row['ip_address'] }}</td>
-                            </tr>
-                        @empty
-                            <tr>
-                                <td colspan="7" class="px-2 py-6 text-center text-gray-500">Tidak ada data untuk filter yang dipilih.</td>
-                            </tr>
-                        @endforelse
-                    </tbody>
-                </table>
-            </div>
-        </div>
     </div>
 </x-filament-panels::page>

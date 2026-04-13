@@ -28,6 +28,8 @@ class AdminPanelProvider extends PanelProvider
             ->default()
             ->id('admin')
             ->path('admin')
+            ->brandName('Smart Inventory System PT. JAU')
+            ->brandLogo(fn () => view('filament.brand.logo'))
             ->viteTheme('resources/css/filament/admin/theme.css')
             ->darkMode()
             ->defaultThemeMode(ThemeMode::System)
