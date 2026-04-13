@@ -121,12 +121,12 @@ class LaporanDashboard extends Page
     {
         $this->dateFrom = (string) ($this->filters['date_from'] ?? '');
         $this->dateTo = (string) ($this->filters['date_to'] ?? '');
-        $this->filters['finance_activity'] = 'all';
-        $this->filters['ops_activity'] = 'all';
-        $this->filters['ops_pr_status'] = 'all';
-        $this->filters['teknik_activity'] = 'all';
-        $this->filters['teknik_template_id'] = '';
-        $this->filters['gudang_activity'] = 'all';
+        $this->filters['finance_activity'] = (string) ($this->filters['finance_activity'] ?? 'all');
+        $this->filters['ops_activity'] = (string) ($this->filters['ops_activity'] ?? 'all');
+        $this->filters['ops_pr_status'] = (string) ($this->filters['ops_pr_status'] ?? 'all');
+        $this->filters['teknik_activity'] = (string) ($this->filters['teknik_activity'] ?? 'all');
+        $this->filters['teknik_template_id'] = (string) ($this->filters['teknik_template_id'] ?? '');
+        $this->filters['gudang_activity'] = (string) ($this->filters['gudang_activity'] ?? 'all');
         $this->roleReportData = $this->resolveRoleReportData();
         $this->expandedRows = [];
         $this->expandedProjectRows = [];

@@ -28,7 +28,11 @@ class DeadstockAIService
 
         $materials = $this->buildWarehouseDataset();
         if (empty($materials)) {
-            return null;
+            return $this->createNoDeadstockTask(
+                $outboundId,
+                0,
+                'Screening deadstock selesai. Tidak ada stok available yang perlu dianalisis.'
+            );
         }
 
         try {
@@ -45,7 +49,11 @@ class DeadstockAIService
         $items = collect($analysis['items'] ?? [])->filter(fn ($row) => is_array($row))->values();
 
         if ($items->isEmpty()) {
-            return null;
+            return $this->createNoDeadstockTask(
+                $outboundId,
+                count($materials),
+                'Screening deadstock selesai. Tidak ditemukan material yang perlu tindakan.'
+            );
         }
 
         $normalizedItems = $items
@@ -71,7 +79,11 @@ class DeadstockAIService
             ->all();
 
         if (empty($normalizedItems)) {
-            return null;
+            return $this->createNoDeadstockTask(
+                $outboundId,
+                count($materials),
+                'Screening deadstock selesai. Tidak ditemukan material deadstock.'
+            );
         }
 
         $title = 'AI: Screening Deadstock Pasca Outbound #' . $outboundId;
@@ -81,6 +93,7 @@ class DeadstockAIService
             'outbound_id' => $outboundId,
             'generated_at' => now()->toDateTimeString(),
             'total_material_dianalisis' => count($materials),
+            'has_deadstock' => true,
             'deadstock_items' => $normalizedItems,
         ];
 
@@ -121,7 +134,37 @@ class DeadstockAIService
         return (int) $task->id;
     }
 
-    private function notifyManagerOperasional(string $title, string $message, int $taskId): void
+    private function createNoDeadstockTask(int $outboundId, int $totalMaterial, string $message): int
+    {
+        $title = 'AI: Screening Deadstock Pasca Outbound #' . $outboundId;
+
+        $payload = [
+            'outbound_id' => $outboundId,
+            'generated_at' => now()->toDateTimeString(),
+            'total_material_dianalisis' => $totalMaterial,
+            'has_deadstock' => false,
+            'deadstock_items' => [],
+            'screening_note' => $message,
+        ];
+
+        $task = Task::query()->create([
+            'for_role' => 'Manager Operasional',
+            'type' => 'ai_deadstock_recommendation',
+            'title' => $title,
+            'message' => $message,
+            'payload' => $payload,
+            'status' => 'done',
+            'related_type' => 'outbound',
+            'related_id' => $outboundId,
+            'handled_at' => now(),
+        ]);
+
+        $this->notifyManagerOperasional($title, $message, (int) $task->id, 'success');
+
+        return (int) $task->id;
+    }
+
+    private function notifyManagerOperasional(string $title, string $message, int $taskId, string $style = 'warning'): void
     {
         $users = User::query()
             ->whereIn('role', ['Manager Operasional', 'Manager Operational', 'Manajer Operasional'])
@@ -131,11 +174,19 @@ class DeadstockAIService
             return;
         }
 
-        $databaseMessage = Notification::make()
+        $notification = Notification::make()
             ->title($title)
-            ->body($message)
-            ->warning()
-            ->getDatabaseMessage();
+            ->body($message);
+
+        if ($style === 'success') {
+            $notification->success();
+        } elseif ($style === 'info') {
+            $notification->info();
+        } else {
+            $notification->warning();
+        }
+
+        $databaseMessage = $notification->getDatabaseMessage();
 
         foreach ($users as $user) {
             DatabaseNotificationModel::query()->create([

@@ -173,9 +173,14 @@ class ViewOutbound extends Page
                         $taskId = (new DeadstockAIService(new GeminiService()))->analyzeAfterOutbound($outboundId);
 
                         if ($taskId) {
+                            $deadstockTask = Task::query()->find($taskId);
+                            $hasDeadstock = (bool) data_get($deadstockTask?->payload, 'has_deadstock', true);
+
                             Notification::make()
                                 ->title('Screening deadstock selesai')
-                                ->body('Task AI deadstock berhasil dibuat otomatis.')
+                                ->body($hasDeadstock
+                                    ? 'Task AI deadstock berhasil dibuat otomatis.'
+                                    : 'Tidak ditemukan deadstock. Task informasi tetap dibuat untuk jejak screening.')
                                 ->success()
                                 ->send();
                         }

@@ -85,6 +85,58 @@
             color-scheme: light;
         }
 
+        .laporan-operasional .filter-card {
+            margin-top: 1.5rem;
+            padding: 1rem 1.25rem;
+        }
+
+        .laporan-operasional .filter-grid {
+            display: flex;
+            flex-wrap: wrap;
+            row-gap: 0.75rem;
+            column-gap: 0.85rem;
+        }
+
+        .laporan-operasional .filter-field {
+            display: flex;
+            flex: 1 1 260px;
+            min-width: 220px;
+            max-width: 340px;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .laporan-operasional .filter-card label {
+            font-size: 0.875rem !important;
+            line-height: 1.2 !important;
+            color: #9ca3af !important;
+            margin: 0 !important;
+        }
+
+        .laporan-operasional .filter-card input,
+        .laporan-operasional .filter-card select {
+            font-size: 0.875rem !important;
+            line-height: 1.25rem !important;
+            padding-top: 0.45rem !important;
+            padding-bottom: 0.45rem !important;
+        }
+
+        .laporan-operasional .actions-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .laporan-operasional .actions-row > * {
+            margin: 0 !important;
+        }
+
+        .laporan-operasional .actions-row .fi-btn,
+        .laporan-operasional .actions-row button {
+            font-size: 0.875rem !important;
+        }
+
         .dark .laporan-operasional input[type="date"],
         .fi-theme-dark .laporan-operasional input[type="date"],
         [data-theme="dark"] .laporan-operasional input[type="date"] {
@@ -114,29 +166,105 @@
     @endphp
 
     <div class="laporan-operasional space-y-6">
-        <div class="rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-900">
-            <div class="flex flex-wrap items-end gap-4">
-                <div class="flex flex-col gap-1">
-                    <label class="text-xs font-medium text-gray-500 dark:text-gray-400">Dari Tanggal</label>
+        <div class="filter-card mx-4 sm:mx-6 rounded-xl border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900 space-y-4">
+            <div class="filter-grid grid sm:grid-cols-2 xl:grid-cols-3">
+                <div class="filter-field">
+                    <label class="text-[11px] font-medium text-gray-400">Dari Tanggal</label>
                     <input
                         type="date"
                         wire:model="filters.date_from"
-                        class="w-44 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                        class="w-full min-w-[170px] rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
                     />
                 </div>
-                <div class="flex flex-col gap-1">
-                    <label class="text-xs font-medium text-gray-500 dark:text-gray-400">Sampai Tanggal</label>
+                <div class="filter-field">
+                    <label class="text-[11px] font-medium text-gray-400">Sampai Tanggal</label>
                     <input
                         type="date"
                         wire:model="filters.date_to"
-                        class="w-44 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+                        class="w-full min-w-[170px] rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
                     />
                 </div>
-                <div class="flex flex-wrap items-center gap-2 md:ml-2">
-                    <x-filament::button size="sm" color="primary" wire:click="applyFilters">Apply Filter</x-filament::button>
-                    <x-filament::button size="sm" color="gray" wire:click="exportPdf">Export PDF</x-filament::button>
-                    <x-filament::button size="sm" color="success" wire:click="exportExcel">Export Excel</x-filament::button>
-                </div>
+            </div>
+
+            <div class="filter-grid grid md:grid-cols-2 xl:grid-cols-3">
+                @if ($this->canViewFinanceSection())
+                    <div class="filter-field">
+                        <label class="text-[11px] font-medium text-gray-400">Filter Kegiatan Finance</label>
+                        <select wire:model="filters.finance_activity" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
+                            <option value="all">Semua Kegiatan</option>
+                            <option value="pr">PR Disetujui Finance</option>
+                            <option value="po">PO Terbit</option>
+                        </select>
+                    </div>
+                @endif
+
+                @if ($this->canViewOperasionalSection())
+                    <div class="filter-field">
+                        <label class="text-[11px] font-medium text-gray-400">Filter Kegiatan Operasional</label>
+                        <select wire:model="filters.ops_activity" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
+                            <option value="all">Semua Kegiatan</option>
+                            <option value="pr">PR Disetujui</option>
+                            <option value="aging">Aging Material - Rekomendasi AI</option>
+                            <option value="material_rusak">Material Rusak</option>
+                        </select>
+                    </div>
+                    <div class="filter-field">
+                        <label class="text-[11px] font-medium text-gray-400">Status PR Manager Ops</label>
+                        <select wire:model="filters.ops_pr_status" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
+                            <option value="all">Semua Status</option>
+                            <option value="draft">draft</option>
+                            <option value="pending_manager">pending_manager</option>
+                            <option value="pending_finance">pending_finance</option>
+                            <option value="approved">approved</option>
+                            <option value="ordered">ordered</option>
+                            <option value="received">received</option>
+                            <option value="rejected">rejected</option>
+                        </select>
+                    </div>
+                @endif
+
+                @if ($this->canViewTeknikSection())
+                    <div class="filter-field">
+                        <label class="text-[11px] font-medium text-gray-400">Filter Kegiatan Manager Teknik</label>
+                        <select wire:model="filters.teknik_activity" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
+                            <option value="all">Semua Kegiatan</option>
+                            <option value="project">Daftar Project</option>
+                            <option value="outbound">Rekap Outbound per Project</option>
+                        </select>
+                    </div>
+                    <div class="filter-field">
+                        <label class="text-[11px] font-medium text-gray-400">Filter Template Project</label>
+                        <select wire:model="filters.teknik_template_id" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
+                            @foreach ($this->teknikTemplateOptions() as $templateId => $templateName)
+                                <option value="{{ $templateId }}">{{ $templateName }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                @endif
+
+                @if ($this->canViewGudangSection())
+                    <div class="filter-field">
+                        <label class="text-[11px] font-medium text-gray-400">Filter Kegiatan Staff Gudang</label>
+                        <select wire:model="filters.gudang_activity" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-primary-500 focus:ring-primary-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
+                            <option value="all">Semua Kegiatan</option>
+                            <option value="ai_matching">Rekomendasi AI Matching</option>
+                            <option value="task_operasional">Task Operasional</option>
+                            <option value="stok">Laporan Stok Gudang</option>
+                            <option value="outbound">Outbound</option>
+                            <option value="inbound">Inbound</option>
+                            <option value="booking">Booking Aktif</option>
+                            <option value="retur">Retur</option>
+                        </select>
+                    </div>
+                @endif
+            </div>
+
+            <div class="border-t border-gray-200 dark:border-gray-700"></div>
+
+            <div class="actions-row pt-1">
+                <x-filament::button size="sm" color="primary" wire:click="applyFilters">Apply Filter</x-filament::button>
+                <x-filament::button size="sm" color="gray" wire:click="exportPdf">Export PDF</x-filament::button>
+                <x-filament::button size="sm" color="success" wire:click="exportExcel">Export Excel</x-filament::button>
             </div>
         </div>
 
