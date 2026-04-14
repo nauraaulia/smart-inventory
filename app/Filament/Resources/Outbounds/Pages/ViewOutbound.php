@@ -69,10 +69,20 @@ class ViewOutbound extends Page
                 ->label('Tandai Siap')
                 ->icon('heroicon-o-check-badge')
                 ->color('info')
-                ->visible(fn (): bool => $this->canPrepare() && $this->record->status === 'pending')
+                ->visible(fn (): bool => $this->canPrepare() && $this->record->status === 'pending' && $this->canProceedOutbound())
                 ->requiresConfirmation()
                 ->modalHeading('Tandai outbound siap diambil?')
                 ->action(function (): void {
+                    if (!$this->canProceedOutbound()) {
+                        Notification::make()
+                            ->title('Outbound belum bisa diproses')
+                            ->body('Status barang masih kurang. Lengkapi kebutuhan material terlebih dahulu.')
+                            ->warning()
+                            ->send();
+
+                        return;
+                    }
+
                     $this->record->update([
                         'status' => 'ready',
                         'ready_at' => now(),
@@ -122,6 +132,16 @@ class ViewOutbound extends Page
                     ];
                 })
                 ->action(function (array $data): void {
+                    if (!$this->canProceedOutbound()) {
+                        Notification::make()
+                            ->title('Konfirmasi ditolak')
+                            ->body('Status barang masih kurang, outbound belum bisa dikonfirmasi pengambilan.')
+                            ->warning()
+                            ->send();
+
+                        return;
+                    }
+
                     $allCheckIds = collect($data['all_check_ids'] ?? [])->map(fn ($id) => (string) $id)->filter()->unique()->values();
                     $checkedIds = collect($data['checked_item_ids'] ?? [])->map(fn ($id) => (string) $id)->filter()->unique()->values();
 
@@ -435,6 +455,39 @@ class ViewOutbound extends Page
             'Staff Gudang',
             'Administrator IT',
         ], true);
+    }
+
+    private function canProceedOutbound(): bool
+    {
+        if ($this->record->outbound_manual || !$this->record->project_id) {
+            return true;
+        }
+
+        $requiredRows = $this->record->project?->items()
+            ->selectRaw('material_id, SUM(jumlah_diminta) as required_qty')
+            ->groupBy('material_id')
+            ->get();
+
+        if (!$requiredRows || $requiredRows->isEmpty()) {
+            return true;
+        }
+
+        $providedMap = MaterialPiece::query()
+            ->selectRaw('material_id, SUM(panjang) as provided_qty')
+            ->where('booked_for_project_id', (int) $this->record->project_id)
+            ->whereIn('status', ['booked', 'used'])
+            ->groupBy('material_id')
+            ->get()
+            ->mapWithKeys(fn ($row): array => [(int) $row->material_id => (float) $row->provided_qty]);
+
+        $hasShortage = $requiredRows->contains(function ($row) use ($providedMap): bool {
+            $required = (float) ($row->required_qty ?? 0);
+            $provided = (float) ($providedMap[(int) ($row->material_id ?? 0)] ?? 0);
+
+            return $required > 0 && $provided + 0.00001 < $required;
+        });
+
+        return !$hasShortage;
     }
 
     private function formatQty(float $value, string $unit): string

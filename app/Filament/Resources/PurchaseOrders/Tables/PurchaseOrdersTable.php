@@ -4,6 +4,7 @@ namespace App\Filament\Resources\PurchaseOrders\Tables;
 
 use App\Filament\Resources\PurchaseOrders\PurchaseOrderResource;
 use App\Models\PurchaseOrder;
+use Carbon\Carbon;
 use Filament\Actions\Action;
 use Filament\Actions\ViewAction;
 use Filament\Tables\Columns\TextColumn;
@@ -56,6 +57,28 @@ class PurchaseOrdersTable
 
                         return number_format($received, 1, '.', '') . ' / ' . number_format($ordered, 1, '.', '') . ' ' . $unit;
                     }),
+                TextColumn::make('inbound_summary')
+                    ->label('Inbound (Tanggal/Jumlah)')
+                    ->getStateUsing(function (PurchaseOrder $record): string {
+                        $summary = $record->inbounds
+                            ->groupBy(fn ($inbound): string => (string) ($inbound->entry_date ?? '-'))
+                            ->map(function ($rows, string $date): string {
+                                $qty = (float) collect($rows)->sum(fn ($row): float => (float) ($row->quantity ?? 0));
+                                $dateText = $date !== '-' ? Carbon::parse($date)->translatedFormat('d M Y') : '-';
+
+                                return $dateText . ' (' . number_format($qty, 1, '.', '') . ')';
+                            })
+                            ->values()
+                            ->all();
+
+                        if (empty($summary)) {
+                            return '-';
+                        }
+
+                        return implode("\n", $summary);
+                    })
+                    ->wrap()
+                    ->toggleable(isToggledHiddenByDefault: false),
                 TextColumn::make('received_at')
                     ->label('Tanggal Terima')
                     ->dateTime('d M Y H:i')

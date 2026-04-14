@@ -118,9 +118,56 @@ class GeminiService
 
                 Cache::forget($cooldownUntilKey);
                 Cache::forget($cooldownPayloadKey);
- 
-                return $response->json('candidates.0.content.parts.0.text')
-                    ?? json_encode(['error' => 'Response kosong']);
+
+                $candidates = $response->json('candidates');
+                if (!is_array($candidates) || empty($candidates)) {
+                    return json_encode(['error' => 'Response kosong']);
+                }
+
+                $texts = [];
+                foreach ($candidates as $candidate) {
+                    if (!is_array($candidate)) {
+                        continue;
+                    }
+
+                    $parts = data_get($candidate, 'content.parts', []);
+                    if (!is_array($parts)) {
+                        continue;
+                    }
+
+                    $joined = collect($parts)
+                        ->map(fn ($part): string => is_array($part) ? (string) ($part['text'] ?? '') : '')
+                        ->implode('');
+
+                    $joined = trim($joined);
+                    if ($joined !== '') {
+                        $texts[] = $joined;
+                    }
+                }
+
+                if (!empty($texts)) {
+                    $best = collect($texts)
+                        ->sortByDesc(function (string $text): int {
+                            $trimmed = trim($text);
+                            $hasJsonShape = str_contains($trimmed, '{') && str_contains($trimmed, '}');
+                            $endsWithBrace = str_ends_with($trimmed, '}');
+
+                            // Prefer JSON-shaped complete text, then longer payload.
+                            return ($hasJsonShape ? 1_000_000 : 0)
+                                + ($endsWithBrace ? 100_000 : 0)
+                                + mb_strlen($trimmed);
+                        })
+                        ->values()
+                        ->first();
+
+                    if (is_string($best) && trim($best) !== '') {
+                        return $best;
+                    }
+
+                    return $texts[0];
+                }
+
+                return json_encode(['error' => 'Response kosong']);
  
             } catch (\Exception $e) {
                 $lastError = ['error' => $e->getMessage()];

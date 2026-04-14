@@ -26,16 +26,6 @@ class ListProjects extends ListRecords
                 ->badge(Project::query()->where('status', 'Pending')->count())
                 ->badgeColor('warning'),
 
-            'approved' => Tab::make('Approved')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'Approved'))
-                ->badge(Project::query()->where('status', 'Approved')->count())
-                ->badgeColor('info'),
-
-            'processing' => Tab::make('Processing')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'Processing'))
-                ->badge(Project::query()->where('status', 'Processing')->count())
-                ->badgeColor('warning'),
-
             'completed' => Tab::make('Completed')
                 ->modifyQueryUsing(fn (Builder $query) => $query->where(function (Builder $q): void {
                     $q->where('status', 'Completed')

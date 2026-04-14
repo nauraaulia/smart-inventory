@@ -21,7 +21,7 @@ class BookingAIService
         $this->gemini = $gemini;
     }
 
-    public function prosesKebutuhanProyek(int $projectId, array $kebutuhan, bool $allowRetryOnTransient = false): array
+    public function prosesKebutuhanProyek(int $projectId, array $kebutuhan, bool $allowRetryOnTransient = false, string $triggerSource = 'system_sync'): array
     {
         $lock = Cache::lock('ai_booking_project_' . $projectId, 60);
 
@@ -41,7 +41,7 @@ class BookingAIService
                 return [];
             }
 
-            $this->sinkronTaskSedangDiproses($projectId, $projectCode, $catatanTeknis);
+                $this->sinkronTaskSedangDiproses($projectId, $projectCode, $catatanTeknis, null, $triggerSource);
 
             $stockData      = $this->prepareStockDataForGemini($kebutuhanDelta);
             $kebutuhanItems = collect($kebutuhanDelta)->map(function (array $item): array {
@@ -60,6 +60,7 @@ class BookingAIService
                 'tanpa_potongan' => false,
                 'require_no_joint' => false,
                 'requested_segments' => [],
+                'requested_piece_count' => 0,
                 'ringkas'        => 'Tidak ada instruksi khusus soal potongan.',
                 'alasan'         => '',
                 'sumber'         => 'gemini_full_analysis',
@@ -126,7 +127,8 @@ class BookingAIService
                     $projectId,
                     $projectCode,
                     $catatanTeknis,
-                    'AI sedang diproses ulang karena kendala sementara: ' . $errorMessage
+                    'AI sedang diproses ulang karena kendala sementara: ' . $errorMessage,
+                    $triggerSource,
                 );
 
                 throw $e;
@@ -144,12 +146,34 @@ class BookingAIService
                     $fallbackAnalisa = $this->analisaSatuItem(material: $material, dibutuhkan: (float) ($item['qty'] ?? 0), projectId: $projectId, tanpaPotongan: $tanpaPotonganDariPrompt, alasanInstruksi: (string) ($instruksiAi['alasan'] ?? ''));
                     $fallbackSelection = $this->fallbackPieceSelection(materialId: (int) $material->id, dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0), materialName: (string) ($material->nama_material ?? ''), satuan: (string) ($material->satuan ?? 'unit'), instruksiAi: $instruksiAi);
                     $pieceById = collect((array) data_get($stockData, (string) $material->id . '.pieces', []))->keyBy(fn (array $piece): int => (int) ($piece['id'] ?? 0));
-                    ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(), pieceById: $pieceById, dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0));
 
                     $normalizedSegments = $this->normalizeRequestedSegmentsForTarget(
                         requestedSegments: (array) ($instruksiAi['requested_segments'] ?? []),
                         targetQty: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
                     );
+
+                    ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(), pieceById: $pieceById, dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0));
+
+                    $requestedPieceCount = (int) ($instruksiAi['requested_piece_count'] ?? 0);
+                    if (!(bool) ($instruksiAi['require_no_joint'] ?? false)
+                        && $requestedPieceCount > 1
+                        && empty($normalizedSegments)
+                        && !empty($chosen)
+                    ) {
+                        $chosen = $this->enforceRequestedPieceCount($chosen, $requestedPieceCount);
+                        $pickedTotal = round((float) collect($chosen)->sum(fn (array $piece): float => (float) ($piece['take_qty'] ?? 0)), 2);
+                        $remaining = max(0, round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - $pickedTotal, 2));
+                    }
+
+                    if (!(bool) ($instruksiAi['require_no_joint'] ?? false)
+                        && $requestedPieceCount <= 0
+                        && empty($normalizedSegments)
+                        && !empty($chosen)
+                    ) {
+                        $chosen = $this->rebalanceNonSegmentedChosenPieces($chosen);
+                        $pickedTotal = round((float) collect($chosen)->sum(fn (array $piece): float => (float) ($piece['take_qty'] ?? 0)), 2);
+                        $remaining = max(0, round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - $pickedTotal, 2));
+                    }
 
                     if ((bool) ($instruksiAi['require_no_joint'] ?? false) && !empty($normalizedSegments)) {
                         $segmented = $this->buildChosenPiecesFromSegments(
@@ -227,16 +251,23 @@ class BookingAIService
                     ->filter(fn (float $value): bool => $value > 0)
                     ->values()
                     ->all();
+                $requestedPieceCountFromNode = max(0, (int) ($instruksiNode['requested_piece_count'] ?? 0));
+                $requestedPieceCountFromFallback = max(0, (int) ($instruksiFallback['requested_piece_count'] ?? 0));
+                $requestedPieceCountMerged = max($requestedPieceCountFromNode, $requestedPieceCountFromFallback);
                 $requestedSegmentsMerged = !empty($requestedSegmentsFromNode)
                     ? $requestedSegmentsFromNode
                     : $requestedSegmentsFromFallback;
+                $hasReliableSegmentSpec = !empty($requestedSegmentsMerged)
+                    && !($requestedPieceCountMerged > 1 && count($requestedSegmentsMerged) <= 1);
+                $requestedSegmentsFinal = $hasReliableSegmentSpec ? $requestedSegmentsMerged : [];
                 $requireNoJointMerged = (bool) ($instruksiNode['require_no_joint'] ?? false)
                     || (bool) ($instruksiFallback['require_no_joint'] ?? false)
-                    || !empty($requestedSegmentsMerged);
+                    || $hasReliableSegmentSpec;
                 $instruksiAi   = [
                     'tanpa_potongan' => (bool) ($instruksiNode['tanpa_potongan'] ?? false),
                     'require_no_joint' => $requireNoJointMerged,
-                    'requested_segments' => $requestedSegmentsMerged,
+                    'requested_segments' => $requestedSegmentsFinal,
+                    'requested_piece_count' => $requestedPieceCountMerged,
                     'ringkas' => (string) ($instruksiNode['ringkas'] ?? 'Tidak ada instruksi khusus soal potongan.'),
                     'alasan' => (string) ($instruksiNode['alasan'] ?? ''),
                     'sumber' => 'gemini_full_analysis',
@@ -356,6 +387,27 @@ class BookingAIService
                         )
                         : $this->buildChosenPiecesFromSelection(selectedIds: $selectedIds, pieceById: $pieceById, dibutuhkan: $qtyBooking);
 
+                    $requestedPieceCount = (int) ($instruksiAi['requested_piece_count'] ?? 0);
+                    if (!(bool) ($instruksiAi['require_no_joint'] ?? false)
+                        && $requestedPieceCount > 1
+                        && empty($normalizedSegments)
+                        && !empty($chosen)
+                    ) {
+                        $chosen = $this->enforceRequestedPieceCount($chosen, $requestedPieceCount);
+                        $pickedTotal = round((float) collect($chosen)->sum(fn (array $piece): float => (float) ($piece['take_qty'] ?? 0)), 2);
+                        $remaining = max(0, round($qtyBooking - $pickedTotal, 2));
+                    }
+
+                    if (!(bool) ($instruksiAi['require_no_joint'] ?? false)
+                        && $requestedPieceCount <= 0
+                        && empty($normalizedSegments)
+                        && !empty($chosen)
+                    ) {
+                        $chosen = $this->rebalanceNonSegmentedChosenPieces($chosen);
+                        $pickedTotal = round((float) collect($chosen)->sum(fn (array $piece): float => (float) ($piece['take_qty'] ?? 0)), 2);
+                        $remaining = max(0, round($qtyBooking - $pickedTotal, 2));
+                    }
+
                     if (!empty($geminiAllocations)) {
                         $allocReasonByPiece = collect($geminiAllocations)
                             ->mapWithKeys(function (array $alloc): array {
@@ -450,7 +502,7 @@ class BookingAIService
 
             $summary = json_encode(['ringkasan' => $ringkasanGemini, 'rekomendasi' => $rekomendasiGemini, 'perlu_konfirmasi' => true], JSON_UNESCAPED_UNICODE);
             if (!is_string($summary) || trim($summary) === '') $summary = '{"ringkasan":"Silakan review rekomendasi booking/PR dari AI untuk project ini.","rekomendasi":[],"perlu_konfirmasi":true}';
-            $this->sinkronTaskUntukStaff($summary, $projectId, $hasilAnalisis, $instruksiAi);
+            $this->sinkronTaskUntukStaff($summary, $projectId, $hasilAnalisis, $instruksiAi, $triggerSource);
             return $hasilAnalisis;
         } finally {
             $lock->release();
@@ -576,19 +628,26 @@ class BookingAIService
             $historyJson = '{}';
         }
 
-        $systemInstruction = 'Kamu adalah Inventory Math Expert. Balas hanya JSON valid tunggal. Aksi yang diizinkan: full_booking|partial|full_pr. ATURAN KETAT: (1) Jika manager meminta segmen tertentu (contoh 100,100,105), kamu WAJIB membagi alokasi_kabel per segmen sebagai entry terpisah, termasuk bila 2 segmen diambil dari piece yang sama. (2) ambil_panjang adalah panjang POTONGAN yang diambil, bukan total panjang piece. (3) Hitung sisa secara akurat, jangan halusinasi angka. (4) Gunakan FIFO sebagai prioritas saat memungkinkan. (5) Untuk full_booking/partial WAJIB isi alokasi_kabel berisi piece_id + ambil_panjang numerik. selected_piece_ids boleh tetap dikirim sebagai ringkasan. (6) Jika tanpa sambungan/no splice, require_no_joint wajib true dan requested_segments wajib terisi eksplisit. Jangan keluarkan markdown atau teks di luar JSON.';
+        $systemInstruction = 'Kamu adalah Inventory Math Expert. Balas hanya JSON valid tunggal. Aksi yang diizinkan: full_booking|partial|full_pr. ATURAN KETAT: (1) Jika manager meminta segmen tertentu (contoh 100,100,105), kamu WAJIB membagi alokasi_kabel per segmen sebagai entry terpisah, termasuk bila 2 segmen diambil dari piece yang sama. (2) ambil_panjang adalah panjang POTONGAN yang diambil, bukan total panjang piece. (3) Hitung sisa secara akurat, jangan halusinasi angka. (4) Gunakan FIFO sebagai prioritas saat memungkinkan. (5) Untuk full_booking/partial WAJIB isi alokasi_kabel berisi piece_id + ambil_panjang numerik. selected_piece_ids boleh tetap dikirim sebagai ringkasan. 
+        
+        (6) Jika manager menyebut ukuran-ukuran spesifik (contoh "100 100 100" atau "bikin 3 potongan 100m"), OTOMATIS set require_no_joint = true dan requested_segments diisi dengan ukuran-ukuran tersebut. Manager tidak perlu tulis "jangan sambung" secara eksplisit — kalau ada angka-angka ukuran, itu sudah berarti minta potongan terpisah.';
         $prompt = <<<PROMPT
 Proyek: {$projectCode} (ID {$projectId})
 Instruksi manager: {$catatanPrompt}
 Data material: {$dataJson}
 Histori ringkas: {$historyJson}
 
-    Aturan perusahaan yang harus diprioritaskan:
-    - Utamakan akurasi pemenuhan instruksi manager dibanding efisiensi sisa.
-    - Jika ada instruksi segmen tanpa sambungan, pilih piece sehingga setiap segmen bisa diambil utuh per segmen.
-    - Prioritas pemilihan piece: kepatuhan instruksi -> FIFO (umur lebih lama) -> minimalkan sisa tidak terpakai.
-    - Jangan pakai piece ID yang tidak ada pada Data material.
-    - Jika instruksi segmen adalah 100,100,105 maka alokasi_kabel wajib memiliki 3 baris take: 100, 100, 105 (tidak boleh digabung jadi 200 + 105).
+Prioritas pemilihan piece: kepatuhan instruksi -> ambil piece SESEDIKIT MUNGKIN (hindari potong kalau bisa ambil utuh) -> FIFO (umur lebih lama) -> minimalkan sisa tidak terpakai.
+
+ATURAN PENTING kalau tidak ada instruksi segmen:
+- Cari kombinasi piece yang TEPAT atau LEBIH BESAR dari kebutuhan dengan JUMLAH PIECE PALING SEDIKIT
+- Kalau ada 1 piece yang cukup → ambil 1 piece saja
+- Kalau ada 2 piece yang totalnya pas → ambil 2 piece, jangan 3
+- Jangan potong piece kalau bisa kombinasi piece lain yang hasilnya sama
+- Sisa potongan kecil itu lebih buruk dari mengambil 1 piece besar
+- Jangan pakai piece ID yang tidak ada pada Data material.
+- Jika instruksi segmen adalah 100,100,105 maka alokasi_kabel wajib memiliki 3 baris take: 100, 100, 105 (tidak boleh digabung jadi 200 + 105).
+
 
 Output schema:
     {"instruksi_manager":{"tanpa_potongan":false,"require_no_joint":false,"requested_segments":[100,100,100],"ringkas":"...","alasan":"..."},"ringkasan":"...","materials":{"<material_id>":{"aksi":"full_booking|partial|full_pr","selected_piece_ids":[1],"alokasi_kabel":[{"piece_id":1,"ambil_panjang":100,"alasan":"..."}],"alasan_per_piece":{"1":"..."},"overall_reason":"...","sisa_analysis":"..."}}}
@@ -626,7 +685,12 @@ PROMPT;
             }
         }
 
-        if (!$this->isValidGeminiFullAnalysisResponse($decoded, $requiredMaterialIds) && (bool) config('services.gemini.enable_compact_retry_prompt', false)) {
+        $decodedIsMalformed = !is_array($decoded);
+        $decodedIsInvalidSchema = is_array($decoded) && !$this->isValidGeminiFullAnalysisResponse($decoded, $requiredMaterialIds);
+        $allowConfiguredCompactRetry = (bool) config('services.gemini.enable_compact_retry_prompt', false);
+
+        // Always force one compact retry when Gemini output is malformed/truncated JSON.
+        if (($decodedIsMalformed || $decodedIsInvalidSchema) && ($allowConfiguredCompactRetry || $decodedIsMalformed)) {
             $compactPrompt = "Proyek: {$projectCode} (ID {$projectId}). Instruksi manager: {$catatanPrompt}. Data material: {$dataJson}. Histori ringkas: {$historyJson}. Balas JSON sesuai schema dan WAJIB memuat semua material_id pada data material.";
             Log::warning('Gemini response belum valid, retry prompt ringkas.', ['project_id' => $projectId]);
 
@@ -738,16 +802,30 @@ PROMPT;
     private function parseInstruksiOperasionalDariCatatan(string $catatanTeknis, int $projectId): array
     {
         $text = trim($catatanTeknis); unset($projectId);
-        if ($text === '') return ['tanpa_potongan' => false, 'require_no_joint' => false, 'requested_segments' => [], 'ringkas' => 'Tidak ada instruksi khusus.', 'alasan' => '', 'sumber' => 'fallback_empty', 'confidence' => 'rendah', 'preferensi_sumber' => 'auto', 'preferensi_umur_stok' => 'lama', 'preferred_piece_ids' => [], 'preferred_rack_labels' => [], 'preferred_rack_ids' => []];
+        if ($text === '') return ['tanpa_potongan' => false, 'require_no_joint' => false, 'requested_segments' => [], 'requested_piece_count' => 0, 'ringkas' => 'Tidak ada instruksi khusus.', 'alasan' => '', 'sumber' => 'fallback_empty', 'confidence' => 'rendah', 'preferensi_sumber' => 'auto', 'preferensi_umur_stok' => 'lama', 'preferred_piece_ids' => [], 'preferred_rack_labels' => [], 'preferred_rack_ids' => []];
 
         $allowCut = (bool) preg_match('/boleh\s*potong|boleh\s*potongan|potong\s*aja|pakai\s*potongan|gunakan\s*potongan/i', $text);
         $fallbackNoCut = (bool) preg_match('/jangan[^\n\r]{0,40}potong|jgn[^\n\r]{0,40}potong|tanpa\s*potong|tnp\s*potong|harus\s*utuh|wajib\s*utuh|roll\s*utuh|full\s*roll|no\s*cut|no\s*splice|tidak\s*boleh\s*sambung|ga\s*boleh\s*sambung|nggak\s*boleh\s*sambung|utuh/i', $text);
         $requireNoJoint = (bool) preg_match('/tanpa\s*sambung|tidak\s*boleh\s*sambung|jangan\s*sambung|no\s*splice|tanpa\s*splice/i', $text);
         $requestedSegments = $this->extractRequestedSegmentsFromText($text);
+        $requestedPieceCount = 0;
+        if (preg_match('/\b(?:jadi\s*)?(\d+)\s*(?:pcs|piece|potongan)\b/i', $text, $pieceCountMatch)) {
+            $requestedPieceCount = max(0, (int) ($pieceCountMatch[1] ?? 0));
+        }
         $looksLikeSegmentDemand = !empty($requestedSegments)
-            && (bool) preg_match('/\b(\d+)\s*(pcs|piece|potongan)\b|\bjadi\s*\d+\s*(pcs|piece|potongan)\b|\bpotongan\b/i', $text);
+            && (
+                (bool) preg_match('/\b(\d+)\s*(pcs|piece|potongan)\b|\bjadi\s*\d+\s*(pcs|piece|potongan)\b|\bpotongan\b|\bbikin\b|\bbuat\b|\bpotong\b|\bcut\b|\bambil\b/i', $text)
+                || count($requestedSegments) >= 2
+            );
 
-        if (!$requireNoJoint && $looksLikeSegmentDemand) {
+        $hasReliableSegmentSpec = !empty($requestedSegments)
+            && !($requestedPieceCount > 1 && count($requestedSegments) <= 1);
+
+        if (!$hasReliableSegmentSpec) {
+            $requestedSegments = [];
+        }
+
+        if (!$requireNoJoint && $looksLikeSegmentDemand && $hasReliableSegmentSpec) {
             $requireNoJoint = true;
         }
 
@@ -784,6 +862,7 @@ PROMPT;
             'tanpa_potongan' => $allowCut ? false : $fallbackNoCut,
             'require_no_joint' => $requireNoJoint,
             'requested_segments' => $requestedSegments,
+            'requested_piece_count' => $requestedPieceCount,
             'ringkas' => $allowCut
                 ? 'Fallback regex: catatan mengizinkan penggunaan potongan dengan preferensi manager.'
                 : ($fallbackNoCut
@@ -800,7 +879,7 @@ PROMPT;
         ];
     }
 
-    private function sinkronTaskUntukStaff(string $summaryJson, int $projectId, array $detail, array $instruksiAi = []): void
+    private function sinkronTaskUntukStaff(string $summaryJson, int $projectId, array $detail, array $instruksiAi = [], string $triggerSource = 'system_sync'): void
     {
         $decoded = json_decode($summaryJson, true);
         $project = Project::query()->find($projectId, ['id', 'kode_proyek', 'catatan_teknis']);
@@ -810,7 +889,7 @@ PROMPT;
         $decoded['rekomendasi'] = $this->normalisasiRekomendasi($decoded['rekomendasi'] ?? [], $detail);
         if (blank($decoded['ringkasan'] ?? null)) $decoded['ringkasan'] = 'Silakan review rekomendasi booking/PR dari AI untuk project ini.';
 
-        $payload = ['project_id' => $projectId, 'project_code' => $projectCode, 'project_special_instruction' => $projectSpecialInstruction, 'detail' => $detail, 'items' => $this->buildPerMaterialItemsPayload($detail), 'ai_summary' => $decoded, 'ai_instruction' => ['tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false), 'require_no_joint' => (bool) ($instruksiAi['require_no_joint'] ?? false), 'requested_segments' => collect($instruksiAi['requested_segments'] ?? [])->map(fn ($value): float => round((float) $value, 2))->filter(fn (float $value): bool => $value > 0)->values()->all(), 'ringkas' => (string) ($instruksiAi['ringkas'] ?? ''), 'alasan' => (string) ($instruksiAi['alasan'] ?? ''), 'sumber' => (string) ($instruksiAi['sumber'] ?? 'unknown'), 'confidence' => (string) ($instruksiAi['confidence'] ?? 'rendah'), 'preferensi_sumber' => (string) ($instruksiAi['preferensi_sumber'] ?? 'auto'), 'preferensi_umur_stok' => (string) ($instruksiAi['preferensi_umur_stok'] ?? 'lama'), 'preferred_piece_ids' => collect($instruksiAi['preferred_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->values()->all(), 'preferred_rack_labels' => collect($instruksiAi['preferred_rack_labels'] ?? [])->map(fn ($label): string => strtoupper(trim((string) $label)))->filter()->values()->all()], 'approval_trail' => ['staff' => null, 'manager' => null, 'finance' => null], 'last_synced_at' => now()->toDateTimeString()];
+        $payload = ['project_id' => $projectId, 'project_code' => $projectCode, 'project_special_instruction' => $projectSpecialInstruction, 'detail' => $detail, 'items' => $this->buildPerMaterialItemsPayload($detail), 'ai_summary' => $decoded, 'ai_instruction' => ['tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false), 'require_no_joint' => (bool) ($instruksiAi['require_no_joint'] ?? false), 'requested_segments' => collect($instruksiAi['requested_segments'] ?? [])->map(fn ($value): float => round((float) $value, 2))->filter(fn (float $value): bool => $value > 0)->values()->all(), 'requested_piece_count' => max(0, (int) ($instruksiAi['requested_piece_count'] ?? 0)), 'ringkas' => (string) ($instruksiAi['ringkas'] ?? ''), 'alasan' => (string) ($instruksiAi['alasan'] ?? ''), 'sumber' => (string) ($instruksiAi['sumber'] ?? 'unknown'), 'confidence' => (string) ($instruksiAi['confidence'] ?? 'rendah'), 'preferensi_sumber' => (string) ($instruksiAi['preferensi_sumber'] ?? 'auto'), 'preferensi_umur_stok' => (string) ($instruksiAi['preferensi_umur_stok'] ?? 'lama'), 'preferred_piece_ids' => collect($instruksiAi['preferred_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->values()->all(), 'preferred_rack_labels' => collect($instruksiAi['preferred_rack_labels'] ?? [])->map(fn ($label): string => strtoupper(trim((string) $label)))->filter()->values()->all()], 'ai_trigger_source' => $triggerSource, 'approval_trail' => ['staff' => null, 'manager' => null, 'finance' => null], 'last_synced_at' => now()->toDateTimeString()];
 
         $taskPending = Task::query()->where('type', 'ai_booking_suggestion')->where('related_type', 'project')->where('related_id', $projectId)->where('status', 'pending')->orderByDesc('id')->get();
         $taskTarget  = $taskPending->first();
@@ -820,7 +899,7 @@ PROMPT;
         Log::info("AI task dibuat untuk Project #{$projectId}");
     }
 
-    private function sinkronTaskSedangDiproses(int $projectId, string $projectCode, string $catatanTeknis, ?string $message = null): void
+    private function sinkronTaskSedangDiproses(int $projectId, string $projectCode, string $catatanTeknis, ?string $message = null, string $triggerSource = 'system_sync'): void
     {
         $ringkasan = trim((string) $message);
         if ($ringkasan === '') {
@@ -839,6 +918,7 @@ PROMPT;
             'project_id' => $projectId,
             'project_code' => $projectCode,
             'project_special_instruction' => trim($catatanTeknis),
+            'ai_trigger_source' => $triggerSource,
             'detail' => [],
             'items' => [],
             'ai_summary' => [
@@ -983,7 +1063,7 @@ PROMPT;
         array $requestedSegments,
         bool $requireNoJoint,
     ): string {
-        $strategicReason = trim((string) preg_replace('/\b\d+(?:[\.,]\d+)?\s*(?:m|meter|meters|piece|pcs|roll|#\d+)?\b/iu', '', $rawReason));
+        $strategicReason = trim($rawReason);
         $strategicReason = trim((string) preg_replace('/\s+/', ' ', str_replace(['..', ' .', '. .'], '.', $strategicReason)));
         if ($strategicReason === '') {
             $strategicReason = $this->normalizeReasonFromLlm('', 'pemilihan mengikuti instruksi manager dan kondisi stok aktual');
@@ -1139,6 +1219,172 @@ PROMPT;
             $remaining -= $takeQty;
         }
         return ['chosen' => $chosen, 'remaining' => $remaining];
+    }
+
+    /**
+     * Reduce fragment count for regular booking by absorbing small takes
+     * into an already-split piece when there is capacity.
+     *
+     * @param  array<int, array<string, mixed>>  $chosen
+     * @return array<int, array<string, mixed>>
+     */
+    private function rebalanceNonSegmentedChosenPieces(array $chosen): array
+    {
+        if (count($chosen) <= 1) {
+            return $chosen;
+        }
+
+        $rows = array_values($chosen);
+
+        while (true) {
+            $splitIndex = null;
+            $splitSlack = 0.0;
+
+            foreach ($rows as $idx => $row) {
+                $length = round((float) ($row['panjang'] ?? 0), 2);
+                $take = round((float) ($row['take_qty'] ?? 0), 2);
+                $slack = round($length - $take, 2);
+
+                if ($length <= 0 || $slack <= 0.00001) {
+                    continue;
+                }
+
+                if ($slack > $splitSlack) {
+                    $splitSlack = $slack;
+                    $splitIndex = $idx;
+                }
+            }
+
+            if ($splitIndex === null || $splitSlack <= 0.00001) {
+                break;
+            }
+
+            $splitPieceId = (int) ($rows[$splitIndex]['id'] ?? 0);
+            if ($splitPieceId <= 0) {
+                break;
+            }
+
+            $candidates = collect($rows)
+                ->map(fn (array $row, int $idx): array => ['idx' => $idx, 'take' => round((float) ($row['take_qty'] ?? 0), 2), 'len' => round((float) ($row['panjang'] ?? 0), 2)])
+                ->filter(fn (array $row): bool => $row['idx'] !== $splitIndex && $row['take'] > 0 && abs($row['take'] - $row['len']) <= 0.01)
+                ->sortBy('take')
+                ->values();
+
+            $absorbedAny = false;
+            foreach ($candidates as $candidate) {
+                $idx = (int) ($candidate['idx'] ?? -1);
+                $take = round((float) ($candidate['take'] ?? 0), 2);
+
+                if ($idx < 0 || $take <= 0 || $splitSlack + 0.00001 < $take) {
+                    continue;
+                }
+
+                $rows[$splitIndex]['take_qty'] = round((float) ($rows[$splitIndex]['take_qty'] ?? 0) + $take, 2);
+                $splitSlack = round($splitSlack - $take, 2);
+                unset($rows[$idx]);
+                $rows = array_values($rows);
+
+                // Keep split index aligned after reindex.
+                foreach ($rows as $newIdx => $row) {
+                    if ((int) ($row['id'] ?? 0) === $splitPieceId) {
+                        $splitIndex = $newIdx;
+                        break;
+                    }
+                }
+
+                $absorbedAny = true;
+
+                if ($splitSlack <= 0.00001) {
+                    break;
+                }
+            }
+
+            if (!$absorbedAny) {
+                break;
+            }
+        }
+
+        return array_values($rows);
+    }
+
+    /**
+     * Respect explicit manager request for piece count in non-segment mode.
+     *
+     * @param  array<int, array<string, mixed>>  $chosen
+     * @return array<int, array<string, mixed>>
+     */
+    private function enforceRequestedPieceCount(array $chosen, int $requestedPieceCount): array
+    {
+        $target = max(1, $requestedPieceCount);
+        $rows = array_values($chosen);
+
+        if (count($rows) === $target) {
+            return $rows;
+        }
+
+        while (count($rows) < $target) {
+            $splitIndex = collect($rows)
+                ->keys()
+                ->sortByDesc(fn (int $idx): float => (float) ($rows[$idx]['take_qty'] ?? 0))
+                ->first(fn (int $idx): bool => (float) ($rows[$idx]['take_qty'] ?? 0) > 0.01);
+
+            if ($splitIndex === null) {
+                break;
+            }
+
+            $take = round((float) ($rows[$splitIndex]['take_qty'] ?? 0), 2);
+            $first = round($take / 2, 2);
+            $second = round($take - $first, 2);
+
+            if ($first <= 0.00001 || $second <= 0.00001) {
+                break;
+            }
+
+            $rows[$splitIndex]['take_qty'] = $first;
+            $newRow = $rows[$splitIndex];
+            $newRow['take_qty'] = $second;
+            array_splice($rows, $splitIndex + 1, 0, [$newRow]);
+        }
+
+        while (count($rows) > $target) {
+            $smallestIndex = collect($rows)
+                ->keys()
+                ->sortBy(fn (int $idx): float => (float) ($rows[$idx]['take_qty'] ?? 0))
+                ->first();
+
+            if ($smallestIndex === null) {
+                break;
+            }
+
+            $smallTake = round((float) ($rows[$smallestIndex]['take_qty'] ?? 0), 2);
+            if ($smallTake <= 0.00001) {
+                unset($rows[$smallestIndex]);
+                $rows = array_values($rows);
+                continue;
+            }
+
+            $targetIndex = collect($rows)
+                ->keys()
+                ->first(function (int $idx) use ($rows, $smallestIndex, $smallTake): bool {
+                    if ($idx === $smallestIndex) {
+                        return false;
+                    }
+
+                    $length = round((float) ($rows[$idx]['panjang'] ?? 0), 2);
+                    $take = round((float) ($rows[$idx]['take_qty'] ?? 0), 2);
+                    return $length - $take + 0.00001 >= $smallTake;
+                });
+
+            if ($targetIndex === null) {
+                break;
+            }
+
+            $rows[$targetIndex]['take_qty'] = round((float) ($rows[$targetIndex]['take_qty'] ?? 0) + $smallTake, 2);
+            unset($rows[$smallestIndex]);
+            $rows = array_values($rows);
+        }
+
+        return array_values($rows);
     }
 
     /**
@@ -1416,9 +1662,25 @@ PROMPT;
             $segments = collect($matchesWithUnit[1]);
         }
 
-        if ($segments->isEmpty() && preg_match('/kabel|potong|piece|pcs|roll|jadi/i', $text)) {
+        if ($segments->isEmpty() && preg_match('/kabel|potong|piece|pcs|roll|jadi|bikin|buat|ambil|cut/i', $text)) {
             preg_match_all('/\b(\d{2,4}(?:[\.,]\d+)?)\b/', $text, $matchesRaw);
             $segments = collect($matchesRaw[1] ?? []);
+        }
+
+        // Handle terse manager notes like "bikin 100 100 100" even without explicit unit keywords.
+        if ($segments->isEmpty()) {
+            preg_match_all('/\b(\d{2,4}(?:[\.,]\d+)?)\b/', $text, $matchesBareNumbers);
+            $bareNumbers = collect($matchesBareNumbers[1] ?? [])
+                ->map(function ($value): float {
+                    $normalized = str_replace(',', '.', (string) $value);
+                    return round((float) $normalized, 2);
+                })
+                ->filter(fn (float $value): bool => $value >= 20 && $value <= 2000)
+                ->values();
+
+            if ($bareNumbers->count() >= 2) {
+                $segments = $bareNumbers;
+            }
         }
 
         $normalized = $segments

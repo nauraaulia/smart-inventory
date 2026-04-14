@@ -94,8 +94,39 @@ class OutboundsTable
                         'ready' => 'info',
                         default => 'warning',
                     })
+                    ->visible(fn (Outbound $record): bool => self::canSeeProcessAction($record))
                     ->url(fn (Outbound $record): string => OutboundResource::getUrl('view', ['record' => $record])),
             ]);
+    }
+
+    private static function canSeeProcessAction(Outbound $record): bool
+    {
+        $role = (string) (auth()->user()?->role ?? '');
+
+        $isStaffGudang = in_array($role, [
+            'Staff Administrasi Gudang',
+            'Staff Adm Gudang',
+            'Staff Gudang',
+        ], true);
+
+        if ($isStaffGudang) {
+            if ((string) $record->status === 'pending') {
+                return self::fulfillmentStatusForOutbound($record) === 'Lengkap';
+            }
+
+            return in_array((string) $record->status, ['taken'], true);
+        }
+
+        $isManagerTeknik = in_array($role, [
+            'Manager Teknik',
+            'Manajer Teknik',
+        ], true);
+
+        if ($isManagerTeknik) {
+            return in_array((string) $record->status, ['ready', 'taken'], true);
+        }
+
+        return $role === 'Administrator IT';
     }
 
     public static function requirementsModalContent(Project $record): HtmlString

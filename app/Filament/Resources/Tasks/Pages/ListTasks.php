@@ -149,6 +149,11 @@ class ListTasks extends ListRecords
 
         return $tasks
             ->filter(function (Task $task) use ($processingOnly): bool {
+                $triggerSource = (string) data_get($task->payload, 'ai_trigger_source', 'system_sync');
+                if ($triggerSource !== 'manager_project_submit') {
+                    return false;
+                }
+
                 $items = data_get($task->payload, 'items', []);
                 $hasItems = is_array($items) && !empty($items);
 

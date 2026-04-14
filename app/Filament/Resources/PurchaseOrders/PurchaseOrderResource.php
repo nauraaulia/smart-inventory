@@ -66,6 +66,7 @@ class PurchaseOrderResource extends Resource
             ->with([
                 'items:id,purchase_order_id,material_id,qty_order,qty_received,unit_order',
                 'items.material:id,nama_material',
+                'inbounds:id,purchase_order_id,entry_date,quantity',
             ]);
     }
 

@@ -53,6 +53,9 @@ class Project extends Model
 {
     // 1. CCTV Saat Proyek Dibuat (Create)
     static::created(function ($item) {
+        $creatorRole = (string) (auth()->user()?->role ?? '');
+        $isManagerTeknikCreator = in_array($creatorRole, ['Manager Teknik', 'Manajer Teknik'], true);
+
         if (auth()->check()) {
             \App\Models\UserLog::create([
                 'user_id' => auth()->id(),
@@ -63,33 +66,35 @@ class Project extends Model
             ]);
         }
 
-        $gudangUsers = User::query()
-            ->whereIn('role', ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'])
-            ->get();
+        if ($isManagerTeknikCreator) {
+            $gudangUsers = User::query()
+                ->whereIn('role', ['Staff Administrasi Gudang', 'Staff Adm Gudang', 'Staff Gudang'])
+                ->get();
 
-        if ($gudangUsers->isNotEmpty()) {
-            $databaseMessage = Notification::make()
-                ->title("Proyek baru {$item->kode_proyek}")
-                ->body("{$item->nama_proyek} sudah dibuat Manager Teknik dan siap diproses gudang.")
-                ->success()
-                ->getDatabaseMessage();
+            if ($gudangUsers->isNotEmpty()) {
+                $databaseMessage = Notification::make()
+                    ->title("Proyek baru {$item->kode_proyek}")
+                    ->body("{$item->nama_proyek} sudah dibuat Manager Teknik dan siap diproses gudang.")
+                    ->success()
+                    ->getDatabaseMessage();
 
-            foreach ($gudangUsers as $gudangUser) {
-                DatabaseNotificationModel::query()->create([
-                    'id' => (string) Str::uuid(),
-                    'type' => \Filament\Notifications\DatabaseNotification::class,
-                    'notifiable_type' => User::class,
-                    'notifiable_id' => $gudangUser->id,
-                    'data' => $databaseMessage,
-                    'read_at' => null,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
+                foreach ($gudangUsers as $gudangUser) {
+                    DatabaseNotificationModel::query()->create([
+                        'id' => (string) Str::uuid(),
+                        'type' => \Filament\Notifications\DatabaseNotification::class,
+                        'notifiable_type' => User::class,
+                        'notifiable_id' => $gudangUser->id,
+                        'data' => $databaseMessage,
+                        'read_at' => null,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
             }
         }
 
         // 🔥 TRIGGER AI: masukkan ke queue agar retry policy berlaku.
-        \App\Jobs\ProsesKebutuhanProyekJob::dispatch($item->id);
+        \App\Jobs\ProsesKebutuhanProyekJob::dispatch($item->id, $isManagerTeknikCreator);
     });
 
     // 2. CCTV Saat Proyek Diedit (Update)

@@ -8,6 +8,7 @@ use App\Models\MaterialPiece;
 use App\Models\Inbound;
 use App\Models\Project;
 use App\Models\ProjectItem;
+use App\Models\Outbound;
 use App\Models\PurchaseRequest;
 use App\Models\Supplier;
 use App\Models\Task;
@@ -379,6 +380,12 @@ class TaskApprovalService
             Project::whereKey($projectId)->update([
                 'material_confirmed_at' => $isMaterialReady ? now() : null,
             ]);
+
+            $this->syncProjectOutboundFromApproval(
+                projectId: $projectId,
+                actorId: (int) $actor->id,
+                isMaterialReady: $isMaterialReady,
+            );
         }
         $payload = $task->payload ?? [];
         data_set($payload, 'execution_result', [
@@ -1209,6 +1216,81 @@ class TaskApprovalService
             'handled_by' => $actor->id,
             'handled_at' => now(),
         ]);
+    }
+
+    private function syncProjectOutboundFromApproval(int $projectId, int $actorId, bool $isMaterialReady): void
+    {
+        if ($projectId <= 0) {
+            return;
+        }
+
+        $project = Project::query()
+            ->with(['items.material:id,satuan'])
+            ->find($projectId);
+
+        if (!$project) {
+            return;
+        }
+
+        $outbound = Outbound::query()
+            ->where('project_id', $projectId)
+            ->where('outbound_manual', false)
+            ->orderByDesc('id')
+            ->first();
+
+        // Create outbound queue entry once material is complete so staff gudang can process it.
+        if (!$outbound && $isMaterialReady) {
+            $outbound = Outbound::query()->create([
+                'project_id' => $projectId,
+                'status' => 'pending',
+                'outbound_manual' => false,
+                'created_by' => $actorId > 0 ? $actorId : null,
+            ]);
+        }
+
+        if (!$outbound) {
+            return;
+        }
+
+        if ($outbound->status === 'taken') {
+            return;
+        }
+
+        if (!$isMaterialReady && $outbound->status === 'ready') {
+            $outbound->update([
+                'status' => 'pending',
+                'ready_at' => null,
+                'prepared_by' => null,
+            ]);
+        }
+
+        $requiredByMaterial = $project->items
+            ->groupBy('material_id')
+            ->map(function ($rows): array {
+                $first = $rows->first();
+
+                return [
+                    'material_id' => (int) ($first->material_id ?? 0),
+                    'qty' => round((float) $rows->sum('jumlah_diminta'), 2),
+                    'unit' => (string) ($first?->material?->satuan ?: 'unit'),
+                ];
+            })
+            ->filter(fn (array $row): bool => (int) ($row['material_id'] ?? 0) > 0 && (float) ($row['qty'] ?? 0) > 0)
+            ->values();
+
+        if ($requiredByMaterial->isEmpty()) {
+            return;
+        }
+
+        $outbound->items()->delete();
+
+        foreach ($requiredByMaterial as $row) {
+            $outbound->items()->create([
+                'material_id' => (int) $row['material_id'],
+                'qty' => $this->decimal((float) $row['qty']),
+                'unit' => (string) $row['unit'],
+            ]);
+        }
     }
 
     private function markRejected(Task $task, User $actor, string $reason): void

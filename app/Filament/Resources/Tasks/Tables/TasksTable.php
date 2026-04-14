@@ -68,6 +68,21 @@ class TasksTable
                         return $state;
                     }),
 
+                BadgeColumn::make('status')
+                    ->label('Status Task')
+                    ->formatStateUsing(fn (string $state): string => match ($state) {
+                        'pending' => 'Pending',
+                        'done' => 'Approved/Done',
+                        'rejected' => 'Rejected',
+                        default => ucfirst($state),
+                    })
+                    ->colors([
+                        'warning' => 'pending',
+                        'success' => 'done',
+                        'danger' => 'rejected',
+                        'gray',
+                    ]),
+
                 TextColumn::make('project_code')
                     ->label('Kode Proyek')
                     ->searchable()

@@ -37,7 +37,8 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
     public int $timeout = 120;
 
     public function __construct(
-        public int $projectId
+        public int $projectId,
+        public bool $sendNotifications = false,
     ) {}
 
     public function middleware(): array
@@ -63,12 +64,17 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
                     ->values()
                     ->toArray();
 
+        $triggerSource = $this->sendNotifications ? 'manager_project_submit' : 'system_sync';
+
         if (empty($kebutuhan)) {
-            Log::info("Project #{$this->projectId} tidak punya kebutuhan material, sinkron task tetap dijalankan");
-            $this->notifyGeminiProcessing($project);
+            if ($this->sendNotifications) {
+                $this->notifyGeminiProcessing($project);
+            }
             $aiService = new BookingAIService(new GeminiService());
-            $aiService->prosesKebutuhanProyek($this->projectId, []);
-            $this->notifyGeminiFinished($project, false);
+            $aiService->prosesKebutuhanProyek($this->projectId, [], false, $triggerSource);
+            if ($this->sendNotifications) {
+                $this->notifyGeminiFinished($project, false);
+            }
             return;
         }
 
@@ -79,14 +85,18 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
         ], JSON_UNESCAPED_UNICODE));
         $lastHash = (string) Cache::get($dedupeKey, '');
 
-        $this->notifyGeminiProcessing($project);
+        if ($this->sendNotifications) {
+            $this->notifyGeminiProcessing($project);
+        }
 
         if ($lastHash === $kebutuhanHash) {
             Log::info("AI skip duplicate kebutuhan Project #{$this->projectId}", [
                 'project_id' => $this->projectId,
                 'kebutuhan_hash' => $kebutuhanHash,
             ]);
-            $this->notifyGeminiFinished($project, true);
+            if ($this->sendNotifications) {
+                $this->notifyGeminiFinished($project, true);
+            }
             return;
         }
 
@@ -95,12 +105,14 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
             $aiService = new BookingAIService(new GeminiService());
             // Keep job flow responsive: on transient Gemini issues, service falls back locally
             // instead of bubbling exception to queue retries.
-            $aiService->prosesKebutuhanProyek($this->projectId, $kebutuhan, false);
+            $aiService->prosesKebutuhanProyek($this->projectId, $kebutuhan, false, $triggerSource);
 
             // Simpan hash hanya jika proses AI sukses, agar retry tidak ke-skip saat gagal.
             $dedupeMinutes = max(1, (int) env('AI_BOOKING_DEDUPE_MINUTES', 180));
             Cache::put($dedupeKey, $kebutuhanHash, now()->addMinutes($dedupeMinutes));
-            $this->notifyGeminiFinished($project, false);
+            if ($this->sendNotifications) {
+                $this->notifyGeminiFinished($project, false);
+            }
         } catch (Throwable $e) {
             Cache::forget($dedupeKey);
             throw $e;
@@ -126,7 +138,7 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
 
                 $aiService = new BookingAIService(new GeminiService());
                 // Setelah retry habis, pakai fallback lokal agar task tetap berisi rekomendasi.
-                $aiService->prosesKebutuhanProyek($this->projectId, $kebutuhan, false);
+                $aiService->prosesKebutuhanProyek($this->projectId, $kebutuhan, false, 'system_sync');
 
                 $latestTask = Task::query()
                     ->where('type', 'ai_booking_suggestion')
@@ -178,7 +190,7 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
         ]);
 
         $project = Project::query()->find($this->projectId, ['id', 'kode_proyek']);
-        if ($project) {
+        if ($project && $this->sendNotifications) {
             $this->notifyGeminiFailed($project, trim((string) $e->getMessage()));
         }
     }
