@@ -2,7 +2,6 @@
 
 namespace App\Services\AI;
 
-use App\Jobs\RetryBookingAIJob;
 use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Project;
@@ -22,23 +21,18 @@ class BookingAIService
         $this->gemini = $gemini;
     }
 
-    /**
-     * Entry point: dipanggil saat proyek baru masuk
-     * $kebutuhan = [['material_id' => 1, 'qty' => 100], ...]
-     */
-    public function prosesKebutuhanProyek(int $projectId, array $kebutuhan, bool $allowRetryOnTransient = true): array
+    public function prosesKebutuhanProyek(int $projectId, array $kebutuhan, bool $allowRetryOnTransient = false): array
     {
         $lock = Cache::lock('ai_booking_project_' . $projectId, 60);
 
         if (!$lock->get()) {
             Log::info('AI booking skip - sedang diproses', ['project_id' => $projectId]);
-
             return [];
         }
 
         try {
-            $project = Project::query()->find($projectId);
-            $projectCode = (string) ($project?->kode_proyek ?: ('#' . $projectId));
+            $project       = Project::query()->find($projectId);
+            $projectCode   = (string) ($project?->kode_proyek ?: ('#' . $projectId));
             $catatanTeknis = (string) ($project?->catatan_teknis ?? '');
             $kebutuhanDelta = $this->hitungDeltaKebutuhan($projectId, $kebutuhan);
 
@@ -47,38 +41,41 @@ class BookingAIService
                 return [];
             }
 
-            $stockData = $this->prepareStockDataForGemini($kebutuhanDelta);
+            $this->sinkronTaskSedangDiproses($projectId, $projectCode, $catatanTeknis);
+
+            $stockData      = $this->prepareStockDataForGemini($kebutuhanDelta);
             $kebutuhanItems = collect($kebutuhanDelta)->map(function (array $item): array {
                 $material = Material::query()->find((int) $item['material_id']);
-
                 return [
-                    'material_id' => (int) ($item['material_id'] ?? 0),
+                    'material_id'  => (int) ($item['material_id'] ?? 0),
                     'material_name' => (string) ($material?->nama_material ?: ('Material #' . (int) ($item['material_id'] ?? 0))),
-                    'qty' => round((float) ($item['qty'] ?? 0), 2),
-                    'satuan' => (string) ($material?->satuan ?: 'unit'),
+                    'qty'          => round((float) ($item['qty'] ?? 0), 2),
+                    'satuan'       => (string) ($material?->satuan ?: 'unit'),
                     'qty_original' => round((float) ($item['qty_original'] ?? $item['qty'] ?? 0), 2),
                 ];
             })->values()->all();
 
-        $hasilAnalisis = [];
-        $instruksiAi = [
-            'tanpa_potongan' => false,
-            'ringkas' => 'Tidak ada instruksi khusus soal potongan.',
-            'alasan' => '',
-            'sumber' => 'gemini_full_analysis',
-            'confidence' => 'sedang',
-        ];
-        $ringkasanGemini = 'Silakan review rekomendasi booking/PR dari AI untuk project ini.';
-        $rekomendasiGemini = [];
-
+            $hasilAnalisis     = [];
+            $instruksiAi       = [
+                'tanpa_potongan' => false,
+                'require_no_joint' => false,
+                'requested_segments' => [],
+                'ringkas'        => 'Tidak ada instruksi khusus soal potongan.',
+                'alasan'         => '',
+                'sumber'         => 'gemini_full_analysis',
+                'confidence'     => 'sedang',
+            ];
+            $ringkasanGemini   = 'Silakan review rekomendasi booking/PR dari AI untuk project ini.';
+            $rekomendasiGemini = [];
             $geminiFailedTotal = false;
-            $geminiResponse = [];
+            $geminiResponse    = [];
             $geminiFailureReason = '';
 
             try {
-                $historicalContext = $this->prepareHistoricalContext($kebutuhanDelta);
-
-                $geminiResponse = $this->askGeminiFullAnalysis(
+                $historicalContext = (bool) config('services.gemini.booking_include_history', false)
+                    ? $this->prepareHistoricalContext($kebutuhanDelta)
+                    : [];
+                $geminiResponse    = $this->askGeminiFullAnalysis(
                     projectId: $projectId,
                     projectCode: $projectCode,
                     catatanTeknis: $catatanTeknis,
@@ -87,312 +84,363 @@ class BookingAIService
                     historicalContext: $historicalContext,
                 );
             } catch (\Throwable $e) {
-                $isTransient = $this->isTransientGeminiException($e->getMessage());
+                $errorMessage = trim((string) $e->getMessage());
 
-                if ($isTransient && $allowRetryOnTransient) {
-                    $retrySeconds = max(30, $this->extractRetrySecondsFromMessage($e->getMessage()));
+                if ($this->isQuotaGeminiException($errorMessage)) {
+                    $geminiFailedTotal = true;
+                    $geminiFailureReason = 'API Quota Limit Terlampaui';
 
-                    Cache::put(
-                        'ai_booking_retry_payload_' . $projectId,
-                        [
-                            'project_id' => $projectId,
-                            'kebutuhan' => $kebutuhanDelta,
-                            'scheduled_at' => now()->toDateTimeString(),
-                            'retry_after_seconds' => $retrySeconds,
-                        ],
-                        now()->addMinutes(30),
-                    );
-
-                    $retryScheduled = Cache::add(
-                        'ai_booking_retry_scheduled_' . $projectId,
-                        1,
-                        now()->addSeconds($retrySeconds + 30),
-                    );
-
-                    if ($retryScheduled) {
-                        RetryBookingAIJob::dispatch($projectId, $kebutuhanDelta)
-                            ->delay(now()->addSeconds($retrySeconds));
-                    }
-
-                    $this->sinkronTaskMenungguRetry($projectId, $kebutuhanDelta, $retrySeconds);
-
-                    Log::info('Gemini cooldown detected, retry job dijadwalkan.', [
+                    Log::warning('Gemini quota habis, langsung pindah ke fallback lokal.', [
                         'project_id' => $projectId,
-                        'retry_seconds' => $retrySeconds,
-                        'retry_dispatched' => $retryScheduled,
-                        'error' => $e->getMessage(),
+                        'error' => $errorMessage,
                     ]);
 
-                    return [];
+                    goto FALLBACK_FLOW;
                 }
 
-                $geminiFailedTotal = true;
-                $geminiFailureReason = trim((string) $e->getMessage());
+                $isTransient = $this->isTransientGeminiException($errorMessage);
 
-                Log::warning('Gemini full analysis gagal total, fallback lokal untuk semua material.', [
+                if ($isTransient && $allowRetryOnTransient) {
+                    Log::info('Gemini transient terdeteksi, job akan gagal agar queue bisa retry.', [
+                        'project_id' => $projectId,
+                        'error' => $errorMessage,
+                    ]);
+                }
+
+                if (!$allowRetryOnTransient) {
+                    $geminiFailedTotal   = true;
+                    $geminiFailureReason = $errorMessage;
+                    Log::warning('Gemini gagal, fallback darurat lokal dipakai.', [
+                        'project_id' => $projectId,
+                        'error' => $errorMessage,
+                    ]);
+                    goto FALLBACK_FLOW;
+                }
+
+                Log::warning('Gemini gagal. Fallback dimatikan, error dilempar ke queue untuk retry.', [
                     'project_id' => $projectId,
-                    'error' => $e->getMessage(),
-                    'allow_retry_on_transient' => $allowRetryOnTransient,
+                    'error' => $errorMessage,
                 ]);
+
+                $this->sinkronTaskSedangDiproses(
+                    $projectId,
+                    $projectCode,
+                    $catatanTeknis,
+                    'AI sedang diproses ulang karena kendala sementara: ' . $errorMessage
+                );
+
+                throw $e;
             }
 
+            FALLBACK_FLOW:
             if ($geminiFailedTotal) {
-                $instruksiAi = $this->parseInstruksiOperasionalDariCatatan($catatanTeknis, $projectId);
+                $instruksiAi            = $this->parseInstruksiOperasionalDariCatatan($catatanTeknis, $projectId);
                 $tanpaPotonganDariPrompt = (bool) ($instruksiAi['tanpa_potongan'] ?? false);
 
                 foreach ($kebutuhanDelta as $item) {
                     $material = Material::query()->find((int) $item['material_id']);
-                    if (!$material) {
-                        continue;
+                    if (!$material) continue;
+
+                    $fallbackAnalisa = $this->analisaSatuItem(material: $material, dibutuhkan: (float) ($item['qty'] ?? 0), projectId: $projectId, tanpaPotongan: $tanpaPotonganDariPrompt, alasanInstruksi: (string) ($instruksiAi['alasan'] ?? ''));
+                    $fallbackSelection = $this->fallbackPieceSelection(materialId: (int) $material->id, dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0), materialName: (string) ($material->nama_material ?? ''), satuan: (string) ($material->satuan ?? 'unit'), instruksiAi: $instruksiAi);
+                    $pieceById = collect((array) data_get($stockData, (string) $material->id . '.pieces', []))->keyBy(fn (array $piece): int => (int) ($piece['id'] ?? 0));
+                    ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(), pieceById: $pieceById, dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0));
+
+                    $normalizedSegments = $this->normalizeRequestedSegmentsForTarget(
+                        requestedSegments: (array) ($instruksiAi['requested_segments'] ?? []),
+                        targetQty: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+                    );
+
+                    if ((bool) ($instruksiAi['require_no_joint'] ?? false) && !empty($normalizedSegments)) {
+                        $segmented = $this->buildChosenPiecesFromSegments(
+                            selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(),
+                            pieceById: $pieceById,
+                            qtyBooking: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+                            requestedSegments: $normalizedSegments,
+                        );
+
+                        // If Gemini-selected IDs cannot satisfy strict segments, retry against full pool.
+                        if (empty($segmented['chosen'] ?? [])) {
+                            $segmented = $this->buildChosenPiecesFromSegments(
+                                selectedIds: [],
+                                pieceById: $pieceById,
+                                qtyBooking: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+                                requestedSegments: $normalizedSegments,
+                            );
+                        }
+
+                        if (!empty($segmented['chosen'] ?? [])) {
+                            $chosen = $segmented['chosen'];
+                            $remaining = (float) ($segmented['remaining'] ?? $remaining);
+                        } else {
+                            // Strict no-joint: if segments cannot be matched, do not fallback to mixed cuts.
+                            $chosen = [];
+                            $remaining = (float) ($fallbackAnalisa['qty_booking'] ?? 0);
+                            $fallbackAnalisa['qty_pr'] = (float) ($fallbackAnalisa['dibutuhkan'] ?? ($item['qty'] ?? 0));
+                            $fallbackAnalisa['qty_booking'] = 0.0;
+                            $fallbackAnalisa['aksi'] = 'full_pr';
+                        }
                     }
 
-                    $fallbackAnalisa = $this->analisaSatuItem(
-                        material: $material,
-                        dibutuhkan: (float) ($item['qty'] ?? 0),
-                        projectId: $projectId,
-                        tanpaPotongan: $tanpaPotonganDariPrompt,
-                        alasanInstruksi: (string) ($instruksiAi['alasan'] ?? ''),
-                    );
-
-                    $fallbackSelection = $this->fallbackPieceSelection(
-                        materialId: (int) $material->id,
-                        dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                        materialName: (string) ($material->nama_material ?? ''),
+                    $fallbackAnalisa['recommended_piece_ids']    = collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
+                    $fallbackAnalisa['recommended_qty']          = round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - max(0, $remaining), 2);
+                    $fallbackAnalisa['recommended_pieces']       = $chosen;
+                    $fallbackAnalisa['alasan_ai_gemini']         = trim(implode('. ', array_filter([(string) ($fallbackSelection['overall_reason'] ?? ''), (string) ($fallbackAnalisa['alasan_ai'] ?? '')])));
+                    $fallbackAnalisa['alasan_ai']                = $this->buildGeminiPrimarySyncedReason(
+                        rawReason: (string) ($fallbackAnalisa['alasan_ai_gemini'] ?? ''),
+                        item: [
+                            'aksi' => (string) ($fallbackAnalisa['aksi'] ?? ''),
+                            'qty_pr' => (float) ($fallbackAnalisa['qty_pr'] ?? 0),
+                            'tanpa_potongan' => (bool) ($fallbackAnalisa['tanpa_potongan'] ?? false),
+                            'available' => (float) ($fallbackAnalisa['available'] ?? 0),
+                            'qty_booking' => (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+                        ],
+                        materialName: (string) ($material->nama_material ?? ('Material #' . (int) $material->id)),
                         satuan: (string) ($material->satuan ?? 'unit'),
+                        dibutuhkan: (float) ($item['qty'] ?? 0),
+                        qtyBooking: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+                        qtyPr: (float) ($fallbackAnalisa['qty_pr'] ?? 0),
+                        chosenPieces: $chosen,
+                        requestedSegments: $normalizedSegments,
+                        requireNoJoint: (bool) ($instruksiAi['require_no_joint'] ?? false),
                     );
-
-                    $pieceById = collect((array) data_get($stockData, (string) $material->id . '.pieces', []))
-                        ->keyBy(fn (array $piece): int => (int) ($piece['id'] ?? 0));
-
-                    ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(
-                        selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(),
-                        pieceById: $pieceById,
-                        dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                    );
-
-                    $fallbackAnalisa['recommended_piece_ids'] = collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
-                    $fallbackAnalisa['recommended_qty'] = round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - max(0, $remaining), 2);
-                    $fallbackAnalisa['recommended_pieces'] = $chosen;
-                    $fallbackAnalisa['alasan_ai'] = trim(implode('. ', array_filter([
-                        (string) ($fallbackSelection['overall_reason'] ?? ''),
-                        (string) ($fallbackAnalisa['alasan_ai'] ?? ''),
-                    ])));
-                    $fallbackAnalisa['kebutuhan_asli'] = (float) ($item['qty_original'] ?? $item['qty'] ?? 0);
+                    $fallbackAnalisa['kebutuhan_asli']           = (float) ($item['qty_original'] ?? $item['qty'] ?? 0);
                     $fallbackAnalisa['kebutuhan_setelah_buffer'] = (float) ($item['qty'] ?? 0);
                     $fallbackAnalisa['kebutuhan_belum_tercover'] = max(0, (float) ($fallbackAnalisa['qty_pr'] ?? 0));
-
                     $hasilAnalisis[] = $fallbackAnalisa;
                 }
 
-                $ringkasanGemini = 'Retry AI gagal, sistem menggunakan rekomendasi lokal agar operasional tetap berjalan.';
-                if ($geminiFailureReason !== '') {
-                    $ringkasanGemini .= ' (' . $geminiFailureReason . ')';
-                }
+                $ringkasanGemini = 'AI sedang tidak tersedia (quota/error), rekomendasi lokal digunakan. Silakan review dan sesuaikan bila perlu.';
+                if ($geminiFailureReason !== '') $ringkasanGemini .= ' (' . $geminiFailureReason . ')';
                 $rekomendasiGemini = [];
+
             } else {
-            $instruksiNode = is_array($geminiResponse['instruksi_manager'] ?? null)
-                ? $geminiResponse['instruksi_manager']
-                : [];
+                $instruksiNode = is_array($geminiResponse['instruksi_manager'] ?? null) ? $geminiResponse['instruksi_manager'] : [];
+                $instruksiFallback = $this->parseInstruksiOperasionalDariCatatan($catatanTeknis, $projectId);
+                $requestedSegmentsFromNode = collect($instruksiNode['requested_segments'] ?? [])
+                    ->map(fn ($value): float => round((float) $value, 2))
+                    ->filter(fn (float $value): bool => $value > 0)
+                    ->values()
+                    ->all();
+                $requestedSegmentsFromFallback = collect($instruksiFallback['requested_segments'] ?? [])
+                    ->map(fn ($value): float => round((float) $value, 2))
+                    ->filter(fn (float $value): bool => $value > 0)
+                    ->values()
+                    ->all();
+                $requestedSegmentsMerged = !empty($requestedSegmentsFromNode)
+                    ? $requestedSegmentsFromNode
+                    : $requestedSegmentsFromFallback;
+                $requireNoJointMerged = (bool) ($instruksiNode['require_no_joint'] ?? false)
+                    || (bool) ($instruksiFallback['require_no_joint'] ?? false)
+                    || !empty($requestedSegmentsMerged);
+                $instruksiAi   = [
+                    'tanpa_potongan' => (bool) ($instruksiNode['tanpa_potongan'] ?? false),
+                    'require_no_joint' => $requireNoJointMerged,
+                    'requested_segments' => $requestedSegmentsMerged,
+                    'ringkas' => (string) ($instruksiNode['ringkas'] ?? 'Tidak ada instruksi khusus soal potongan.'),
+                    'alasan' => (string) ($instruksiNode['alasan'] ?? ''),
+                    'sumber' => 'gemini_full_analysis',
+                    'confidence' => 'sedang',
+                ];
+                $ringkasanGemini = (string) ($geminiResponse['ringkasan'] ?? $ringkasanGemini);
+                $materialsNode   = is_array($geminiResponse['materials'] ?? null) ? $geminiResponse['materials'] : [];
 
-            $instruksiAi = [
-                'tanpa_potongan' => (bool) ($instruksiNode['tanpa_potongan'] ?? false),
-                'ringkas' => (string) ($instruksiNode['ringkas'] ?? 'Tidak ada instruksi khusus soal potongan.'),
-                'alasan' => (string) ($instruksiNode['alasan'] ?? ''),
-                'sumber' => 'gemini_full_analysis',
-                'confidence' => 'sedang',
-            ];
+                foreach ($kebutuhanItems as $item) {
+                    $materialId = (int) ($item['material_id'] ?? 0);
+                    $dibutuhkan = (float) ($item['qty'] ?? 0);
+                    $material   = Material::query()->find($materialId);
+                    if ($materialId <= 0 || $dibutuhkan <= 0 || !$material) continue;
 
-            $ringkasanGemini = (string) ($geminiResponse['ringkasan'] ?? $ringkasanGemini);
-            $materialsNode = is_array($geminiResponse['materials'] ?? null) ? $geminiResponse['materials'] : [];
+                    $available      = (float) data_get($stockData, (string) $materialId . '.available', 0);
+                    $pieces         = (array) data_get($stockData, (string) $materialId . '.pieces', []);
+                    $materialGemini = $materialsNode[(string) $materialId] ?? null;
 
-            foreach ($kebutuhanItems as $item) {
-                $materialId = (int) ($item['material_id'] ?? 0);
-                $dibutuhkan = (float) ($item['qty'] ?? 0);
-                $material = Material::query()->find($materialId);
+                    $useMaterialFallback = false;
+                    $aksi = ''; $selectedIds = []; $alasanPerPiece = []; $overallReason = ''; $sisaAnalysis = ''; $geminiAllocations = [];
 
-                if ($materialId <= 0 || $dibutuhkan <= 0 || !$material) {
-                    continue;
-                }
+                    if (!is_array($materialGemini)) {
+                        throw new \RuntimeException("Gemini tidak mengembalikan analisis untuk material_id {$materialId}.");
+                    } else {
+                        $aksi        = (string) ($materialGemini['aksi'] ?? '');
+                        $selectedIds = collect($materialGemini['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->unique()->values()->all();
+                        $alasanPerPiece = is_array($materialGemini['alasan_per_piece'] ?? null) ? collect($materialGemini['alasan_per_piece'])->mapWithKeys(fn ($reason, $id): array => [(string) ((int) $id) => trim((string) $reason)])->all() : [];
+                        $overallReason = trim((string) ($materialGemini['overall_reason'] ?? ''));
+                        $sisaAnalysis  = trim((string) ($materialGemini['sisa_analysis'] ?? ''));
+                        $geminiAllocations = $this->extractGeminiPieceAllocations($materialGemini);
 
-                $available = (float) data_get($stockData, (string) $materialId . '.available', 0);
-                $pieces = (array) data_get($stockData, (string) $materialId . '.pieces', []);
-                $materialGemini = $materialsNode[(string) $materialId] ?? null;
-
-                $useMaterialFallback = false;
-                $aksi = '';
-                $selectedIds = [];
-                $alasanPerPiece = [];
-                $overallReason = '';
-                $sisaAnalysis = '';
-
-                if (!is_array($materialGemini)) {
-                    $useMaterialFallback = true;
-                } else {
-                    $aksi = (string) ($materialGemini['aksi'] ?? '');
-                    $selectedIds = collect($materialGemini['selected_piece_ids'] ?? [])
-                        ->map(fn ($id): int => (int) $id)
-                        ->filter(fn (int $id): bool => $id > 0)
-                        ->unique()
-                        ->values()
-                        ->all();
-
-                    $alasanPerPiece = is_array($materialGemini['alasan_per_piece'] ?? null)
-                        ? collect($materialGemini['alasan_per_piece'])
-                            ->mapWithKeys(fn ($reason, $id): array => [(string) ((int) $id) => trim((string) $reason)])
-                            ->all()
-                        : [];
-
-                    $overallReason = trim((string) ($materialGemini['overall_reason'] ?? ''));
-                    $sisaAnalysis = trim((string) ($materialGemini['sisa_analysis'] ?? ''));
-
-                    if (!in_array($aksi, ['full_booking', 'partial', 'full_pr'], true)) {
-                        $useMaterialFallback = true;
+                        if (!in_array($aksi, ['full_booking', 'partial', 'full_pr'], true)) {
+                            throw new \RuntimeException("Gemini mengembalikan aksi tidak valid '{$aksi}' untuk material_id {$materialId}.");
+                        }
+                        $allowedIds = collect($pieces)->pluck('id')->map(fn ($id): int => (int) $id)->all();
+                        if (collect($selectedIds)->contains(fn (int $id): bool => !in_array($id, $allowedIds, true))) {
+                            throw new \RuntimeException("Gemini memilih piece yang tidak valid untuk material_id {$materialId}.");
+                        }
+                        if (collect($geminiAllocations)->contains(fn (array $alloc): bool => !in_array((int) ($alloc['piece_id'] ?? 0), $allowedIds, true))) {
+                            throw new \RuntimeException("Gemini mengembalikan alokasi piece_id yang tidak valid untuk material_id {$materialId}.");
+                        }
+                        if (in_array($aksi, ['full_booking', 'partial'], true) && empty($selectedIds) && empty($geminiAllocations)) {
+                            throw new \RuntimeException("Gemini meminta booking tetapi selected_piece_ids kosong untuk material_id {$materialId}.");
+                        }
                     }
 
-                    $allowedIds = collect($pieces)->pluck('id')->map(fn ($id): int => (int) $id)->all();
-                    $hasInvalidPiece = collect($selectedIds)
-                        ->contains(fn (int $id): bool => !in_array($id, $allowedIds, true));
-
-                    if ($hasInvalidPiece) {
-                        $useMaterialFallback = true;
+                    if ($useMaterialFallback) {
+                        throw new \RuntimeException("Fallback per-material dimatikan untuk material_id {$materialId}.");
                     }
 
-                    if (in_array($aksi, ['full_booking', 'partial'], true) && empty($selectedIds)) {
-                        $useMaterialFallback = true;
-                    }
-                }
-
-                if ($useMaterialFallback) {
-                    $fallbackAnalisa = $this->analisaSatuItem(
-                        material: $material,
-                        dibutuhkan: $dibutuhkan,
-                        projectId: $projectId,
-                        tanpaPotongan: (bool) ($instruksiAi['tanpa_potongan'] ?? false),
-                        alasanInstruksi: (string) ($instruksiAi['alasan'] ?? ''),
-                    );
-
-                    $fallbackSelection = $this->fallbackPieceSelection(
-                        materialId: $materialId,
-                        dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                        materialName: (string) ($material->nama_material ?? ''),
-                        satuan: (string) ($material->satuan ?? 'unit'),
-                    );
+                    [$qtyBooking, $qtyPr] = match ($aksi) {
+                        'full_booking' => [$dibutuhkan, 0.0],
+                        'partial'      => [min($available, $dibutuhkan), max(0, $dibutuhkan - min($available, $dibutuhkan))],
+                        'full_pr'      => [0.0, $dibutuhkan],
+                        default        => [0.0, $dibutuhkan],
+                    };
+                    if ($qtyBooking > $available + 0.00001) { $qtyBooking = max(0, $available); $qtyPr = max(0, $dibutuhkan - $qtyBooking); }
 
                     $pieceById = collect($pieces)->keyBy(fn (array $piece): int => (int) ($piece['id'] ?? 0));
-                    ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(
-                        selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(),
-                        pieceById: $pieceById,
-                        dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+
+                    $segmentsForNeed = $this->normalizeRequestedSegmentsForTarget(
+                        requestedSegments: (array) ($instruksiAi['requested_segments'] ?? []),
+                        targetQty: $dibutuhkan,
                     );
 
-                    $fallbackAnalisa['recommended_piece_ids'] = collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
-                    $fallbackAnalisa['recommended_qty'] = round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - max(0, $remaining), 2);
-                    $fallbackAnalisa['recommended_pieces'] = $chosen;
-                    $fallbackAnalisa['kebutuhan_asli'] = (float) ($item['qty_original'] ?? $dibutuhkan);
-                    $fallbackAnalisa['kebutuhan_setelah_buffer'] = $dibutuhkan;
-                    $fallbackAnalisa['kebutuhan_belum_tercover'] = max(0, (float) ($fallbackAnalisa['qty_pr'] ?? 0));
+                    $normalizedSegments = !empty($segmentsForNeed)
+                        ? $segmentsForNeed
+                        : $this->normalizeRequestedSegmentsForTarget(
+                            requestedSegments: (array) ($instruksiAi['requested_segments'] ?? []),
+                            targetQty: $qtyBooking,
+                        );
 
-                    $hasilAnalisis[] = $fallbackAnalisa;
-                    continue;
-                }
+                    if ((bool) ($instruksiAi['require_no_joint'] ?? false) && !empty($segmentsForNeed)) {
+                        $limitBooking = min($available, $dibutuhkan);
+                        $segmentPlan = $this->pickSegmentSubsetWithinLimit($segmentsForNeed, $limitBooking);
 
-                [$qtyBooking, $qtyPr] = match ($aksi) {
-                    'full_booking' => [$dibutuhkan, 0.0],
-                    'partial' => [min($available, $dibutuhkan), max(0, $dibutuhkan - min($available, $dibutuhkan))],
-                    'full_pr' => [0.0, $dibutuhkan],
-                    default => [0.0, $dibutuhkan],
-                };
+                        if (!empty($segmentPlan)) {
+                            $normalizedSegments = $segmentPlan;
+                            $qtyBooking = round((float) array_sum($segmentPlan), 2);
+                            $qtyPr = max(0, round($dibutuhkan - $qtyBooking, 2));
+                            $aksi = $qtyPr > 0.00001 ? 'partial' : 'full_booking';
 
-                if ($qtyBooking > $available + 0.00001) {
-                    $qtyBooking = max(0, $available);
-                    $qtyPr = max(0, $dibutuhkan - $qtyBooking);
-                }
+                            // Keep Gemini for strategy text, but force allocation from manager segments.
+                            $geminiAllocations = [];
+                            $overallReason = trim(implode('. ', array_filter([
+                                $overallReason,
+                                'Instruksi manager tanpa sambungan diprioritaskan sebagai aturan wajib, sehingga alokasi dihitung ulang oleh sistem PHP agar patuh segmen.',
+                            ])));
+                        } else {
+                            $normalizedSegments = $segmentsForNeed;
+                            $qtyBooking = 0.0;
+                            $qtyPr = $dibutuhkan;
+                            $aksi = 'full_pr';
+                            $selectedIds = [];
+                            $geminiAllocations = [];
+                            $overallReason = trim(implode('. ', array_filter([
+                                $overallReason,
+                                'Instruksi segmen tanpa sambungan tidak dapat dipenuhi dari stok saat ini, sehingga dialihkan ke PR.',
+                            ])));
+                        }
+                    }
 
-                $pieceById = collect($pieces)->keyBy(fn (array $piece): int => (int) ($piece['id'] ?? 0));
-                ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(
-                    selectedIds: $selectedIds,
-                    pieceById: $pieceById,
-                    dibutuhkan: $qtyBooking,
-                );
+                    if ((bool) ($instruksiAi['require_no_joint'] ?? false) && !empty($normalizedSegments) && empty($geminiAllocations)) {
+                        $overallReason = trim(implode('. ', array_filter([
+                            $overallReason,
+                            'Gemini tidak memberi alokasi_kabel per segmen, sehingga sistem PHP menyusun alokasi segmentasi agar instruksi tanpa sambungan tetap terpenuhi.',
+                        ])));
+                    }
 
-                if ($qtyBooking > 0 && empty($chosen)) {
-                    $fallbackAnalisa = $this->analisaSatuItem(
-                        material: $material,
-                        dibutuhkan: $dibutuhkan,
-                        projectId: $projectId,
-                        tanpaPotongan: (bool) ($instruksiAi['tanpa_potongan'] ?? false),
-                        alasanInstruksi: (string) ($instruksiAi['alasan'] ?? ''),
-                    );
+                    ['chosen' => $chosen, 'remaining' => $remaining] = !empty($geminiAllocations)
+                        ? $this->buildChosenPiecesFromGeminiAllocations(
+                            allocations: $geminiAllocations,
+                            pieceById: $pieceById,
+                            qtyBooking: $qtyBooking,
+                            requireNoJoint: (bool) ($instruksiAi['require_no_joint'] ?? false),
+                            requestedSegments: $normalizedSegments,
+                        )
+                        : $this->buildChosenPiecesFromSelection(selectedIds: $selectedIds, pieceById: $pieceById, dibutuhkan: $qtyBooking);
 
-                    $fallbackSelection = $this->fallbackPieceSelection(
-                        materialId: $materialId,
-                        dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                        materialName: (string) ($material->nama_material ?? ''),
+                    if (!empty($geminiAllocations)) {
+                        $allocReasonByPiece = collect($geminiAllocations)
+                            ->mapWithKeys(function (array $alloc): array {
+                                $pieceId = (int) ($alloc['piece_id'] ?? 0);
+                                $reason = trim((string) ($alloc['reason'] ?? ''));
+                                if ($pieceId <= 0 || $reason === '') {
+                                    return [];
+                                }
+
+                                return [(string) $pieceId => $reason];
+                            })
+                            ->all();
+
+                        if (!empty($allocReasonByPiece)) {
+                            $alasanPerPiece = array_merge($alasanPerPiece, $allocReasonByPiece);
+                        }
+                    }
+
+                    if ((bool) ($instruksiAi['require_no_joint'] ?? false) && !empty($normalizedSegments)) {
+                        $segmented = $this->buildChosenPiecesFromSegments(
+                            selectedIds: $selectedIds,
+                            pieceById: $pieceById,
+                            qtyBooking: $qtyBooking,
+                            requestedSegments: $normalizedSegments,
+                        );
+
+                        // If Gemini-selected IDs cannot satisfy strict segments, retry against full pool.
+                        if (empty($segmented['chosen'] ?? [])) {
+                            $segmented = $this->buildChosenPiecesFromSegments(
+                                selectedIds: [],
+                                pieceById: $pieceById,
+                                qtyBooking: $qtyBooking,
+                                requestedSegments: $normalizedSegments,
+                            );
+                        }
+
+                        if (!empty($segmented['chosen'] ?? [])) {
+                            $chosen = $segmented['chosen'];
+                            $remaining = (float) ($segmented['remaining'] ?? $remaining);
+                            $overallReason = trim(implode('. ', array_filter([
+                                $overallReason,
+                                'Segment kebutuhan tanpa sambungan diterapkan: ' . implode(' + ', collect($normalizedSegments)->map(fn ($v) => $this->formatQty((float) $v))->all()),
+                            ])));
+                        } else {
+                            // Strict no-joint: do not continue with non-segmented plan.
+                            $aksi = 'full_pr';
+                            $qtyBooking = 0.0;
+                            $qtyPr = $dibutuhkan;
+                            $chosen = [];
+                            $remaining = 0.0;
+                            $overallReason = trim(implode('. ', array_filter([
+                                $overallReason,
+                                'Segmen tanpa sambungan tidak dapat dipenuhi dari stok yang tersedia.',
+                            ])));
+                        }
+                    }
+
+                    if ($qtyBooking > 0 && empty($chosen)) {
+                        throw new \RuntimeException("Gemini memilih piece yang tidak bisa dipakai sistem untuk material_id {$materialId}.");
+                    }
+
+                    $perPieceReasonText = collect($chosen)->map(function (array $piece) use ($alasanPerPiece): string { $pieceId = (int) ($piece['id'] ?? 0); $reason = trim((string) ($alasanPerPiece[(string) $pieceId] ?? '')); return $reason !== '' ? ('Piece #' . $pieceId . ': ' . $reason) : ''; })->filter()->implode('. ');
+                    $geminiReason = implode('. ', array_values(array_filter([$overallReason, $perPieceReasonText, $sisaAnalysis], fn ($segment): bool => trim((string) $segment) !== '')));
+                    $displayReason = $this->buildGeminiPrimarySyncedReason(
+                        rawReason: $geminiReason,
+                        item: [
+                            'aksi' => $aksi,
+                            'qty_pr' => $qtyPr,
+                            'tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false),
+                            'available' => $available,
+                            'qty_booking' => $qtyBooking,
+                        ],
+                        materialName: (string) $material->nama_material,
                         satuan: (string) ($material->satuan ?? 'unit'),
-                    );
-                    ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(
-                        selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(),
-                        pieceById: $pieceById,
-                        dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+                        dibutuhkan: $dibutuhkan,
+                        qtyBooking: $qtyBooking,
+                        qtyPr: $qtyPr,
+                        chosenPieces: $chosen,
+                        requestedSegments: $normalizedSegments,
+                        requireNoJoint: (bool) ($instruksiAi['require_no_joint'] ?? false),
                     );
 
-                    $fallbackAnalisa['recommended_piece_ids'] = collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
-                    $fallbackAnalisa['recommended_qty'] = round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - max(0, $remaining), 2);
-                    $fallbackAnalisa['recommended_pieces'] = $chosen;
-                    $fallbackAnalisa['kebutuhan_asli'] = (float) ($item['qty_original'] ?? $dibutuhkan);
-                    $fallbackAnalisa['kebutuhan_setelah_buffer'] = $dibutuhkan;
-                    $fallbackAnalisa['kebutuhan_belum_tercover'] = max(0, (float) ($fallbackAnalisa['qty_pr'] ?? 0));
-                    $hasilAnalisis[] = $fallbackAnalisa;
-                    continue;
+                    $hasilAnalisis[] = ['material_id' => $materialId, 'nama_material' => (string) $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => round($available, 2), 'aksi' => $aksi, 'qty_booking' => round($qtyBooking, 2), 'qty_pr' => round($qtyPr, 2), 'tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false), 'recommended_piece_ids' => collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(), 'recommended_qty' => round($qtyBooking - max(0, $remaining), 2), 'recommended_pieces' => $chosen, 'alasan_ai' => $displayReason, 'alasan_ai_gemini' => $geminiReason, 'kebutuhan_asli' => (float) ($item['qty_original'] ?? $dibutuhkan), 'kebutuhan_setelah_buffer' => $dibutuhkan, 'kebutuhan_belum_tercover' => round($qtyPr, 2)];
+                    $rekomendasiGemini[] = ['material' => (string) $material->nama_material, 'aksi' => match ($aksi) { 'full_booking' => 'booking', 'partial' => 'booking sebagian + PR', 'full_pr' => 'buat PR', default => 'review manual' }, 'detail' => $displayReason];
                 }
-
-                $perPieceReasonText = collect($chosen)
-                    ->map(function (array $piece) use ($alasanPerPiece): string {
-                        $pieceId = (int) ($piece['id'] ?? 0);
-                        $reason = trim((string) ($alasanPerPiece[(string) $pieceId] ?? ''));
-
-                        return $reason !== '' ? ('Piece #' . $pieceId . ': ' . $reason) : '';
-                    })
-                    ->filter()
-                    ->implode('. ');
-
-                $reason = implode('. ', array_values(array_filter([
-                    $overallReason,
-                    $perPieceReasonText,
-                    $sisaAnalysis,
-                ], fn ($segment): bool => trim((string) $segment) !== '')));
-
-                $hasilAnalisis[] = [
-                    'material_id' => $materialId,
-                    'nama_material' => (string) $material->nama_material,
-                    'dibutuhkan' => $dibutuhkan,
-                    'available' => round($available, 2),
-                    'aksi' => $aksi,
-                    'qty_booking' => round($qtyBooking, 2),
-                    'qty_pr' => round($qtyPr, 2),
-                    'tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false),
-                    'recommended_piece_ids' => collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(),
-                    'recommended_qty' => round($qtyBooking - max(0, $remaining), 2),
-                    'recommended_pieces' => $chosen,
-                    'alasan_ai' => $reason !== ''
-                        ? $reason
-                        : 'Pemilihan piece dilakukan AI dan divalidasi oleh perhitungan sistem.',
-                    'kebutuhan_asli' => (float) ($item['qty_original'] ?? $dibutuhkan),
-                    'kebutuhan_setelah_buffer' => $dibutuhkan,
-                    'kebutuhan_belum_tercover' => round($qtyPr, 2),
-                ];
-
-                $rekomendasiGemini[] = [
-                    'material' => (string) $material->nama_material,
-                    'aksi' => match ($aksi) {
-                        'full_booking' => 'booking',
-                        'partial' => 'booking sebagian + PR',
-                        'full_pr' => 'buat PR',
-                        default => 'review manual',
-                    },
-                    'detail' => $reason,
-                ];
-            }
             }
 
             if (empty($hasilAnalisis)) {
@@ -400,18 +448,9 @@ class BookingAIService
                 return [];
             }
 
-            $summary = json_encode([
-                'ringkasan' => $ringkasanGemini,
-                'rekomendasi' => $rekomendasiGemini,
-                'perlu_konfirmasi' => true,
-            ], JSON_UNESCAPED_UNICODE);
-
-            if (!is_string($summary) || trim($summary) === '') {
-                $summary = '{"ringkasan":"Silakan review rekomendasi booking/PR dari AI untuk project ini.","rekomendasi":[],"perlu_konfirmasi":true}';
-            }
-
+            $summary = json_encode(['ringkasan' => $ringkasanGemini, 'rekomendasi' => $rekomendasiGemini, 'perlu_konfirmasi' => true], JSON_UNESCAPED_UNICODE);
+            if (!is_string($summary) || trim($summary) === '') $summary = '{"ringkasan":"Silakan review rekomendasi booking/PR dari AI untuk project ini.","rekomendasi":[],"perlu_konfirmasi":true}';
             $this->sinkronTaskUntukStaff($summary, $projectId, $hasilAnalisis, $instruksiAi);
-
             return $hasilAnalisis;
         } finally {
             $lock->release();
@@ -421,332 +460,138 @@ class BookingAIService
     private function isTransientGeminiException(string $message): bool
     {
         $text = mb_strtolower(trim($message));
-
-        return str_contains($text, 'cooldown aktif')
-            || str_contains($text, 'sementara tidak tersedia')
-            || str_contains($text, 'rate limit')
-            || str_contains($text, 'high demand')
-            || str_contains($text, '429')
-            || str_contains($text, '503');
+        if (str_contains($text, 'resource_exhausted') || str_contains($text, 'quota_exceeded') || str_contains($text, 'quotafailure') || str_contains($text, 'exceeded your current quota') || str_contains($text, 'billing')) return false;
+        return str_contains($text, 'cooldown aktif') || str_contains($text, 'sementara tidak tersedia') || str_contains($text, 'high demand') || str_contains($text, '503');
     }
 
-    private function extractRetrySecondsFromMessage(string $message): int
+    private function isQuotaGeminiException(string $message): bool
     {
-        if (preg_match('/(\d+)\s*detik/i', $message, $match)) {
-            return max(0, (int) ($match[1] ?? 0));
-        }
+        $text = mb_strtolower(trim($message));
 
-        return 0;
+        return str_contains($text, 'quota')
+            || str_contains($text, 'resource_exhausted')
+            || str_contains($text, 'rate limited')
+            || str_contains($text, 'limit terlampaui')
+            || str_contains($text, 'billing');
     }
 
-    /**
-     * @param  array<int, array{material_id:int,qty:float,qty_original?:float}>  $kebutuhanDelta
-     * @return array<int, array{material_id:int,material_name:string,dibutuhkan:float,satuan:string,available:float,pieces:array<int, array<string,mixed>>}>
-     */
+    private function isGeminiTransientErrorPayload(?array $decoded): bool
+    {
+        if (!is_array($decoded)) return false;
+        $status = (int) ($decoded['status'] ?? 0);
+        if ($status === 503) return true;
+        if ($status === 429) {
+            $bodyStr = mb_strtolower((string) json_encode($decoded['body'] ?? $decoded));
+            if (str_contains($bodyStr, 'resource_exhausted') || str_contains($bodyStr, 'quota_exceeded') || str_contains($bodyStr, 'quotafailure') || str_contains($bodyStr, 'exceeded your current quota') || str_contains($bodyStr, 'billing')) return false;
+            return true;
+        }
+        $errorText = mb_strtolower(trim((string) ($decoded['error'] ?? '')));
+        return str_contains($errorText, 'cooldown aktif') || str_contains($errorText, 'sementara tidak tersedia') || str_contains($errorText, 'high demand');
+    }
+
     private function prepareStockDataForGemini(array $kebutuhanDelta): array
     {
-        $rackMap = ShelfLocation::query()
-            ->get(['id', 'kode_lokasi', 'nama_lokasi'])
-            ->mapWithKeys(fn ($row): array => [
-                (int) $row->id => (string) ($row->kode_lokasi ?: ($row->nama_lokasi ?: ('#' . (int) $row->id))),
-            ])
-            ->toArray();
-
-        $result = [];
-
+        $rackMap = ShelfLocation::query()->get(['id', 'kode_lokasi', 'nama_lokasi'])->mapWithKeys(fn ($row): array => [(int) $row->id => (string) ($row->kode_lokasi ?: ($row->nama_lokasi ?: ('#' . (int) $row->id)))])->toArray();
+        $result  = [];
         foreach ($kebutuhanDelta as $item) {
             $materialId = (int) ($item['material_id'] ?? 0);
             $dibutuhkan = (float) ($item['qty'] ?? 0);
-
-            if ($materialId <= 0 || $dibutuhkan <= 0) {
-                continue;
-            }
-
+            if ($materialId <= 0 || $dibutuhkan <= 0) continue;
             $material = Material::query()->find($materialId);
-            if (!$material) {
-                continue;
-            }
-
-            $pieces = MaterialPiece::query()
-                ->with('inbound:id,entry_date')
-                ->where('material_id', $materialId)
-                ->where('status', 'available')
-                ->orderByRaw("CASE WHEN sumber LIKE 'split_%' THEN 0 ELSE 1 END ASC")
-                ->orderBy('panjang')
-                ->orderByRaw("COALESCE((SELECT entry_date FROM inbounds WHERE inbounds.id = material_pieces.inbound_id), material_pieces.created_at) ASC")
-                ->limit(20)
-                ->get(['id', 'material_id', 'inbound_id', 'panjang', 'sumber', 'shelf_location_id', 'created_at'])
-                ->map(function (MaterialPiece $piece) use ($rackMap): array {
-                    $ageDays = (int) now()->diffInDays(
-                        $piece->inbound?->entry_date
-                            ? \Carbon\Carbon::parse($piece->inbound->entry_date)
-                            : $piece->created_at,
-                        false,
-                    ) * -1;
-
-                    return [
-                        'id' => (int) $piece->id,
-                        'panjang' => round((float) $piece->panjang, 2),
-                        'sumber' => (string) $piece->sumber,
-                        'rack_label' => (string) ($rackMap[(int) ($piece->shelf_location_id ?? 0)] ?? '-'),
-                        'umur_hari' => max(0, $ageDays),
-                        'shelf_location_id' => (int) ($piece->shelf_location_id ?? 0),
-                        'status' => 'available',
-                    ];
-                })
-                ->values()
-                ->all();
-
-            $result[$materialId] = [
-                'material_id' => $materialId,
-                'material_name' => (string) $material->nama_material,
-                'dibutuhkan' => round($dibutuhkan, 2),
-                'satuan' => (string) ($material->satuan ?: 'unit'),
-                'available' => round((float) $material->available, 2),
-                'pieces' => $pieces,
-            ];
+            if (!$material) continue;
+            $pieces = MaterialPiece::query()->with('inbound:id,entry_date')->where('material_id', $materialId)->where('status', 'available')->orderByRaw("CASE WHEN sumber LIKE 'split_%' THEN 0 ELSE 1 END ASC")->orderBy('panjang')->orderByRaw("COALESCE((SELECT entry_date FROM inbounds WHERE inbounds.id = material_pieces.inbound_id), material_pieces.created_at) ASC")->get(['id', 'material_id', 'inbound_id', 'panjang', 'sumber', 'shelf_location_id', 'created_at'])->map(function (MaterialPiece $piece) use ($rackMap): array {
+                $ageDays = (int) now()->diffInDays($piece->inbound?->entry_date ? \Carbon\Carbon::parse($piece->inbound->entry_date) : $piece->created_at, false) * -1;
+                return ['id' => (int) $piece->id, 'panjang' => round((float) $piece->panjang, 2), 'sumber' => (string) $piece->sumber, 'rack_label' => (string) ($rackMap[(int) ($piece->shelf_location_id ?? 0)] ?? '-'), 'umur_hari' => max(0, $ageDays), 'shelf_location_id' => (int) ($piece->shelf_location_id ?? 0), 'status' => 'available'];
+            })->values()->all();
+            $result[$materialId] = ['material_id' => $materialId, 'material_name' => (string) $material->nama_material, 'dibutuhkan' => round($dibutuhkan, 2), 'satuan' => (string) ($material->satuan ?: 'unit'), 'available' => round((float) $material->available, 2), 'pieces' => $pieces];
         }
-
         return $result;
     }
 
-    /**
-     * Kumpulkan data historis transaksi per material untuk konteks Gemini.
-     * Gemini menggunakan data ini untuk "belajar" pola gudang dan membuat
-     * keputusan yang lebih cerdas berdasarkan tren penggunaan material.
-     */
     private function prepareHistoricalContext(array $kebutuhanDelta): array
     {
         $history = [];
-
         foreach ($kebutuhanDelta as $item) {
             $materialId = (int) ($item['material_id'] ?? 0);
-            if ($materialId <= 0) {
-                continue;
-            }
-
+            if ($materialId <= 0) continue;
             $material = Material::query()->find($materialId);
-            if (!$material) {
-                continue;
-            }
-
-            $avgBookingPerProject = (float) MaterialPiece::query()
-                ->where('material_id', $materialId)
-                ->where('status', 'booked')
-                ->where('booked_at', '>=', now()->subMonths(3))
-                ->selectRaw('booked_for_project_id, SUM(panjang) as total')
-                ->groupBy('booked_for_project_id')
-                ->pluck('total')
-                ->avg();
-
-            $deadStockPieces = (int) MaterialPiece::query()
-                ->where('material_id', $materialId)
-                ->where('status', 'available')
-                ->where('created_at', '<=', now()->subDays(90))
-                ->count();
-
-            $usageBySource = MaterialPiece::query()
-                ->where('material_id', $materialId)
-                ->whereIn('status', ['booked', 'used'])
-                ->where('booked_at', '>=', now()->subMonths(3))
-                ->selectRaw("sumber, COUNT(*) as jumlah")
-                ->groupBy('sumber')
-                ->pluck('jumlah', 'sumber')
-                ->toArray();
-
-            $wastedCuts = (int) MaterialPiece::query()
-                ->where('material_id', $materialId)
-                ->where('status', 'available')
-                ->whereIn('sumber', ['split_auto_allocation', 'split_booking', 'split_booking_residue'])
-                ->where('panjang', '<', 20)
-                ->where('created_at', '<=', now()->subDays(60))
-                ->count();
-
-            $projectCount = (int) MaterialPiece::query()
-                ->where('material_id', $materialId)
-                ->whereIn('status', ['booked', 'used'])
-                ->where('booked_at', '>=', now()->subMonths(3))
-                ->distinct('booked_for_project_id')
-                ->count('booked_for_project_id');
-
-            $history[$materialId] = [
-                'material_name' => (string) $material->nama_material,
-                'avg_booking_per_project' => round($avgBookingPerProject, 2),
-                'dead_stock_pieces' => $deadStockPieces,
-                'usage_by_source' => $usageBySource,
-                'wasted_small_cuts' => $wastedCuts,
-                'projects_using_3months' => $projectCount,
-            ];
-
-            // Hanya kirim material yang memang punya jejak pemakaian historis.
-            $hasRealUsage = $projectCount > 0
-                || (float) $avgBookingPerProject > 0
-                || !empty($usageBySource);
-
-            if (!$hasRealUsage) {
-                unset($history[$materialId]);
-            }
+            if (!$material) continue;
+            $avgBookingPerProject = (float) MaterialPiece::query()->where('material_id', $materialId)->where('status', 'booked')->where('booked_at', '>=', now()->subMonths(3))->selectRaw('booked_for_project_id, SUM(panjang) as total')->groupBy('booked_for_project_id')->pluck('total')->avg();
+            $deadStockPieces = (int) MaterialPiece::query()->where('material_id', $materialId)->where('status', 'available')->where('created_at', '<=', now()->subDays(90))->count();
+            $usageBySource   = MaterialPiece::query()->where('material_id', $materialId)->whereIn('status', ['booked', 'used'])->where('booked_at', '>=', now()->subMonths(3))->selectRaw("sumber, COUNT(*) as jumlah")->groupBy('sumber')->pluck('jumlah', 'sumber')->toArray();
+            $wastedCuts      = (int) MaterialPiece::query()->where('material_id', $materialId)->where('status', 'available')->whereIn('sumber', ['split_auto_allocation', 'split_booking', 'split_booking_residue'])->where('panjang', '<', 20)->where('created_at', '<=', now()->subDays(60))->count();
+            $projectCount    = (int) MaterialPiece::query()->where('material_id', $materialId)->whereIn('status', ['booked', 'used'])->where('booked_at', '>=', now()->subMonths(3))->distinct('booked_for_project_id')->count('booked_for_project_id');
+            $history[$materialId] = ['material_name' => (string) $material->nama_material, 'avg_booking_per_project' => round($avgBookingPerProject, 2), 'dead_stock_pieces' => $deadStockPieces, 'usage_by_source' => $usageBySource, 'wasted_small_cuts' => $wastedCuts, 'projects_using_3months' => $projectCount];
+            if (!($projectCount > 0 || (float) $avgBookingPerProject > 0 || !empty($usageBySource))) unset($history[$materialId]);
         }
-
         return $history;
     }
 
-    /**
-     * @param  array<int, array<string, mixed>>  $kebutuhanItems
-     * @param  array<int, array<string, mixed>>  $materialsStock
-     * @return array<string, mixed>
-     */
-    private function askGeminiFullAnalysis(
-        int $projectId,
-        string $projectCode,
-        string $catatanTeknis,
-        array $kebutuhanItems,
-        array $materialsStock,
-        array $historicalContext = []
-    ): array {
+    private function askGeminiFullAnalysis(int $projectId, string $projectCode, string $catatanTeknis, array $kebutuhanItems, array $materialsStock, array $historicalContext = []): array
+    {
         $dataset = collect($kebutuhanItems)->map(function (array $item) use ($materialsStock): array {
             $materialId = (int) ($item['material_id'] ?? 0);
-            $stock = (array) ($materialsStock[$materialId] ?? []);
-
-            return [
-                'material_id' => $materialId,
-                'material_name' => (string) ($item['material_name'] ?? ('Material #' . $materialId)),
-                'dibutuhkan' => round((float) ($item['qty'] ?? 0), 2),
-                'satuan' => (string) ($item['satuan'] ?? 'unit'),
-                'available' => round((float) ($stock['available'] ?? 0), 2),
-                'pieces' => array_values(array_map(function (array $piece): array {
+            $stock      = (array) ($materialsStock[$materialId] ?? []);
+            $pieces = collect((array) ($stock['pieces'] ?? []))
+                ->sortBy(fn (array $piece): int => (int) ($piece['umur_hari'] ?? 0))
+                ->values()
+                ->map(function (array $piece): array {
                     return [
                         'id' => (int) ($piece['id'] ?? 0),
                         'panjang' => round((float) ($piece['panjang'] ?? 0), 2),
+                        'umur_hari' => (int) ($piece['umur_hari'] ?? 0),
                         'sumber' => (string) ($piece['sumber'] ?? '-'),
                         'rack_label' => (string) ($piece['rack_label'] ?? '-'),
-                        'umur_hari' => (int) ($piece['umur_hari'] ?? 0),
+                        'status' => (string) ($piece['status'] ?? 'available'),
                     ];
-                }, array_slice((array) ($stock['pieces'] ?? []), 0, 12))),
-            ];
-        })
-            ->filter(fn (array $row): bool => (int) ($row['material_id'] ?? 0) > 0 && (float) ($row['dibutuhkan'] ?? 0) > 0)
-            ->values()
-            ->all();
+                })
+                ->all();
 
-        if (empty($dataset)) {
-            throw new \RuntimeException('Tidak ada material kebutuhan valid untuk dikirim ke Gemini.');
-        }
+            return ['material_id' => $materialId, 'material_name' => (string) ($item['material_name'] ?? ('Material #' . $materialId)), 'dibutuhkan' => round((float) ($item['qty'] ?? 0), 2), 'satuan' => (string) ($item['satuan'] ?? 'unit'), 'available' => round((float) ($stock['available'] ?? 0), 2), 'pieces' => $pieces];
+        })->filter(fn (array $row): bool => (int) ($row['material_id'] ?? 0) > 0 && (float) ($row['dibutuhkan'] ?? 0) > 0)->values()->all();
 
-        $requiredMaterialIds = collect($dataset)
-            ->pluck('material_id')
-            ->map(fn ($id): string => (string) ((int) $id))
-            ->unique()
-            ->values()
-            ->all();
-
-        $dataJson = json_encode($dataset, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+        if (empty($dataset)) throw new \RuntimeException('Tidak ada material kebutuhan valid untuk dikirim ke Gemini.');
+        $requiredMaterialIds = collect($dataset)->pluck('material_id')->map(fn ($id): string => (string) ((int) $id))->unique()->values()->all();
+        $dataJson = json_encode($dataset, JSON_UNESCAPED_UNICODE);
         if (!is_string($dataJson) || $dataJson === '') {
             throw new \RuntimeException('Gagal menyiapkan payload full analysis untuk Gemini.');
         }
 
-        $catatanPrompt = trim($catatanTeknis) !== '' ? trim($catatanTeknis) : '(kosong)';
-        $historyJson = !empty($historicalContext)
-            ? json_encode($historicalContext, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
-            : '(belum ada data historis)';
+        $catatanPrompt = trim($catatanTeknis) !== '' ? trim($catatanTeknis) : '(kosong - tidak ada instruksi khusus)';
+        $historyCompact = collect($historicalContext)
+            ->mapWithKeys(function (array $row, $materialId): array {
+                return [
+                    (string) ((int) $materialId) => [
+                        'avg_booking_per_project' => round((float) ($row['avg_booking_per_project'] ?? 0), 2),
+                        'dead_stock_pieces' => (int) ($row['dead_stock_pieces'] ?? 0),
+                        'usage_by_source' => (array) ($row['usage_by_source'] ?? []),
+                        'wasted_small_cuts' => (int) ($row['wasted_small_cuts'] ?? 0),
+                        'projects_using_3months' => (int) ($row['projects_using_3months'] ?? 0),
+                    ],
+                ];
+            })
+            ->all();
+        $historyJson = json_encode($historyCompact, JSON_UNESCAPED_UNICODE);
+        if (!is_string($historyJson) || $historyJson === '') {
+            $historyJson = '{}';
+        }
 
+        $systemInstruction = 'Kamu adalah Inventory Math Expert. Balas hanya JSON valid tunggal. Aksi yang diizinkan: full_booking|partial|full_pr. ATURAN KETAT: (1) Jika manager meminta segmen tertentu (contoh 100,100,105), kamu WAJIB membagi alokasi_kabel per segmen sebagai entry terpisah, termasuk bila 2 segmen diambil dari piece yang sama. (2) ambil_panjang adalah panjang POTONGAN yang diambil, bukan total panjang piece. (3) Hitung sisa secara akurat, jangan halusinasi angka. (4) Gunakan FIFO sebagai prioritas saat memungkinkan. (5) Untuk full_booking/partial WAJIB isi alokasi_kabel berisi piece_id + ambil_panjang numerik. selected_piece_ids boleh tetap dikirim sebagai ringkasan. (6) Jika tanpa sambungan/no splice, require_no_joint wajib true dan requested_segments wajib terisi eksplisit. Jangan keluarkan markdown atau teks di luar JSON.';
         $prompt = <<<PROMPT
-Kamu adalah AI inventory analyst cerdas di gudang telekomunikasi.
+Proyek: {$projectCode} (ID {$projectId})
+Instruksi manager: {$catatanPrompt}
+Data material: {$dataJson}
+Histori ringkas: {$historyJson}
 
-PROYEK: {$projectCode} (ID: {$projectId})
-CATATAN TEKNIS MANAGER: "{$catatanPrompt}"
+    Aturan perusahaan yang harus diprioritaskan:
+    - Utamakan akurasi pemenuhan instruksi manager dibanding efisiensi sisa.
+    - Jika ada instruksi segmen tanpa sambungan, pilih piece sehingga setiap segmen bisa diambil utuh per segmen.
+    - Prioritas pemilihan piece: kepatuhan instruksi -> FIFO (umur lebih lama) -> minimalkan sisa tidak terpakai.
+    - Jangan pakai piece ID yang tidak ada pada Data material.
+    - Jika instruksi segmen adalah 100,100,105 maka alokasi_kabel wajib memiliki 3 baris take: 100, 100, 105 (tidak boleh digabung jadi 200 + 105).
 
-TUGAS: Analisis kebutuhan material proyek ini dan buat keputusan lengkap untuk setiap material. Kamu bertanggung jawab atas:
-A. Interpretasi instruksi manager (apakah ada aturan khusus?)
-B. Keputusan per material: booking dari stok / buat PR / kombinasi
-C. Pemilihan piece spesifik yang harus diambil dari gudang
-D. Alasan untuk setiap keputusan
-
-KONTEKS GUDANG:
-- Material kabel/fiber bisa dipotong sesuai kebutuhan
-- Material unit (CCTV, Battery, Radio) diambil utuh per unit
-- Sumber piece "split_*" = sisa potongan sebelumnya
-- Sumber "inbound_baru"/"opening_balance" = barang baru/utuh
-- Catatan manager bisa informal/singkatan (misal "jgn potong" = jangan potong, "roll utuh" = tidak boleh potongan)
-
-DATA KEBUTUHAN DAN STOK:
-{$dataJson}
-
-POLA HISTORIS GUDANG (3 BULAN TERAKHIR):
-{$historyJson}
-
-CARA MEMBACA DATA HISTORIS:
-- avg_booking_per_project: rata-rata qty yang dipakai per proyek. Gunakan untuk memperkirakan apakah sisa potongan masih berguna untuk proyek lain.
-- dead_stock_pieces: jumlah piece yang sudah lebih dari 90 hari tidak terpakai. Jika banyak, prioritaskan keluarkan stok lama.
-- usage_by_source: sumber mana yang paling sering terpakai. Jika split_* banyak terpakai berarti potongan masih laku. Jika jarang berarti potongan cenderung jadi waste.
-- wasted_small_cuts: potongan kecil (<20m) yang sudah lebih dari 60 hari tidak terpakai. Hindari bikin potongan kecil baru kalau bisa.
-- projects_using_3months: berapa banyak proyek yang pakai material ini. Jika sering dipakai, sisa potongan kemungkinan masih berguna.
-
-Gunakan data historis ini untuk keputusan yang LEBIH CERDAS:
-- Jika wasted_small_cuts tinggi: hindari motong yang menghasilkan sisa kecil, pilih piece yang pas
-- Jika dead_stock banyak: agresif keluarkan stok lama
-- Jika avg_booking rendah: sisa besar kemungkinan tidak terpakai juga
-- Jika material sering dipakai (projects_using tinggi): sisa masih berguna, boleh potong
-
-PANDUAN KEPUTUSAN:
-
-1. INSTRUKSI MANAGER
-   - Jika catatan menyebut "jangan potong"/"roll utuh"/"no cut" -> material kabel HANYA boleh diambil dari roll utuh, BUKAN potongan
-   - Jika tidak ada catatan soal potongan -> boleh potong
-
-2. KEPUTUSAN BOOKING vs PR
-   - Jika stok cukup -> full booking
-   - Jika stok sebagian -> booking yang ada, sisanya PR
-   - Jika stok kosong -> full PR
-   - JANGAN MENGHITUNG jumlah stok, gunakan field "available" yang sudah dihitung sistem
-
-3. PEMILIHAN PIECE (yang paling penting!)
-   - HABISKAN POTONGAN TIDAK BULET DULU (194m, 87m -> pakai duluan. 50m, 100m, 200m -> simpan untuk proyek lain)
-   - Sisa potongan (split_*) SEBELUM roll baru (inbound_baru)
-   - Ukuran terkecil yang masih cukup
-   - FIFO: yang lama di gudang keluar duluan (umur_hari terbesar)
-   - Pertimbangkan kualitas sisa: lebih baik sisa 50m yang berguna daripada sisa 3m yang waste
-   - Untuk material unit: pilih yang paling lama di gudang (FIFO)
-
-4. ALASAN HARUS NATURAL
-   - Tulis seperti rekan kerja yang menjelaskan, bukan template sistem
-   - Sebutkan spesifik kenapa piece itu dipilih
-   - Untuk unit: "Ambil unit yang sudah 30 hari di gudang, rotasi stok"
-   - Untuk kabel: "Pakai potongan 194m yang angkanya tidak bulet, lebih baik dihabiskan sekarang daripada potong roll baru 300m"
-
-FORMAT JAWABAN (WAJIB JSON, tanpa teks lain):
-{
-  "instruksi_manager": {
-    "tanpa_potongan": false,
-    "ringkas": "Tidak ada instruksi khusus soal potongan",
-    "alasan": "Catatan teknis kosong/tidak menyebut aturan potongan"
-  },
-  "ringkasan": "Ringkasan 1-2 kalimat untuk staff gudang",
-  "materials": {
-    "5": {
-      "aksi": "full_booking",
-      "qty_booking": 234,
-      "qty_pr": 0,
-      "selected_piece_ids": [79, 24],
-      "alasan_per_piece": {
-        "79": "Potongan 206m angka tidak bulet, habiskan dulu",
-        "24": "Cadangan dari stok lama 40 hari"
-      },
-      "overall_reason": "Pakai potongan 206m yang angkanya ganjil supaya gudang lebih rapi, daripada motong roll baru.",
-      "sisa_analysis": "Sisa potongan masih ukuran berguna.",
-      "pattern_insight": "Berdasarkan pola 3 bulan, potongan kecil material ini sering jadi waste, jadi pilih piece yang pas."
-    }
-  }
-}
-
-ATURAN KETAT:
-- JANGAN MENGHITUNG take_qty atau sisa, cukup pilih piece_id
-- piece_id HARUS dari daftar piece material yang bersangkutan
-- Alasan per piece MAKSIMAL 15 kata
-- overall_reason MAKSIMAL 2 kalimat, bahasa natural
-- Key "materials" pakai material_id sebagai string
-- qty_booking dan qty_pr AMBIL DARI field available yang sudah ada, jangan hitung sendiri
-- aksi: "full_booking" / "partial" / "full_pr"
+Output schema:
+    {"instruksi_manager":{"tanpa_potongan":false,"require_no_joint":false,"requested_segments":[100,100,100],"ringkas":"...","alasan":"..."},"ringkasan":"...","materials":{"<material_id>":{"aksi":"full_booking|partial|full_pr","selected_piece_ids":[1],"alokasi_kabel":[{"piece_id":1,"ambil_panjang":100,"alasan":"..."}],"alasan_per_piece":{"1":"..."},"overall_reason":"...","sisa_analysis":"..."}}}
 PROMPT;
 
         Log::info('Gemini full analysis - prompt dikirim', [
@@ -755,93 +600,45 @@ PROMPT;
             'materials_ids' => $requiredMaterialIds,
         ]);
 
-        $responseRaw = (string) $this->gemini->ask($prompt);
-        $responseClean = trim((string) preg_replace('/```json|```/i', '', $responseRaw));
+        $responseRaw = (string) $this->gemini->ask($prompt, $systemInstruction);
+        $responseClean = $this->extractJsonObjectFromText($responseRaw);
 
         Log::info('Gemini full analysis - raw response', [
             'project_id' => $projectId,
             'response_length' => strlen($responseRaw),
-            'response_preview' => mb_substr($responseClean, 0, 3000),
+            'response_preview' => mb_substr($responseClean, 0, 1200),
         ]);
 
         $decoded = json_decode($responseClean, true);
-
-        if (!is_array($decoded)) {
-            if (preg_match('/\{(?:[^{}]|(?R))*\}/s', $responseClean, $match)) {
-                $decoded = json_decode((string) $match[0], true);
-            }
+        if (is_array($decoded)) {
+            $decoded = $this->normalizeGeminiFullAnalysisResponse($decoded);
         }
 
         if ($this->isGeminiTransientErrorPayload($decoded)) {
             $retrySeconds = $this->extractGeminiRetrySeconds($decoded);
-            throw new \RuntimeException(
-                $retrySeconds > 0
-                    ? ('Gemini cooldown aktif ' . $retrySeconds . ' detik (rate limit/high demand).')
-                    : 'Gemini sementara tidak tersedia (rate limit/high demand).'
-            );
+            throw new \RuntimeException($retrySeconds > 0 ? ('Gemini cooldown aktif ' . $retrySeconds . ' detik (rate limit/high demand).') : 'Gemini sementara tidak tersedia (rate limit/high demand).');
         }
 
-        if (!$this->isValidGeminiFullAnalysisResponse($decoded, $requiredMaterialIds)) {
-            $compactPrompt = <<<PROMPT
-Kamu adalah AI inventory analyst.
+        if (is_array($decoded) && isset($decoded['status'])) {
+            $bodyStr = mb_strtolower((string) json_encode($decoded));
+            if (in_array((int) ($decoded['status'] ?? 0), [429, 503], true) && (str_contains($bodyStr, 'resource_exhausted') || str_contains($bodyStr, 'quota') || str_contains($bodyStr, 'billing'))) {
+                throw new \RuntimeException('Gemini quota habis: ' . ($decoded['error'] ?? 'RESOURCE_EXHAUSTED'));
+            }
+        }
 
-Analisis HANYA material yang ada di daftar ini (jangan tambah material lain):
-{$dataJson}
+        if (!$this->isValidGeminiFullAnalysisResponse($decoded, $requiredMaterialIds) && (bool) config('services.gemini.enable_compact_retry_prompt', false)) {
+            $compactPrompt = "Proyek: {$projectCode} (ID {$projectId}). Instruksi manager: {$catatanPrompt}. Data material: {$dataJson}. Histori ringkas: {$historyJson}. Balas JSON sesuai schema dan WAJIB memuat semua material_id pada data material.";
+            Log::warning('Gemini response belum valid, retry prompt ringkas.', ['project_id' => $projectId]);
 
-Catatan teknis manager: "{$catatanPrompt}"
-
-Output WAJIB JSON valid TANPA teks tambahan:
-{
-  "instruksi_manager": {
-    "tanpa_potongan": false,
-    "ringkas": "...",
-    "alasan": "..."
-  },
-  "ringkasan": "...",
-  "materials": {
-    "<material_id>": {
-      "aksi": "full_booking|partial|full_pr",
-      "selected_piece_ids": [1,2],
-      "alasan_per_piece": {"1":"..."},
-      "overall_reason": "...",
-      "sisa_analysis": "..."
-    }
-  }
-}
-
-ATURAN KETAT:
-- materials HARUS berisi SEMUA material_id dari daftar input
-- JANGAN hitung take_qty/sisa numerik
-- selected_piece_ids HARUS berasal dari piece di material yang sama
-- Jawaban ringkas, jangan panjang
-PROMPT;
-
-            Log::warning('Gemini full analysis response belum valid, retry prompt ringkas.', [
-                'project_id' => $projectId,
-                'required_material_ids' => $requiredMaterialIds,
-            ]);
-
-            $retryRaw = (string) $this->gemini->ask($compactPrompt);
-            $retryClean = trim((string) preg_replace('/```json|```/i', '', $retryRaw));
-
-            Log::info('Gemini full analysis - retry raw response', [
-                'project_id' => $projectId,
-                'response_length' => strlen($retryRaw),
-                'response_preview' => mb_substr($retryClean, 0, 3000),
-            ]);
-
+            $retryRaw = (string) $this->gemini->ask($compactPrompt, $systemInstruction);
+            $retryClean = $this->extractJsonObjectFromText($retryRaw);
             $retryDecoded = json_decode($retryClean, true);
-            if (!is_array($retryDecoded) && preg_match('/\{(?:[^{}]|(?R))*\}/s', $retryClean, $match)) {
-                $retryDecoded = json_decode((string) $match[0], true);
+            if (is_array($retryDecoded)) {
+                $retryDecoded = $this->normalizeGeminiFullAnalysisResponse($retryDecoded);
             }
 
             if ($this->isGeminiTransientErrorPayload(is_array($retryDecoded) ? $retryDecoded : null)) {
-                $retrySeconds = $this->extractGeminiRetrySeconds(is_array($retryDecoded) ? $retryDecoded : null);
-                throw new \RuntimeException(
-                    $retrySeconds > 0
-                        ? ('Gemini cooldown aktif ' . $retrySeconds . ' detik (rate limit/high demand).')
-                        : 'Gemini sementara tidak tersedia (rate limit/high demand).'
-                );
+                throw new \RuntimeException('Gemini sementara tidak tersedia saat retry.');
             }
 
             $decoded = is_array($retryDecoded) ? $retryDecoded : $decoded;
@@ -858,319 +655,177 @@ PROMPT;
         return $decoded;
     }
 
-    /**
-     * @param  array<string, mixed>|null  $decoded
-     * @param  array<int, string>  $requiredMaterialIds
-     */
+    private function extractJsonObjectFromText(string $responseRaw): string
+    {
+        $clean = trim((string) str_replace(['```json', '```'], '', $responseRaw));
+        $firstBrace = strpos($clean, '{');
+        $lastBrace = strrpos($clean, '}');
+
+        if ($firstBrace !== false && $lastBrace !== false && $lastBrace > $firstBrace) {
+            return substr($clean, $firstBrace, $lastBrace - $firstBrace + 1);
+        }
+
+        return $clean;
+    }
+
+    private function normalizeGeminiFullAnalysisResponse(array $decoded): array
+    {
+        $materials = $decoded['materials'] ?? null;
+        if (is_array($materials) && array_is_list($materials)) {
+            $mapped = [];
+            foreach ($materials as $node) {
+                if (!is_array($node)) {
+                    continue;
+                }
+
+                $materialId = (string) ((int) ($node['material_id'] ?? 0));
+                if ($materialId === '0') {
+                    continue;
+                }
+
+                $mapped[$materialId] = $node;
+            }
+
+            $decoded['materials'] = $mapped;
+        }
+
+        return $decoded;
+    }
+
     private function isValidGeminiFullAnalysisResponse(?array $decoded, array $requiredMaterialIds): bool
     {
-        if (!is_array($decoded)) {
-            return false;
-        }
-
+        if (!is_array($decoded)) return false;
         $materials = $decoded['materials'] ?? null;
-        if (!is_array($materials)) {
-            return false;
-        }
-
+        if (!is_array($materials)) return false;
         foreach ($requiredMaterialIds as $materialId) {
             $node = $materials[$materialId] ?? null;
-            if (!is_array($node)) {
-                return false;
-            }
-
-            $aksi = (string) ($node['aksi'] ?? '');
-            if (!in_array($aksi, ['full_booking', 'partial', 'full_pr'], true)) {
-                return false;
-            }
+            if (!is_array($node)) return false;
+            if (!in_array((string) ($node['aksi'] ?? ''), ['full_booking', 'partial', 'full_pr'], true)) return false;
         }
-
         return true;
     }
 
-    /**
-     * @param  array<string, mixed>|null  $decoded
-     */
-    private function isGeminiTransientErrorPayload(?array $decoded): bool
-    {
-        if (!is_array($decoded)) {
-            return false;
-        }
-
-        $status = (int) ($decoded['status'] ?? 0);
-        if (in_array($status, [429, 503], true)) {
-            return true;
-        }
-
-        $errorText = mb_strtolower(trim((string) ($decoded['error'] ?? '')));
-
-        return str_contains($errorText, 'rate')
-            || str_contains($errorText, 'quota')
-            || str_contains($errorText, 'unavailable')
-            || str_contains($errorText, 'cooldown');
-    }
-
-    /**
-     * @param  array<string, mixed>|null  $decoded
-     */
     private function extractGeminiRetrySeconds(?array $decoded): int
     {
-        if (!is_array($decoded)) {
-            return 0;
-        }
-
+        if (!is_array($decoded)) return 0;
         $retryAfter = (int) ($decoded['retry_after_seconds'] ?? 0);
-        if ($retryAfter > 0) {
-            return $retryAfter;
-        }
-
-        $retryDelay = data_get($decoded, 'body.error.details.2.retryDelay')
-            ?? data_get($decoded, 'error.details.2.retryDelay')
-            ?? data_get($decoded, 'retryDelay');
-
-        if (is_string($retryDelay) && preg_match('/(\d+)/', $retryDelay, $match)) {
-            return max(0, (int) $match[1]);
-        }
-
+        if ($retryAfter > 0) return $retryAfter;
+        $retryDelay = data_get($decoded, 'body.error.details.2.retryDelay') ?? data_get($decoded, 'error.details.2.retryDelay') ?? data_get($decoded, 'retryDelay');
+        if (is_string($retryDelay) && preg_match('/(\d+)/', $retryDelay, $match)) return max(0, (int) $match[1]);
         return 0;
     }
 
-    /**
-     * Analisa 1 material: cukup / sebagian / kosong
-     */
     private function analisaSatuItem(Material $material, float $dibutuhkan, int $projectId, bool $tanpaPotongan = false, string $alasanInstruksi = ''): array
     {
         $applyNoCut = $tanpaPotongan && $this->isNoCutRelevantMaterial($material);
-
         if ($applyNoCut) {
             $rollStandar = (float) ($material->default_roll_length ?? 0);
             $minimumUtuh = $rollStandar > 0 ? $rollStandar : $dibutuhkan;
-            $stokTersediaFaktual = (float) $material->available;
-            $stokSisaPotonganPieces = MaterialPiece::query()
-                ->where('material_id', $material->id)
-                ->where('status', 'available')
-                ->where('panjang', '<', $minimumUtuh)
-                ->orderByDesc('panjang')
-                ->pluck('panjang')
-                ->map(fn ($value) => (float) $value)
-                ->values()
-                ->all();
-
-            $stokSisaPotongan = array_sum($stokSisaPotonganPieces);
-            $stokSisaPotonganList = collect($stokSisaPotonganPieces)
-                ->take(6)
-                ->map(fn (float $value) => $this->formatQty($value))
-                ->values()
-                ->all();
-
-            $potonganBreakdown = empty($stokSisaPotonganList)
-                ? ''
-                : 'potongan tersedia ' . implode(' + ', $stokSisaPotonganList);
-
-            $stokUtuhCukup = MaterialPiece::query()
-                ->where('material_id', $material->id)
-                ->where('status', 'available')
-                ->whereIn('sumber', ['inbound_baru', 'opening_balance'])
-                ->where('panjang', '>=', $minimumUtuh)
-                ->exists();
-
-            return [
-                'material_id' => $material->id,
-                'nama_material' => $material->nama_material,
-                'dibutuhkan' => $dibutuhkan,
-                'available' => round($stokTersediaFaktual, 2),
-                'aksi' => $stokUtuhCukup ? 'full_booking' : 'full_pr',
-                'qty_booking' => $stokUtuhCukup ? $dibutuhkan : 0,
-                'qty_pr' => $stokUtuhCukup ? 0 : $dibutuhkan,
-                'tanpa_potongan' => true,
-                'stok_sisa_potongan' => $stokSisaPotongan,
-                'stok_sisa_potongan_list' => $stokSisaPotonganList,
-                'alasan_ai' => $stokUtuhCukup
-                    ? ('instruksi tidak boleh potongan, jadi sistem hanya memakai roll utuh yang memenuhi kebutuhan. ' . trim($alasanInstruksi))
-                    : ('instruksi tidak boleh potongan dan stok roll utuh tidak mencukupi' . ($stokSisaPotongan > 0 ? ', stok sisa ' . $this->formatQty($stokSisaPotongan) . ' tidak bisa dipakai' : '') . ($potonganBreakdown !== '' ? ', ' . $potonganBreakdown . ' tidak bisa dipakai' : '') . ', sehingga kebutuhan dialihkan ke PR. ' . trim($alasanInstruksi)),
-            ];
+            $stokTersediaFaktual    = (float) $material->available;
+            $stokSisaPotonganPieces = MaterialPiece::query()->where('material_id', $material->id)->where('status', 'available')->where('panjang', '<', $minimumUtuh)->orderByDesc('panjang')->pluck('panjang')->map(fn ($value) => (float) $value)->values()->all();
+            $stokSisaPotongan       = array_sum($stokSisaPotonganPieces);
+            $stokSisaPotonganList   = collect($stokSisaPotonganPieces)->take(6)->map(fn (float $value) => $this->formatQty($value))->values()->all();
+            $potonganBreakdown      = empty($stokSisaPotonganList) ? '' : 'potongan tersedia ' . implode(' + ', $stokSisaPotonganList);
+            $stokUtuhCukup          = MaterialPiece::query()->where('material_id', $material->id)->where('status', 'available')->whereIn('sumber', ['inbound_baru', 'opening_balance'])->where('panjang', '>=', $minimumUtuh)->exists();
+            return ['material_id' => $material->id, 'nama_material' => $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => round($stokTersediaFaktual, 2), 'aksi' => $stokUtuhCukup ? 'full_booking' : 'full_pr', 'qty_booking' => $stokUtuhCukup ? $dibutuhkan : 0, 'qty_pr' => $stokUtuhCukup ? 0 : $dibutuhkan, 'tanpa_potongan' => true, 'stok_sisa_potongan' => $stokSisaPotongan, 'stok_sisa_potongan_list' => $stokSisaPotonganList, 'alasan_ai' => $stokUtuhCukup ? ('instruksi tidak boleh potongan, jadi sistem hanya memakai roll utuh. ' . trim($alasanInstruksi)) : ('instruksi tidak boleh potongan dan stok roll utuh tidak mencukupi' . ($stokSisaPotongan > 0 ? ', stok sisa ' . $this->formatQty($stokSisaPotongan) . ' tidak bisa dipakai' : '') . ($potonganBreakdown !== '' ? ', ' . $potonganBreakdown . ' tidak bisa dipakai' : '') . ', sehingga kebutuhan dialihkan ke PR. ' . trim($alasanInstruksi))];
         }
-
         $available = $material->available;
-
-        if ($available >= $dibutuhkan) {
-            return [
-                'material_id'   => $material->id,
-                'nama_material' => $material->nama_material,
-                'dibutuhkan'    => $dibutuhkan,
-                'available'     => $available,
-                'aksi'          => 'full_booking',
-                'qty_booking'   => $dibutuhkan,
-                'qty_pr'        => 0,
-                'tanpa_potongan' => false,
-                'alasan_ai' => 'Karena stok tersedia mencukupi, kebutuhan dipenuhi dengan booking penuh tanpa PR.',
-            ];
-        } elseif ($available > 0) {
-            return [
-                'material_id'   => $material->id,
-                'nama_material' => $material->nama_material,
-                'dibutuhkan'    => $dibutuhkan,
-                'available'     => $available,
-                'aksi'          => 'partial',
-                'qty_booking'   => $available,
-                'qty_pr'        => $dibutuhkan - $available,
-                'tanpa_potongan' => false,
-                'alasan_ai' => 'Karena stok hanya mencukupi sebagian, sistem booking sesuai stok dan sisanya dibuat PR.',
-            ];
-        } else {
-            return [
-                'material_id'   => $material->id,
-                'nama_material' => $material->nama_material,
-                'dibutuhkan'    => $dibutuhkan,
-                'available'     => 0,
-                'aksi'          => 'full_pr',
-                'qty_booking'   => 0,
-                'qty_pr'        => $dibutuhkan,
-                'tanpa_potongan' => false,
-                'alasan_ai' => 'Karena stok kosong, seluruh kebutuhan material dibuatkan PR.',
-            ];
-        }
-    }
-
-    /**
-     * Minta Gemini bikin summary yang readable untuk Staff (legacy, tidak dipanggil dari flow utama)
-     */
-    private function mintaSummaryDariGemini(array $hasilAnalisis, int $projectId, string $catatanTeknis = '', bool $tanpaPotonganDariPrompt = false, array $instruksiAi = []): string
-    {
-        $dataJson = json_encode($hasilAnalisis, JSON_PRETTY_PRINT);
-        $catatanPrompt = $catatanTeknis !== '' ? $catatanTeknis : '(kosong)';
-        $aturanPotongan = $tanpaPotonganDariPrompt
-            ? 'Instruksi Manager Teknik mengarah ke TANPA POTONGAN.'
-            : 'Tidak ada instruksi eksplisit TANPA POTONGAN.';
-        $instruksiRingkas = (string) ($instruksiAi['ringkas'] ?? '-');
-
-        $prompt = <<<PROMPT
-        Kamu adalah asisten sistem inventory gudang yang cerdas.
-        
-        Ada proyek baru (Project ID: {$projectId}) yang membutuhkan material.
-        Catatan teknis dari Manager Teknik: {$catatanPrompt}
-        Interpretasi aturan potongan: {$aturanPotongan}
-        Ringkasan instruksi terstruktur: {$instruksiRingkas}
-        Berikut hasil analisis ketersediaan stok:
-        
-        {$dataJson}
-        
-        Berikan ringkasan yang JELAS dan SINGKAT dalam Bahasa Indonesia untuk Staff Administrasi Gudang.
-        PENTING: Dilarang membuat angka baru. Semua angka harus persis dari data analisis di atas.
-        Gaya bahasa: natural, human-friendly, seperti penjelasan rekan kerja operasional.
-        Jangan kaku seperti template sistem, tapi juga jangan terlalu chatty.
-        Batasan: maksimal 1-2 kalimat per item, hindari filler seperti "btw", "hehe", "tentunya", "sangat-sangat".
-        Untuk setiap item rekomendasi, tulis detail ringkas dengan pola salah satu ini:
-        - "Butuh X, tersedia total Z, dibooking A, dikarenakan ..."
-        - "Butuh X, tersedia total Z, generate PR B, dikarenakan ..."
-        - "Butuh X, tersedia total Z, dibooking A, generate PR B, dikarenakan ..."
-        Bagian "dikarenakan ..." wajib menjelaskan alasan keputusan secara praktis sesuai kondisi stok dan aturan project.
-        
-        Format output HARUS berupa JSON seperti ini (jangan tambah teks lain di luar JSON):
-        {
-            "ringkasan": "Teks ringkasan singkat di sini",
-            "rekomendasi": [
-                {
-                    "material": "nama material",
-                    "aksi": "booking / buat PR / booking sebagian + PR",
-                    "detail": "detail singkat"
-                }
-            ],
-            "perlu_konfirmasi": true
-        }
-        PROMPT;
-
-        $responseRaw = $this->gemini->ask($prompt);
-        $responseClean = preg_replace('/```json|```/', '', $responseRaw);
-
-        return trim($responseClean);
+        if ($available >= $dibutuhkan) return ['material_id' => $material->id, 'nama_material' => $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => $available, 'aksi' => 'full_booking', 'qty_booking' => $dibutuhkan, 'qty_pr' => 0, 'tanpa_potongan' => false, 'alasan_ai' => 'Karena stok tersedia mencukupi, kebutuhan dipenuhi dengan booking penuh tanpa PR.'];
+        if ($available > 0) return ['material_id' => $material->id, 'nama_material' => $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => $available, 'aksi' => 'partial', 'qty_booking' => $available, 'qty_pr' => $dibutuhkan - $available, 'tanpa_potongan' => false, 'alasan_ai' => 'Karena stok hanya mencukupi sebagian, sistem booking sesuai stok dan sisanya dibuat PR.'];
+        return ['material_id' => $material->id, 'nama_material' => $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => 0, 'aksi' => 'full_pr', 'qty_booking' => 0, 'qty_pr' => $dibutuhkan, 'tanpa_potongan' => false, 'alasan_ai' => 'Karena stok kosong, seluruh kebutuhan material dibuatkan PR.'];
     }
 
     private function parseInstruksiOperasionalDariCatatan(string $catatanTeknis, int $projectId): array
     {
-        $text = trim($catatanTeknis);
-        unset($projectId);
+        $text = trim($catatanTeknis); unset($projectId);
+        if ($text === '') return ['tanpa_potongan' => false, 'require_no_joint' => false, 'requested_segments' => [], 'ringkas' => 'Tidak ada instruksi khusus.', 'alasan' => '', 'sumber' => 'fallback_empty', 'confidence' => 'rendah', 'preferensi_sumber' => 'auto', 'preferensi_umur_stok' => 'lama', 'preferred_piece_ids' => [], 'preferred_rack_labels' => [], 'preferred_rack_ids' => []];
 
-        if ($text === '') {
-            return [
-                'tanpa_potongan' => false,
-                'ringkas' => 'Tidak ada instruksi khusus.',
-                'alasan' => '',
-                'sumber' => 'fallback_empty',
-                'confidence' => 'rendah',
-            ];
-        }
-
-        if ((bool) preg_match('/boleh\s*potong|boleh\s*potongan|potong\s*aja|pakai\s*potongan|gunakan\s*potongan/i', $text)) {
-            return [
-                'tanpa_potongan' => false,
-                'ringkas' => 'Fallback regex: catatan mengizinkan penggunaan potongan.',
-                'alasan' => 'Terdeteksi frasa eksplisit yang mengizinkan potongan.',
-                'sumber' => 'fallback_regex_allow_cut',
-                'confidence' => 'sedang',
-            ];
-        }
-
+        $allowCut = (bool) preg_match('/boleh\s*potong|boleh\s*potongan|potong\s*aja|pakai\s*potongan|gunakan\s*potongan/i', $text);
         $fallbackNoCut = (bool) preg_match('/jangan[^\n\r]{0,40}potong|jgn[^\n\r]{0,40}potong|tanpa\s*potong|tnp\s*potong|harus\s*utuh|wajib\s*utuh|roll\s*utuh|full\s*roll|no\s*cut|no\s*splice|tidak\s*boleh\s*sambung|ga\s*boleh\s*sambung|nggak\s*boleh\s*sambung|utuh/i', $text);
+        $requireNoJoint = (bool) preg_match('/tanpa\s*sambung|tidak\s*boleh\s*sambung|jangan\s*sambung|no\s*splice|tanpa\s*splice/i', $text);
+        $requestedSegments = $this->extractRequestedSegmentsFromText($text);
+        $looksLikeSegmentDemand = !empty($requestedSegments)
+            && (bool) preg_match('/\b(\d+)\s*(pcs|piece|potongan)\b|\bjadi\s*\d+\s*(pcs|piece|potongan)\b|\bpotongan\b/i', $text);
+
+        if (!$requireNoJoint && $looksLikeSegmentDemand) {
+            $requireNoJoint = true;
+        }
+
+        preg_match_all('/(?:piece|id)\s*#?\s*(\d+)/i', $text, $pieceMatches);
+        $preferredPieceIds = collect($pieceMatches[1] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->unique()->values()->all();
+
+        preg_match_all('/rak\s*([a-z0-9\-]+)/i', $text, $rackMatches);
+        $preferredRackLabels = collect($rackMatches[1] ?? [])->map(fn ($label): string => strtoupper(trim((string) $label)))->filter()->unique()->values()->all();
+        $preferredRackIds = [];
+        if (!empty($preferredRackLabels)) {
+            $preferredRackIds = ShelfLocation::query()->get(['id', 'kode_lokasi'])
+                ->filter(fn ($row): bool => in_array(strtoupper(trim((string) ($row->kode_lokasi ?? ''))), $preferredRackLabels, true))
+                ->pluck('id')
+                ->map(fn ($id): int => (int) $id)
+                ->values()
+                ->all();
+        }
+
+        $preferensiSumber = 'auto';
+        if ((bool) preg_match('/(pakai|gunakan|prioritas|utamakan)[^\n\r]{0,40}(potongan|sisa)/i', $text)) {
+            $preferensiSumber = 'potongan';
+        } elseif ((bool) preg_match('/(pakai|gunakan|prioritas|utamakan)[^\n\r]{0,50}(roll\s*baru|inbound\s*baru|barang\s*baru|stok\s*baru|utuh\s*baru)/i', $text)) {
+            $preferensiSumber = 'baru';
+        }
+
+        $preferensiUmur = 'lama';
+        if ((bool) preg_match('/(yang\s*)?paling\s*baru|baru\s*datang|lifo|terbaru/i', $text)) {
+            $preferensiUmur = 'baru';
+        } elseif ((bool) preg_match('/(yang\s*)?paling\s*lama|stok\s*lama|fifo|terlama/i', $text)) {
+            $preferensiUmur = 'lama';
+        }
 
         return [
-            'tanpa_potongan' => $fallbackNoCut,
-            'ringkas' => $fallbackNoCut
-                ? 'Fallback regex: terdeteksi instruksi tanpa potongan.'
-                : 'Fallback regex: tidak terdeteksi instruksi tanpa potongan.',
+            'tanpa_potongan' => $allowCut ? false : $fallbackNoCut,
+            'require_no_joint' => $requireNoJoint,
+            'requested_segments' => $requestedSegments,
+            'ringkas' => $allowCut
+                ? 'Fallback regex: catatan mengizinkan penggunaan potongan dengan preferensi manager.'
+                : ($fallbackNoCut
+                    ? 'Fallback regex: terdeteksi instruksi tanpa potongan + preferensi manager.'
+                    : 'Fallback regex: gunakan preferensi manager untuk pemilihan stok.'),
             'alasan' => 'Fallback lokal saat classifier AI tidak memberi output terstruktur.',
-            'sumber' => 'fallback_regex',
-            'confidence' => 'rendah',
+            'sumber' => $allowCut ? 'fallback_regex_allow_cut' : 'fallback_regex',
+            'confidence' => $allowCut ? 'sedang' : 'rendah',
+            'preferensi_sumber' => $preferensiSumber,
+            'preferensi_umur_stok' => $preferensiUmur,
+            'preferred_piece_ids' => $preferredPieceIds,
+            'preferred_rack_labels' => $preferredRackLabels,
+            'preferred_rack_ids' => $preferredRackIds,
         ];
     }
 
     private function sinkronTaskUntukStaff(string $summaryJson, int $projectId, array $detail, array $instruksiAi = []): void
     {
         $decoded = json_decode($summaryJson, true);
-        $project = Project::query()
-            ->find($projectId, ['id', 'kode_proyek', 'catatan_teknis']);
-
-        $projectCode = (string) ($project?->kode_proyek ?: "#{$projectId}");
+        $project = Project::query()->find($projectId, ['id', 'kode_proyek', 'catatan_teknis']);
+        $projectCode               = (string) ($project?->kode_proyek ?: "#{$projectId}");
         $projectSpecialInstruction = trim((string) ($project?->catatan_teknis ?? ''));
+        if (!is_array($decoded)) $decoded = ['ringkasan' => 'AI summary tidak valid, gunakan hasil analisis detail.', 'rekomendasi' => [], 'perlu_konfirmasi' => true];
+        $decoded['rekomendasi'] = $this->normalisasiRekomendasi($decoded['rekomendasi'] ?? [], $detail);
+        if (blank($decoded['ringkasan'] ?? null)) $decoded['ringkasan'] = 'Silakan review rekomendasi booking/PR dari AI untuk project ini.';
 
-        if (!is_array($decoded)) {
-            $decoded = [
-                'ringkasan' => 'AI summary tidak valid, gunakan hasil analisis detail.',
-                'rekomendasi' => [],
-                'perlu_konfirmasi' => true,
-            ];
+        $payload = ['project_id' => $projectId, 'project_code' => $projectCode, 'project_special_instruction' => $projectSpecialInstruction, 'detail' => $detail, 'items' => $this->buildPerMaterialItemsPayload($detail), 'ai_summary' => $decoded, 'ai_instruction' => ['tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false), 'require_no_joint' => (bool) ($instruksiAi['require_no_joint'] ?? false), 'requested_segments' => collect($instruksiAi['requested_segments'] ?? [])->map(fn ($value): float => round((float) $value, 2))->filter(fn (float $value): bool => $value > 0)->values()->all(), 'ringkas' => (string) ($instruksiAi['ringkas'] ?? ''), 'alasan' => (string) ($instruksiAi['alasan'] ?? ''), 'sumber' => (string) ($instruksiAi['sumber'] ?? 'unknown'), 'confidence' => (string) ($instruksiAi['confidence'] ?? 'rendah'), 'preferensi_sumber' => (string) ($instruksiAi['preferensi_sumber'] ?? 'auto'), 'preferensi_umur_stok' => (string) ($instruksiAi['preferensi_umur_stok'] ?? 'lama'), 'preferred_piece_ids' => collect($instruksiAi['preferred_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->values()->all(), 'preferred_rack_labels' => collect($instruksiAi['preferred_rack_labels'] ?? [])->map(fn ($label): string => strtoupper(trim((string) $label)))->filter()->values()->all()], 'approval_trail' => ['staff' => null, 'manager' => null, 'finance' => null], 'last_synced_at' => now()->toDateTimeString()];
+
+        $taskPending = Task::query()->where('type', 'ai_booking_suggestion')->where('related_type', 'project')->where('related_id', $projectId)->where('status', 'pending')->orderByDesc('id')->get();
+        $taskTarget  = $taskPending->first();
+        if ($taskPending->count() > 1) { $taskPending->slice(1)->each(function (Task $task) { $p = $task->payload ?? []; data_set($p, 'superseded', true); data_set($p, 'superseded_at', now()->toDateTimeString()); $task->update(['status' => 'done', 'handled_at' => now(), 'message' => 'Task ini digantikan oleh task AI terbaru.', 'payload' => $p]); }); }
+        if ($taskTarget) { $taskTarget->update(['title' => "AI: Konfirmasi Kebutuhan Material Proyek {$projectCode}", 'message' => $decoded['ringkasan'] ?? 'AI menyarankan booking/PR untuk proyek baru', 'payload' => $payload]); Log::info("AI task di-update untuk Project #{$projectId}"); return; }
+        Task::create(['for_role' => 'Staff Administrasi Gudang', 'type' => 'ai_booking_suggestion', 'title' => "AI: Konfirmasi Kebutuhan Material Proyek {$projectCode}", 'message' => $decoded['ringkasan'] ?? 'AI menyarankan booking/PR untuk proyek baru', 'payload' => $payload, 'status' => 'pending', 'related_id' => $projectId, 'related_type' => 'project']);
+        Log::info("AI task dibuat untuk Project #{$projectId}");
+    }
+
+    private function sinkronTaskSedangDiproses(int $projectId, string $projectCode, string $catatanTeknis, ?string $message = null): void
+    {
+        $ringkasan = trim((string) $message);
+        if ($ringkasan === '') {
+            $ringkasan = 'AI sedang memproses kebutuhan terbaru project. Mohon tunggu sebentar, task akan ter-update otomatis.';
         }
-
-        $decoded['rekomendasi'] = $this->normalisasiRekomendasi(
-            $decoded['rekomendasi'] ?? [],
-            $detail,
-        );
-
-        if (blank($decoded['ringkasan'] ?? null)) {
-            $decoded['ringkasan'] = 'Silakan review rekomendasi booking/PR dari AI untuk project ini.';
-        }
-
-        $payload = [
-            'project_id'   => $projectId,
-            'project_code' => $projectCode,
-            'project_special_instruction' => $projectSpecialInstruction,
-            'detail'       => $detail,
-            'items'        => $this->buildPerMaterialItemsPayload($detail),
-            'ai_summary'   => $decoded,
-            'ai_instruction' => [
-                'tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false),
-                'ringkas' => (string) ($instruksiAi['ringkas'] ?? ''),
-                'alasan' => (string) ($instruksiAi['alasan'] ?? ''),
-                'sumber' => (string) ($instruksiAi['sumber'] ?? 'unknown'),
-                'confidence' => (string) ($instruksiAi['confidence'] ?? 'rendah'),
-            ],
-            'approval_trail' => [
-                'staff' => null,
-                'manager' => null,
-                'finance' => null,
-            ],
-            'last_synced_at' => now()->toDateTimeString(),
-        ];
 
         $taskPending = Task::query()
             ->where('type', 'ai_booking_suggestion')
@@ -1178,298 +833,686 @@ PROMPT;
             ->where('related_id', $projectId)
             ->where('status', 'pending')
             ->orderByDesc('id')
-            ->get();
+            ->first();
 
-        $taskTarget = $taskPending->first();
+        $basePayload = [
+            'project_id' => $projectId,
+            'project_code' => $projectCode,
+            'project_special_instruction' => trim($catatanTeknis),
+            'detail' => [],
+            'items' => [],
+            'ai_summary' => [
+                'ringkasan' => $ringkasan,
+                'rekomendasi' => [],
+                'perlu_konfirmasi' => true,
+            ],
+            'last_synced_at' => now()->toDateTimeString(),
+        ];
 
-        if ($taskPending->count() > 1) {
-            $taskPending->slice(1)->each(function (Task $task) {
-                $payload = $task->payload ?? [];
-                data_set($payload, 'superseded', true);
-                data_set($payload, 'superseded_at', now()->toDateTimeString());
-
-                $task->update([
-                    'status' => 'done',
-                    'handled_at' => now(),
-                    'message' => 'Task ini digantikan oleh task AI terbaru untuk project yang sama.',
-                    'payload' => $payload,
-                ]);
-            });
-        }
-
-        if ($taskTarget) {
-            $taskTarget->update([
+        if ($taskPending) {
+            $payload = is_array($taskPending->payload) ? $taskPending->payload : [];
+            $payload = array_merge($payload, $basePayload);
+            $taskPending->update([
                 'title' => "AI: Konfirmasi Kebutuhan Material Proyek {$projectCode}",
-                'message' => $decoded['ringkasan'] ?? 'AI menyarankan booking/PR untuk proyek baru',
+                'message' => $ringkasan,
                 'payload' => $payload,
             ]);
-
-            Log::info("AI task di-update untuk Project #{$projectId}");
             return;
         }
 
         Task::create([
-            'for_role'     => 'Staff Administrasi Gudang',
-            'type'         => 'ai_booking_suggestion',
-            'title'        => "AI: Konfirmasi Kebutuhan Material Proyek {$projectCode}",
-            'message'      => $decoded['ringkasan'] ?? 'AI menyarankan booking/PR untuk proyek baru',
-            'payload'      => $payload,
-            'status'       => 'pending',
-            'related_id'   => $projectId,
+            'for_role' => 'Staff Administrasi Gudang',
+            'type' => 'ai_booking_suggestion',
+            'title' => "AI: Konfirmasi Kebutuhan Material Proyek {$projectCode}",
+            'message' => $ringkasan,
+            'payload' => $basePayload,
+            'status' => 'pending',
+            'related_id' => $projectId,
             'related_type' => 'project',
         ]);
-
-        Log::info("AI task dibuat untuk Project #{$projectId}");
     }
 
     private function buildPerMaterialItemsPayload(array $detail): array
     {
-        return collect($detail)
-            ->map(function (array $row): array {
-                $materialId = (int) ($row['material_id'] ?? 0);
-                $dibutuhkan = (float) ($row['dibutuhkan'] ?? 0);
-                $materialName = (string) ($row['nama_material'] ?? ('Material #' . $materialId));
-                $material = $materialId > 0 ? Material::query()->find($materialId) : null;
-                $satuan = (string) ($material?->satuan ?: 'unit');
+        return collect($detail)->map(function (array $row): array {
+            $materialId = (int) ($row['material_id'] ?? 0); $dibutuhkan = (float) ($row['dibutuhkan'] ?? 0);
+            $material   = $materialId > 0 ? Material::query()->find($materialId) : null;
+            $satuan = (string) ($material?->satuan ?: 'unit');
+            $recommendedPieces = is_array($row['recommended_pieces'] ?? null) ? array_values($row['recommended_pieces']) : [];
+            $reason = trim((string) ($row['alasan_ai'] ?? ''));
 
-                $recommendedIds = collect($row['recommended_piece_ids'] ?? [])
-                    ->map(fn ($id): int => (int) $id)
-                    ->filter(fn (int $id): bool => $id > 0)
-                    ->values()
-                    ->all();
+            if ($reason === '') {
+                $reason = $this->buildSystemReasonFromPieces(
+                    materialName: (string) ($row['nama_material'] ?? ('Material #' . $materialId)),
+                    satuan: $satuan,
+                    dibutuhkan: $dibutuhkan,
+                    qtyBooking: (float) ($row['qty_booking'] ?? 0),
+                    qtyPr: (float) ($row['qty_pr'] ?? 0),
+                    chosenPieces: $recommendedPieces,
+                    requestedSegments: [],
+                    requireNoJoint: false,
+                );
+            }
 
-                $recommendedPieces = is_array($row['recommended_pieces'] ?? null)
-                    ? array_values($row['recommended_pieces'])
-                    : [];
+            return ['material_id' => $materialId, 'material_name' => (string) ($row['nama_material'] ?? ('Material #' . $materialId)), 'dibutuhkan' => round($dibutuhkan, 2), 'satuan' => $satuan, 'available_qty' => round((float) ($row['available'] ?? $row['available_qty'] ?? 0), 2), 'recommended_booking_qty' => round((float) ($row['qty_booking'] ?? 0), 2), 'recommended_pr_qty' => round((float) ($row['qty_pr'] ?? 0), 2), 'recommended_piece_ids' => collect($row['recommended_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->values()->all(), 'recommended_qty' => round((float) ($row['recommended_qty'] ?? ($row['qty_booking'] ?? 0)), 2), 'recommended_pieces' => $recommendedPieces, 'tanpa_potongan' => (bool) ($row['tanpa_potongan'] ?? false), 'ai_reason' => $reason, 'status' => 'pending'];
+        })->values()->all();
+    }
 
-                $recommendedQty = round((float) ($row['recommended_qty'] ?? ($row['qty_booking'] ?? 0)), 2);
+    /**
+     * Build reason text from final PHP allocation so explanation always matches selected pieces.
+     *
+     * @param  array<int, array<string, mixed>>  $chosenPieces
+     * @param  array<int, float|int|string>  $requestedSegments
+     */
+    private function buildSystemReasonFromPieces(
+        string $materialName,
+        string $satuan,
+        float $dibutuhkan,
+        float $qtyBooking,
+        float $qtyPr,
+        array $chosenPieces,
+        array $requestedSegments,
+        bool $requireNoJoint,
+    ): string {
+        $qtyNeedText = $this->formatQty($dibutuhkan) . ' ' . $satuan;
+        $qtyBookText = $this->formatQty($qtyBooking) . ' ' . $satuan;
+        $qtyPrText = $this->formatQty($qtyPr) . ' ' . $satuan;
 
-                $reason = trim((string) ($row['alasan_ai'] ?? ''));
-                if ($reason === '') {
-                    $reason = 'Belum ada piece available yang cocok untuk kebutuhan ini.';
+        if ($qtyBooking <= 0.00001) {
+            return "Sistem PHP tidak menemukan piece yang bisa dibooking untuk {$materialName}. Seluruh kebutuhan {$qtyNeedText} dialihkan ke PR ({$qtyPrText}).";
+        }
+
+        $pieceCount = count($chosenPieces);
+        $segmentsText = collect($requestedSegments)
+            ->map(fn ($segment): float => round((float) $segment, 2))
+            ->filter(fn (float $segment): bool => $segment > 0)
+            ->map(fn (float $segment): string => $this->formatQty($segment) . 'm')
+            ->values()
+            ->all();
+
+        $pieceLines = collect($chosenPieces)
+            ->map(function (array $piece): string {
+                $pieceId = (int) ($piece['id'] ?? 0);
+                $length = (float) ($piece['panjang'] ?? 0);
+                $take = (float) ($piece['take_qty'] ?? 0);
+                $left = max(0, $length - $take);
+                $rack = (string) ($piece['rack_label'] ?? '-');
+
+                if ($take + 0.00001 < $length) {
+                    return 'Piece #' . $pieceId . ' potong ' . $this->formatQty($take) . 'm dari ' . $this->formatQty($length) . 'm (sisa ' . $this->formatQty($left) . 'm) di Rak ' . $rack;
                 }
 
+                return 'Piece #' . $pieceId . ' ambil utuh ' . $this->formatQty($length) . 'm di Rak ' . $rack;
+            })
+            ->filter(fn (string $line): bool => trim($line) !== '')
+            ->values()
+            ->all();
+
+        $head = "Sistem PHP mengalokasikan {$pieceCount} piece untuk {$materialName}: booking {$qtyBookText} dari kebutuhan {$qtyNeedText}.";
+        if ($qtyPr > 0.00001) {
+            $head .= ' Sisa kebutuhan masuk PR ' . $qtyPrText . '.';
+        }
+
+        if ($requireNoJoint && !empty($segmentsText)) {
+            $head .= ' Target segmen tanpa sambungan: ' . implode(' + ', $segmentsText) . '.';
+        }
+
+        if (!empty($pieceLines)) {
+            $head .= ' ' . implode('. ', $pieceLines) . '.';
+        }
+
+        return trim($head);
+    }
+
+    /**
+     * Keep Gemini as primary explanation source, then normalize wording so it stays in sync with final allocation.
+     *
+     * @param  array<string, mixed>  $item
+     * @param  array<int, array<string, mixed>>  $chosenPieces
+     * @param  array<int, float|int|string>  $requestedSegments
+     */
+    private function buildGeminiPrimarySyncedReason(
+        string $rawReason,
+        array $item,
+        string $materialName,
+        string $satuan,
+        float $dibutuhkan,
+        float $qtyBooking,
+        float $qtyPr,
+        array $chosenPieces,
+        array $requestedSegments,
+        bool $requireNoJoint,
+    ): string {
+        $strategicReason = trim((string) preg_replace('/\b\d+(?:[\.,]\d+)?\s*(?:m|meter|meters|piece|pcs|roll|#\d+)?\b/iu', '', $rawReason));
+        $strategicReason = trim((string) preg_replace('/\s+/', ' ', str_replace(['..', ' .', '. .'], '.', $strategicReason)));
+        if ($strategicReason === '') {
+            $strategicReason = $this->normalizeReasonFromLlm('', 'pemilihan mengikuti instruksi manager dan kondisi stok aktual');
+        }
+
+        $segmentsInfo = '';
+        if ($requireNoJoint && !empty($requestedSegments)) {
+            $segmentsInfo = 'Memenuhi instruksi tanpa sambungan: ' . implode('m + ', collect($requestedSegments)->map(fn ($v): string => $this->formatQty((float) $v))->all()) . 'm. ';
+        }
+
+        $pieceDetails = collect($chosenPieces)
+            ->map(function (array $piece): string {
+                $id = (int) ($piece['id'] ?? 0);
+                $len = $this->formatQty((float) ($piece['panjang'] ?? 0));
+                $take = $this->formatQty((float) ($piece['take_qty'] ?? 0));
+
+                return "Piece #{$id} ({$len}m) dipotong {$take}m";
+            })
+            ->filter(fn (string $line): bool => trim($line) !== '')
+            ->implode(', ');
+
+        if ($pieceDetails === '') {
+            return $this->buildSystemReasonFromPieces(
+                materialName: $materialName,
+                satuan: $satuan,
+                dibutuhkan: $dibutuhkan,
+                qtyBooking: $qtyBooking,
+                qtyPr: $qtyPr,
+                chosenPieces: $chosenPieces,
+                requestedSegments: $requestedSegments,
+                requireNoJoint: $requireNoJoint,
+            );
+        }
+
+        return 'Analisis AI: ' . rtrim($strategicReason, '. ') . '. Detail alokasi sistem: ' . $segmentsInfo . $pieceDetails . '.';
+    }
+
+    /**
+     * @param  array<string, mixed>  $materialGemini
+     * @return array<int, array{piece_id:int,take_qty:float,reason:string}>
+     */
+    private function extractGeminiPieceAllocations(array $materialGemini): array
+    {
+        $raw = $materialGemini['alokasi_kabel'] ?? $materialGemini['allocations'] ?? [];
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        return collect($raw)
+            ->filter(fn ($row): bool => is_array($row))
+            ->map(function (array $row): array {
+                $pieceId = (int) ($row['piece_id'] ?? $row['id'] ?? 0);
+                $takeQty = round((float) ($row['ambil_panjang'] ?? $row['take'] ?? $row['take_qty'] ?? 0), 2);
+                $reason = trim((string) ($row['alasan'] ?? $row['reason'] ?? ''));
+
                 return [
-                    'material_id' => $materialId,
-                    'material_name' => $materialName,
-                    'dibutuhkan' => round($dibutuhkan, 2),
-                    'satuan' => $satuan,
-                    'available_qty' => round((float) ($row['available'] ?? $row['available_qty'] ?? 0), 2),
-                    'recommended_booking_qty' => round((float) ($row['qty_booking'] ?? 0), 2),
-                    'recommended_pr_qty' => round((float) ($row['qty_pr'] ?? 0), 2),
-                    'recommended_piece_ids' => $recommendedIds,
-                    'recommended_qty' => $recommendedQty,
-                    'recommended_pieces' => $recommendedPieces,
-                    'ai_reason' => $reason,
-                    'status' => 'pending',
+                    'piece_id' => $pieceId,
+                    'take_qty' => $takeQty,
+                    'reason' => $reason,
                 ];
             })
+            ->filter(fn (array $row): bool => ($row['piece_id'] ?? 0) > 0 && ($row['take_qty'] ?? 0) > 0)
             ->values()
             ->all();
     }
 
     /**
-     * Legacy: recommend pieces for all materials via separate Gemini call.
-     * Tidak dipanggil dari flow utama, dipertahankan untuk backward compatibility.
+     * @param  array<int, array{piece_id:int,take_qty:float,reason:string}>  $allocations
+     * @param  array<int, float|int|string>  $requestedSegments
+     * @return array{chosen: array<int, array<string, mixed>>, remaining: float}
      */
-    private function recommendPiecesForAllMaterials(array $detail): array
-    {
-        // Method ini dipertahankan untuk backward compatibility.
-        // Flow utama sekarang menggunakan askGeminiFullAnalysis().
-        return [];
-    }
+    private function buildChosenPiecesFromGeminiAllocations(
+        array $allocations,
+        \Illuminate\Support\Collection $pieceById,
+        float $qtyBooking,
+        bool $requireNoJoint = false,
+        array $requestedSegments = [],
+    ): array {
+        if (empty($allocations) || $qtyBooking <= 0) {
+            return ['chosen' => [], 'remaining' => $qtyBooking];
+        }
 
-    /**
-     * Legacy: ask Gemini for all pieces selection via separate call.
-     * Tidak dipanggil dari flow utama, dipertahankan untuk backward compatibility.
-     */
-    private function askGeminiForAllPiecesSelection(array $materialsData, string $satuan): array
-    {
-        // Method ini dipertahankan untuk backward compatibility.
-        // Flow utama sekarang menggunakan askGeminiFullAnalysis().
-        return [];
-    }
+        $allocTotal = round((float) collect($allocations)->sum(fn (array $row): float => (float) ($row['take_qty'] ?? 0)), 2);
+        if (abs($allocTotal - round($qtyBooking, 2)) > 0.1) {
+            return ['chosen' => [], 'remaining' => $qtyBooking];
+        }
 
-    /**
-     * Legacy: recommend pieces for single material via separate Gemini call.
-     * Tidak dipanggil dari flow utama, dipertahankan untuk backward compatibility.
-     */
-    private function recommendPiecesForMaterial(int $materialId, float $dibutuhkan): array
-    {
-        // Method ini dipertahankan untuk backward compatibility.
-        // Flow utama sekarang menggunakan askGeminiFullAnalysis().
-        return [
-            'piece_ids' => [],
-            'recommended_qty' => 0,
-            'pieces' => [],
-            'reason' => 'Method legacy, gunakan askGeminiFullAnalysis().',
-        ];
-    }
+        if ($requireNoJoint && !empty($requestedSegments)) {
+            $requestedSorted = collect($requestedSegments)
+                ->map(fn ($value): float => round((float) $value, 2))
+                ->filter(fn (float $value): bool => $value > 0)
+                ->sort()
+                ->values()
+                ->all();
 
-    /**
-     * Legacy: ask Gemini for single material piece selection.
-     * Tidak dipanggil dari flow utama, dipertahankan untuk backward compatibility.
-     */
-    private function askGeminiForPieceSelection(array $availablePieces, float $dibutuhkan, string $materialName, string $satuan): array
-    {
-        // Method ini dipertahankan untuk backward compatibility.
-        // Flow utama sekarang menggunakan askGeminiFullAnalysis().
-        return [
-            'selected_piece_ids' => [],
-            'alasan_per_piece' => [],
-            'overall_reason' => '',
-            'sisa_analysis' => '',
-        ];
-    }
+            $allocSorted = collect($allocations)
+                ->map(fn (array $row): float => round((float) ($row['take_qty'] ?? 0), 2))
+                ->filter(fn (float $value): bool => $value > 0)
+                ->sort()
+                ->values()
+                ->all();
 
-    private function buildChosenPiecesFromSelection(array $selectedIds, \Illuminate\Support\Collection $pieceById, float $dibutuhkan): array
-    {
-        $remaining = $dibutuhkan;
+            if ($requestedSorted !== $allocSorted) {
+                return ['chosen' => [], 'remaining' => $qtyBooking];
+            }
+        }
+
+        $virtualRemaining = $pieceById
+            ->mapWithKeys(fn (array $piece): array => [(int) ($piece['id'] ?? 0) => round((float) ($piece['panjang'] ?? 0), 2)])
+            ->all();
+
         $chosen = [];
+        foreach ($allocations as $alloc) {
+            $pieceId = (int) ($alloc['piece_id'] ?? 0);
+            $takeQty = round((float) ($alloc['take_qty'] ?? 0), 2);
+            $piece = $pieceById->get($pieceId);
 
-        foreach ($selectedIds as $pieceId) {
-            if ($remaining <= 0.00001) {
-                break;
+            if (!$piece || $takeQty <= 0) {
+                return ['chosen' => [], 'remaining' => $qtyBooking];
             }
 
-            $piece = $pieceById->get((int) $pieceId);
-            if (!$piece || (string) ($piece['status'] ?? '') !== 'available') {
-                continue;
+            $before = (float) ($virtualRemaining[$pieceId] ?? 0);
+            if ($before + 0.00001 < $takeQty) {
+                return ['chosen' => [], 'remaining' => $qtyBooking];
             }
 
-            $pieceLength = (float) ($piece['panjang'] ?? 0);
-            if ($pieceLength <= 0) {
-                continue;
-            }
-
-            $takeQty = min($pieceLength, $remaining);
-
+            $virtualRemaining[$pieceId] = round($before - $takeQty, 2);
             $chosen[] = [
-                'id' => (int) $pieceId,
-                'panjang' => round($pieceLength, 2),
-                'take_qty' => round($takeQty, 2),
+                'id' => $pieceId,
+                'panjang' => round($before, 2),
+                'take_qty' => $takeQty,
                 'sumber' => (string) ($piece['sumber'] ?? '-'),
                 'age_days' => (int) ($piece['umur_hari'] ?? 0),
                 'shelf_location_id' => (int) ($piece['shelf_location_id'] ?? 0),
                 'rack_label' => (string) ($piece['rack_label'] ?? '-'),
             ];
-
-            $remaining -= $takeQty;
         }
 
-        return [
-            'chosen' => $chosen,
-            'remaining' => $remaining,
-        ];
+        return ['chosen' => $chosen, 'remaining' => max(0, round($qtyBooking - $allocTotal, 2))];
+    }
+
+    private function buildChosenPiecesFromSelection(array $selectedIds, \Illuminate\Support\Collection $pieceById, float $dibutuhkan): array
+    {
+        $remaining = $dibutuhkan; $chosen = [];
+        foreach ($selectedIds as $pieceId) {
+            if ($remaining <= 0.00001) break;
+            $piece = $pieceById->get((int) $pieceId);
+            if (!$piece || (string) ($piece['status'] ?? '') !== 'available') continue;
+            $pieceLength = (float) ($piece['panjang'] ?? 0);
+            if ($pieceLength <= 0) continue;
+            $takeQty  = min($pieceLength, $remaining);
+            $chosen[] = ['id' => (int) $pieceId, 'panjang' => round($pieceLength, 2), 'take_qty' => round($takeQty, 2), 'sumber' => (string) ($piece['sumber'] ?? '-'), 'age_days' => (int) ($piece['umur_hari'] ?? 0), 'shelf_location_id' => (int) ($piece['shelf_location_id'] ?? 0), 'rack_label' => (string) ($piece['rack_label'] ?? '-')];
+            $remaining -= $takeQty;
+        }
+        return ['chosen' => $chosen, 'remaining' => $remaining];
     }
 
     /**
-     * Fallback deterministic selector jika Gemini gagal atau output tidak valid.
+     * Keep only segment numbers that can exactly cover target qty.
+     * This avoids polluted numbers from free-text notes (piece IDs, ages, etc).
+     *
+     * @param  array<int, float|int|string>  $requestedSegments
+     * @return array<int, float>
      */
-    private function fallbackPieceSelection(
-        int $materialId,
-        float $dibutuhkan,
-        string $materialName = '',
-        string $satuan = 'unit'
-    ): array {
-        $remaining = $dibutuhkan;
-        $selectedIds = [];
+    private function normalizeRequestedSegmentsForTarget(array $requestedSegments, float $targetQty): array
+    {
+        $target = round((float) $targetQty, 2);
+        if ($target <= 0) {
+            return [];
+        }
 
-        while ($remaining > 0.00001) {
-            $candidate = MaterialPiece::query()
-                ->where('material_id', $materialId)
-                ->where('status', 'available')
-                ->when(!empty($selectedIds), fn ($q) => $q->whereNotIn('id', $selectedIds))
-                ->orderByRaw("CASE WHEN panjang >= ? THEN 0 ELSE 1 END ASC", [$remaining])
-                ->orderByRaw("CASE
-                    WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 1
-                    WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 2
-                    ELSE 3
-                END ASC")
-                ->orderByRaw("CASE WHEN panjang >= ? THEN panjang ELSE -panjang END ASC", [$remaining])
-                ->orderByRaw("COALESCE((SELECT entry_date FROM inbounds WHERE inbounds.id = material_pieces.inbound_id), material_pieces.created_at) ASC")
-                ->first(['id', 'panjang']);
+        $segments = collect($requestedSegments)
+            ->map(fn ($value): float => round((float) $value, 2))
+            ->filter(fn (float $value): bool => $value > 0)
+            ->values()
+            ->all();
 
-            if (!$candidate) {
-                break;
+        if (empty($segments)) {
+            return [];
+        }
+
+        $sum = round((float) array_sum($segments), 2);
+        if (abs($sum - $target) <= 0.01) {
+            return $segments;
+        }
+
+        $subset = $this->pickSegmentSubsetForTarget($segments, $target);
+        if (!empty($subset)) {
+            return $subset;
+        }
+
+        // Common real-world pattern: manager writes one nominal length repeatedly.
+        $freq = collect($segments)
+            ->countBy(fn (float $value): string => number_format($value, 2, '.', ''))
+            ->sortDesc();
+
+        $nominal = (float) ($freq->keys()->first() ?? 0);
+        if ($nominal > 0) {
+            $count = (int) round($target / $nominal);
+            if ($count > 0 && abs(round($nominal * $count, 2) - $target) <= 0.01) {
+                return array_fill(0, $count, round($nominal, 2));
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * @param  array<int, float>  $segments
+     * @return array<int, float>
+     */
+    private function pickSegmentSubsetForTarget(array $segments, float $target): array
+    {
+        $targetInt = (int) round($target * 100);
+        if ($targetInt <= 0) {
+            return [];
+        }
+
+        $segmentsInt = array_map(fn (float $value): int => (int) round($value * 100), $segments);
+        $n = count($segmentsInt);
+        if ($n === 0 || $n > 30) {
+            return [];
+        }
+
+        $dp = [0 => []];
+
+        foreach ($segmentsInt as $idx => $valueInt) {
+            $next = $dp;
+            foreach ($dp as $sum => $pickedIdx) {
+                $newSum = $sum + $valueInt;
+                if ($newSum > $targetInt) {
+                    continue;
+                }
+
+                $newPicked = $pickedIdx;
+                $newPicked[] = $idx;
+
+                if (!array_key_exists($newSum, $next)) {
+                    $next[$newSum] = $newPicked;
+                    continue;
+                }
+
+                $current = (array) ($next[$newSum] ?? []);
+                $candidateCount = count($newPicked);
+                $currentCount = count($current);
+
+                if ($candidateCount > $currentCount) {
+                    $next[$newSum] = $newPicked;
+                    continue;
+                }
+
+                if ($candidateCount === $currentCount && $candidateCount > 0) {
+                    $candidateMax = max(array_map(fn (int $i): int => (int) ($segmentsInt[$i] ?? 0), $newPicked));
+                    $currentMax = max(array_map(fn (int $i): int => (int) ($segmentsInt[$i] ?? 0), $current));
+
+                    if ($candidateMax < $currentMax) {
+                        $next[$newSum] = $newPicked;
+                    }
+                }
+            }
+            $dp = $next;
+        }
+
+        if (!array_key_exists($targetInt, $dp)) {
+            return [];
+        }
+
+        $picked = $dp[$targetInt];
+        return array_values(array_map(fn (int $idx): float => round((float) ($segments[$idx] ?? 0), 2), $picked));
+    }
+
+    /**
+     * Pick the best exact-segment subset with maximum total that does not exceed limit.
+     *
+     * @param  array<int, float>  $segments
+     * @return array<int, float>
+     */
+    private function pickSegmentSubsetWithinLimit(array $segments, float $limit): array
+    {
+        $limitInt = (int) round(max(0, $limit) * 100);
+        if ($limitInt <= 0) {
+            return [];
+        }
+
+        $segmentsInt = array_map(fn (float $value): int => (int) round(max(0, $value) * 100), $segments);
+        $n = count($segmentsInt);
+        if ($n === 0 || $n > 30) {
+            return [];
+        }
+
+        $dp = [0 => []];
+
+        foreach ($segmentsInt as $idx => $valueInt) {
+            if ($valueInt <= 0) {
+                continue;
             }
 
-            $pieceId = (int) $candidate->id;
-            $selectedIds[] = $pieceId;
-            $remaining -= min((float) $candidate->panjang, $remaining);
+            $next = $dp;
+            foreach ($dp as $sum => $pickedIdx) {
+                $newSum = $sum + $valueInt;
+                if ($newSum > $limitInt) {
+                    continue;
+                }
+
+                $newPicked = $pickedIdx;
+                $newPicked[] = $idx;
+
+                if (!array_key_exists($newSum, $next)) {
+                    $next[$newSum] = $newPicked;
+                    continue;
+                }
+
+                $current = (array) ($next[$newSum] ?? []);
+                if (count($newPicked) > count($current)) {
+                    $next[$newSum] = $newPicked;
+                }
+            }
+
+            $dp = $next;
         }
+
+        if (empty($dp)) {
+            return [];
+        }
+
+        $bestSum = max(array_keys($dp));
+        if ($bestSum <= 0) {
+            return [];
+        }
+
+        $picked = (array) ($dp[$bestSum] ?? []);
+        return array_values(array_map(fn (int $idx): float => round((float) ($segments[$idx] ?? 0), 2), $picked));
+    }
+
+    private function buildChosenPiecesFromSegments(array $selectedIds, \Illuminate\Support\Collection $pieceById, float $qtyBooking, array $requestedSegments): array
+    {
+        $segments = collect($requestedSegments)
+            ->map(fn ($value): float => round((float) $value, 2))
+            ->filter(fn (float $value): bool => $value > 0)
+            ->values();
+
+        if ($segments->isEmpty()) {
+            return ['chosen' => [], 'remaining' => $qtyBooking];
+        }
+
+        $segmentsTotal = round((float) $segments->sum(), 2);
+        if (abs($segmentsTotal - round($qtyBooking, 2)) > 0.01) {
+            return ['chosen' => [], 'remaining' => $qtyBooking];
+        }
+
+        $allPieces = $pieceById
+            ->map(fn (array $piece): array => [
+                'id' => (int) ($piece['id'] ?? 0),
+                'panjang' => round((float) ($piece['panjang'] ?? 0), 2),
+                'umur_hari' => (int) ($piece['umur_hari'] ?? 0),
+                'rack_label' => (string) ($piece['rack_label'] ?? '-'),
+                'sumber' => (string) ($piece['sumber'] ?? '-'),
+                'shelf_location_id' => (int) ($piece['shelf_location_id'] ?? 0),
+            ])
+            ->filter(fn (array $piece): bool => $piece['id'] > 0 && $piece['panjang'] > 0)
+            ->values();
+
+        if ($allPieces->isEmpty()) {
+            return ['chosen' => [], 'remaining' => $qtyBooking];
+        }
+
+        $virtualRemaining = $allPieces->mapWithKeys(fn (array $piece): array => [$piece['id'] => $piece['panjang']])->all();
+        $priorityIds = collect($selectedIds)->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->values()->all();
+        $chosen = [];
+
+        foreach ($segments as $segment) {
+            $candidate = $this->pickPieceForSegment((float) $segment, $allPieces, $virtualRemaining, $priorityIds);
+            if ($candidate === null) {
+                return ['chosen' => [], 'remaining' => $qtyBooking];
+            }
+
+            $pieceId = (int) $candidate['id'];
+            $before = (float) ($virtualRemaining[$pieceId] ?? 0);
+            $virtualRemaining[$pieceId] = round($before - (float) $segment, 2);
+
+            $chosen[] = [
+                'id' => $pieceId,
+                'panjang' => round($before, 2),
+                'take_qty' => round((float) $segment, 2),
+                'sumber' => (string) ($candidate['sumber'] ?? '-'),
+                'age_days' => (int) ($candidate['umur_hari'] ?? 0),
+                'shelf_location_id' => (int) ($candidate['shelf_location_id'] ?? 0),
+                'rack_label' => (string) ($candidate['rack_label'] ?? '-'),
+            ];
+        }
+
+        return ['chosen' => $chosen, 'remaining' => 0.0];
+    }
+
+    private function pickPieceForSegment(float $segment, \Illuminate\Support\Collection $allPieces, array $virtualRemaining, array $priorityIds): ?array
+    {
+        if ($segment <= 0) {
+            return null;
+        }
+
+        $priority = $allPieces
+            ->filter(fn (array $piece): bool => in_array((int) $piece['id'], $priorityIds, true) && ((float) ($virtualRemaining[(int) $piece['id']] ?? 0)) >= $segment)
+            ->sortBy([
+                fn (array $piece): float => (float) ($virtualRemaining[(int) $piece['id']] ?? 0),
+                fn (array $piece): int => (int) ($piece['umur_hari'] ?? 0),
+            ])
+            ->first();
+
+        if (is_array($priority)) {
+            return $priority;
+        }
+
+        $fallback = $allPieces
+            ->filter(fn (array $piece): bool => ((float) ($virtualRemaining[(int) $piece['id']] ?? 0)) >= $segment)
+            ->sortBy([
+                fn (array $piece): float => (float) ($virtualRemaining[(int) $piece['id']] ?? 0),
+                fn (array $piece): int => (int) ($piece['umur_hari'] ?? 0),
+            ])
+            ->first();
+
+        return is_array($fallback) ? $fallback : null;
+    }
+
+    private function extractRequestedSegmentsFromText(string $text): array
+    {
+        $segments = collect();
+
+        preg_match_all('/(\d+(?:[\.,]\d+)?)\s*(?:m|meter|meters)\b/i', $text, $matchesWithUnit);
+        if (!empty($matchesWithUnit[1] ?? [])) {
+            $segments = collect($matchesWithUnit[1]);
+        }
+
+        if ($segments->isEmpty() && preg_match('/kabel|potong|piece|pcs|roll|jadi/i', $text)) {
+            preg_match_all('/\b(\d{2,4}(?:[\.,]\d+)?)\b/', $text, $matchesRaw);
+            $segments = collect($matchesRaw[1] ?? []);
+        }
+
+        $normalized = $segments
+            ->map(function ($value): float {
+                $normalized = str_replace(',', '.', (string) $value);
+                return round((float) $normalized, 2);
+            })
+            ->filter(fn (float $value): bool => $value > 0 && $value <= 2000)
+            ->values()
+            ->take(20);
+
+        if ($matchesWithUnit[1] ?? false) {
+            return $normalized->all();
+        }
+
+        return $normalized
+            ->filter(fn (float $value): bool => $value >= 20)
+            ->values()
+            ->all();
+    }
+
+    private function fallbackPieceSelection(int $materialId, float $dibutuhkan, string $materialName = '', string $satuan = 'unit', array $instruksiAi = []): array
+    {
+        $preferSumber = (string) ($instruksiAi['preferensi_sumber'] ?? 'auto');
+        $preferUmur = (string) ($instruksiAi['preferensi_umur_stok'] ?? 'lama');
+        $preferredPieceIds = collect($instruksiAi['preferred_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->values()->all();
+        $preferredRackIds = collect($instruksiAi['preferred_rack_ids'] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->values()->all();
+
+        $remaining = $dibutuhkan; $selectedIds = [];
+        while ($remaining > 0.00001) {
+            $query = MaterialPiece::query()
+                ->where('material_id', $materialId)
+                ->where('status', 'available')
+                ->when(!empty($selectedIds), fn ($q) => $q->whereNotIn('id', $selectedIds));
+
+            if (!empty($preferredPieceIds)) {
+                $idsSql = implode(',', $preferredPieceIds);
+                $query->orderByRaw("CASE WHEN id IN ({$idsSql}) THEN 0 ELSE 1 END ASC");
+            }
+
+            if (!empty($preferredRackIds)) {
+                $racksSql = implode(',', $preferredRackIds);
+                $query->orderByRaw("CASE WHEN shelf_location_id IN ({$racksSql}) THEN 0 ELSE 1 END ASC");
+            }
+
+            if ($preferSumber === 'baru') {
+                $query->orderByRaw("CASE WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 0 WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 1 ELSE 2 END ASC");
+            } elseif ($preferSumber === 'potongan') {
+                $query->orderByRaw("CASE WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 0 WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 1 ELSE 2 END ASC");
+            } else {
+                $query->orderByRaw("CASE WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 1 WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 2 ELSE 3 END ASC");
+            }
+
+            $query->orderByRaw("CASE WHEN panjang >= ? THEN 0 ELSE 1 END ASC", [$remaining])
+                ->orderByRaw("CASE WHEN panjang >= ? THEN panjang ELSE -panjang END ASC", [$remaining]);
+
+            if ($preferUmur === 'baru') {
+                $query->orderByRaw("COALESCE((SELECT entry_date FROM inbounds WHERE inbounds.id = material_pieces.inbound_id), material_pieces.created_at) DESC");
+            } else {
+                $query->orderByRaw("COALESCE((SELECT entry_date FROM inbounds WHERE inbounds.id = material_pieces.inbound_id), material_pieces.created_at) ASC");
+            }
+
+            $candidate = $query->first(['id', 'panjang']);
+            if (!$candidate) break;
+            $selectedIds[] = (int) $candidate->id;
+            $remaining    -= min((float) $candidate->panjang, $remaining);
+        }
+
+        $preferReasonSegments = [];
+        if (!empty($preferredPieceIds)) $preferReasonSegments[] = 'mengutamakan piece yang disebut manager';
+        if (!empty($preferredRackIds)) $preferReasonSegments[] = 'mengutamakan rak yang disebut manager';
+        if ($preferSumber === 'potongan') $preferReasonSegments[] = 'mengutamakan stok potongan sesuai catatan manager';
+        if ($preferSumber === 'baru') $preferReasonSegments[] = 'mengutamakan stok baru/roll utuh sesuai catatan manager';
+        if ($preferUmur === 'baru') $preferReasonSegments[] = 'memprioritaskan stok terbaru sesuai instruksi manager';
+        if ($preferUmur === 'lama') $preferReasonSegments[] = 'memprioritaskan stok terlama (FIFO)';
+        $preferReason = empty($preferReasonSegments) ? '' : (implode(', ', $preferReasonSegments) . '. ');
 
         $isUnitBased = in_array(strtolower($satuan), ['unit', 'buah', 'pcs', 'set', 'pasang'], true);
-
-        if ($isUnitBased) {
-            $overallReason = count($selectedIds) <= 1
-                ? "Mengambil 1 unit {$materialName} yang paling lama di gudang supaya rotasi stok terjaga."
-                : "Mengambil " . count($selectedIds) . " unit {$materialName} dari stok terlama di gudang untuk menjaga rotasi.";
-            $sisaFull = 'Seluruh kebutuhan unit terpenuhi dari stok gudang.';
-            $sisaPartial = 'Stok unit yang tersedia belum mencukupi, sisanya perlu dibuatkan PR.';
-        } else {
-            $overallReason = count($selectedIds) <= 1
-                ? 'Mengambil dari piece terkecil yang cukup untuk meminimalkan sisa potongan yang tidak terpakai.'
-                : 'Mengkombinasikan ' . count($selectedIds) . ' piece dari stok terlama untuk memenuhi kebutuhan.';
-            $sisaFull = 'Kebutuhan terpenuhi, sisa potongan dikembalikan ke gudang dan masih bisa dipakai proyek lain.';
-            $sisaPartial = 'Stok piece yang tersedia belum mencukupi seluruh kebutuhan, sisanya perlu dibuatkan PR.';
-        }
-
-        if (trim($overallReason) === '') {
-            $overallReason = $isUnitBased
-                ? 'Mengambil unit dari stok terlama di gudang untuk menjaga rotasi.'
-                : 'Mengambil piece dari stok terlama untuk memenuhi kebutuhan.';
-        }
-
-        return [
-            'selected_piece_ids' => $selectedIds,
-            'alasan_per_piece' => [],
-            'overall_reason' => $overallReason,
-            'sisa_analysis' => $remaining > 0.00001 ? $sisaPartial : $sisaFull,
-        ];
+        if (empty($selectedIds)) { $overallReason = "{$preferReason}Stok {$materialName} kosong di gudang, seluruh kebutuhan akan dibuatkan PR."; $sisaPartial = 'Seluruh kebutuhan dibuatkan PR karena stok tidak tersedia.'; $sisaFull = ''; }
+        elseif ($isUnitBased) { $overallReason = $preferReason . (count($selectedIds) <= 1 ? "Mengambil 1 unit {$materialName} sesuai prioritas instruksi manager." : "Mengambil " . count($selectedIds) . " unit {$materialName} sesuai prioritas instruksi manager."); $sisaFull = 'Seluruh kebutuhan unit terpenuhi dari stok gudang.'; $sisaPartial = 'Stok unit yang tersedia belum mencukupi, sisanya perlu dibuatkan PR.'; }
+        else { $overallReason = $preferReason . (count($selectedIds) <= 1 ? 'Mengambil piece sesuai prioritas instruksi manager untuk meminimalkan mismatch kebutuhan.' : 'Mengkombinasikan ' . count($selectedIds) . ' piece sesuai prioritas instruksi manager.'); $sisaFull = 'Kebutuhan terpenuhi, sisa potongan dikembalikan ke gudang dan masih bisa dipakai proyek lain.'; $sisaPartial = 'Stok piece yang tersedia belum mencukupi seluruh kebutuhan, sisanya perlu dibuatkan PR.'; }
+        return ['selected_piece_ids' => $selectedIds, 'alasan_per_piece' => [], 'overall_reason' => $overallReason, 'sisa_analysis' => $remaining > 0.00001 ? $sisaPartial : $sisaFull];
     }
 
     private function hitungDeltaKebutuhan(int $projectId, array $kebutuhan): array
     {
         return collect($kebutuhan)->map(function (array $item) use ($projectId) {
-            $materialId = (int) ($item['material_id'] ?? 0);
-            $qtyRequested = (float) ($item['qty'] ?? 0);
-
-            if ($materialId <= 0 || $qtyRequested <= 0) {
-                return null;
-            }
-
-            $qtyBooked = (float) MaterialPiece::query()
-                ->where('booked_for_project_id', $projectId)
-                ->where('material_id', $materialId)
-                ->whereIn('status', ['booked', 'used'])
-                ->sum('panjang');
-
-            $qtyPr = (float) PurchaseRequest::query()
-                ->where('project_id', $projectId)
-                ->where('material_id', $materialId)
-                ->whereIn('status', [
-                    'draft',
-                    'pending_manager',
-                    'pending_finance',
-                    'approved',
-                    'ordered',
-                    'received',
-                ])
-                ->sum('quantity');
-
-            $qtyCommitted = $qtyBooked + $qtyPr;
-            $qtyDelta = max(0, $qtyRequested - $qtyCommitted);
-
-            if ($qtyDelta <= 0) {
-                return null;
-            }
-
-            return [
-                'material_id' => $materialId,
-                'qty' => round($qtyDelta, 2),
-                'qty_original' => round($qtyRequested, 2),
-            ];
+            $materialId = (int) ($item['material_id'] ?? 0); $qtyRequested = (float) ($item['qty'] ?? 0);
+            if ($materialId <= 0 || $qtyRequested <= 0) return null;
+            $qtyBooked = (float) MaterialPiece::query()->where('booked_for_project_id', $projectId)->where('material_id', $materialId)->whereIn('status', ['booked', 'used'])->sum('panjang');
+            $qtyPr     = (float) PurchaseRequest::query()->where('project_id', $projectId)->where('material_id', $materialId)->whereIn('status', ['draft', 'pending_manager', 'pending_finance', 'approved', 'ordered', 'received'])->sum('quantity');
+            $qtyDelta  = max(0, $qtyRequested - ($qtyBooked + $qtyPr));
+            if ($qtyDelta <= 0) return null;
+            return ['material_id' => $materialId, 'qty' => round($qtyDelta, 2), 'qty_original' => round($qtyRequested, 2)];
         })->filter()->values()->all();
     }
 
@@ -1478,383 +1521,171 @@ PROMPT;
         $project = Project::query()->find($projectId, ['id', 'kode_proyek', 'catatan_teknis']);
         $projectCode = (string) ($project?->kode_proyek ?: "#{$projectId}");
         $projectSpecialInstruction = trim((string) ($project?->catatan_teknis ?? ''));
-
-        $taskPending = Task::query()
-            ->where('type', 'ai_booking_suggestion')
-            ->where('related_type', 'project')
-            ->where('related_id', $projectId)
-            ->where('status', 'pending')
-            ->latest('id')
-            ->first();
-
-        if (!$taskPending) {
-            return;
-        }
-
+        $taskPending = Task::query()->where('type', 'ai_booking_suggestion')->where('related_type', 'project')->where('related_id', $projectId)->where('status', 'pending')->latest('id')->first();
+        if (!$taskPending) return;
         $payload = $taskPending->payload ?? [];
         data_set($payload, 'project_special_instruction', $projectSpecialInstruction);
-        data_set($payload, 'detail', []);
-        data_set($payload, 'ai_summary.rekomendasi', []);
+        data_set($payload, 'detail', []); data_set($payload, 'ai_summary.rekomendasi', []);
         data_set($payload, 'ai_summary.ringkasan', 'Tidak ada tambahan kebutuhan baru. Data kebutuhan sebelumnya sudah ter-cover booking/PR.');
         data_set($payload, 'last_synced_at', now()->toDateTimeString());
-
-        $taskPending->update([
-            'status' => 'done',
-            'handled_at' => now(),
-            'title' => "AI: Konfirmasi Kebutuhan Material Proyek {$projectCode}",
-            'message' => 'Tidak ada tambahan kebutuhan baru. Task ditutup otomatis.',
-            'payload' => $payload,
-        ]);
+        $taskPending->update(['status' => 'done', 'handled_at' => now(), 'title' => "AI: Konfirmasi Kebutuhan Material Proyek {$projectCode}", 'message' => 'Tidak ada tambahan kebutuhan baru. Task ditutup otomatis.', 'payload' => $payload]);
     }
 
-    /**
-     * @param  array<int, array{material_id:int,qty:float,qty_original?:float}>  $kebutuhanDelta
-     */
-    private function sinkronTaskMenungguRetry(int $projectId, array $kebutuhanDelta, int $retrySeconds): void
+    private function buildFallbackAnalysis(int $projectId, array $kebutuhanDelta, array $stockData, array $instruksiAi): array
     {
-        $project = Project::query()
-            ->find($projectId, ['id', 'kode_proyek', 'catatan_teknis']);
+        $tanpaPotonganDariPrompt = (bool) ($instruksiAi['tanpa_potongan'] ?? false);
+        $hasilAnalisis = [];
 
-        $projectCode = (string) ($project?->kode_proyek ?: '#'.$projectId);
-        $projectSpecialInstruction = trim((string) ($project?->catatan_teknis ?? ''));
+        foreach ($kebutuhanDelta as $item) {
+            $material = Material::query()->find((int) ($item['material_id'] ?? 0));
+            if (!$material) continue;
 
-        $message = 'AI sedang sibuk, sistem akan retry otomatis dalam '
-            . $retrySeconds
-            . ' detik. Jika gagal, rekomendasi lokal akan digunakan.';
+            $fallbackAnalisa = $this->analisaSatuItem(
+                material: $material,
+                dibutuhkan: (float) ($item['qty'] ?? 0),
+                projectId: $projectId,
+                tanpaPotongan: $tanpaPotonganDariPrompt,
+                alasanInstruksi: (string) ($instruksiAi['alasan'] ?? ''),
+            );
 
-        $payload = [
-            'project_id' => $projectId,
-            'project_code' => $projectCode,
-            'project_special_instruction' => $projectSpecialInstruction,
-            'items' => $this->buildPendingItemsPayloadFromKebutuhan($kebutuhanDelta),
-            'ai_summary' => [
-                'ringkasan' => $message,
-                'rekomendasi' => [],
-                'perlu_konfirmasi' => true,
-            ],
-            'ai_instruction' => [
-                'tanpa_potongan' => false,
-                'ringkas' => 'Menunggu retry AI setelah cooldown.',
-                'alasan' => 'Gemini mengembalikan cooldown/rate limit.',
-                'sumber' => 'cooldown_retry_pending',
-                'confidence' => 'rendah',
-            ],
-            'retry' => [
-                'scheduled' => true,
-                'retry_after_seconds' => $retrySeconds,
-                'scheduled_at' => now()->toDateTimeString(),
-            ],
-            'approval_trail' => [
-                'staff' => null,
-                'manager' => null,
-                'finance' => null,
-            ],
-            'last_synced_at' => now()->toDateTimeString(),
-        ];
+            $fallbackSelection = $this->fallbackPieceSelection(
+                materialId: (int) $material->id,
+                dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+                materialName: (string) ($material->nama_material ?? ''),
+                satuan: (string) ($material->satuan ?? 'unit'),
+                instruksiAi: $instruksiAi,
+            );
 
-        $taskPending = Task::query()
-            ->where('type', 'ai_booking_suggestion')
-            ->where('related_type', 'project')
-            ->where('related_id', $projectId)
-            ->where('status', 'pending')
-            ->latest('id')
-            ->first();
+            $pieceById = collect((array) data_get($stockData, (string) $material->id . '.pieces', []))
+                ->keyBy(fn (array $piece): int => (int) ($piece['id'] ?? 0));
 
-        if ($taskPending) {
-            $taskPending->update([
-                'title' => 'AI: Konfirmasi Kebutuhan Material Proyek ' . $projectCode,
-                'message' => $message,
-                'payload' => $payload,
-            ]);
+            ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(
+                selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(),
+                pieceById: $pieceById,
+                dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+            );
 
-            return;
+            $fallbackAnalisa['recommended_piece_ids'] = collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
+            $fallbackAnalisa['recommended_qty'] = round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - max(0, $remaining), 2);
+            $fallbackAnalisa['recommended_pieces'] = $chosen;
+            $fallbackAnalisa['alasan_ai_gemini'] = trim(implode('. ', array_filter([
+                (string) ($fallbackSelection['overall_reason'] ?? ''),
+                (string) ($fallbackAnalisa['alasan_ai'] ?? ''),
+            ])));
+            $fallbackAnalisa['alasan_ai'] = $this->buildSystemReasonFromPieces(
+                materialName: (string) ($material->nama_material ?? ('Material #' . (int) $material->id)),
+                satuan: (string) ($material->satuan ?? 'unit'),
+                dibutuhkan: (float) ($item['qty'] ?? 0),
+                qtyBooking: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
+                qtyPr: (float) ($fallbackAnalisa['qty_pr'] ?? 0),
+                chosenPieces: $chosen,
+                requestedSegments: (array) ($instruksiAi['requested_segments'] ?? []),
+                requireNoJoint: (bool) ($instruksiAi['require_no_joint'] ?? false),
+            );
+            $fallbackAnalisa['kebutuhan_asli'] = (float) ($item['qty_original'] ?? $item['qty'] ?? 0);
+            $fallbackAnalisa['kebutuhan_setelah_buffer'] = (float) ($item['qty'] ?? 0);
+            $fallbackAnalisa['kebutuhan_belum_tercover'] = max(0, (float) ($fallbackAnalisa['qty_pr'] ?? 0));
+
+            $hasilAnalisis[] = $fallbackAnalisa;
         }
 
-        Task::query()->create([
-            'for_role' => 'Staff Administrasi Gudang',
-            'type' => 'ai_booking_suggestion',
-            'title' => 'AI: Konfirmasi Kebutuhan Material Proyek ' . $projectCode,
-            'message' => $message,
-            'payload' => $payload,
-            'status' => 'pending',
-            'related_id' => $projectId,
-            'related_type' => 'project',
-        ]);
-    }
-
-    /**
-     * @param  array<int, array{material_id:int,qty:float,qty_original?:float}>  $kebutuhanDelta
-     * @return array<int, array<string, mixed>>
-     */
-    private function buildPendingItemsPayloadFromKebutuhan(array $kebutuhanDelta): array
-    {
-        return collect($kebutuhanDelta)
-            ->map(function (array $item): ?array {
-                $materialId = (int) ($item['material_id'] ?? 0);
-
-                if ($materialId <= 0) {
-                    return null;
-                }
-
-                $material = Material::query()->find($materialId);
-
-                if (!$material) {
-                    return null;
-                }
-
-                $qty = round((float) ($item['qty'] ?? 0), 2);
-
-                return [
-                    'material_id' => $materialId,
-                    'material_name' => (string) $material->nama_material,
-                    'dibutuhkan' => $qty,
-                    'satuan' => (string) ($material->satuan ?: 'unit'),
-                    'available_qty' => round((float) $material->available, 2),
-                    'recommended_booking_qty' => 0.0,
-                    'recommended_pr_qty' => $qty,
-                    'recommended_piece_ids' => [],
-                    'recommended_qty' => 0.0,
-                    'recommended_pieces' => [],
-                    'ai_reason' => 'Menunggu retry Gemini setelah cooldown.',
-                    'status' => 'pending',
-                ];
-            })
-            ->filter()
-            ->values()
-            ->all();
+        return $hasilAnalisis;
     }
 
     private function normalisasiRekomendasi(array $rekomendasi, array $detail): array
     {
-        $rekomendasiList = collect($rekomendasi)->filter(fn ($item) => is_array($item))->values();
-        $rekomendasiByMaterial = collect($rekomendasi)->filter(fn ($item) => is_array($item))
-            ->keyBy(fn (array $item) => mb_strtolower(trim((string) ($item['material'] ?? ''))));
-
+        $rekomendasiList       = collect($rekomendasi)->filter(fn ($item) => is_array($item))->values();
+        $rekomendasiByMaterial = collect($rekomendasi)->filter(fn ($item) => is_array($item))->keyBy(fn (array $item) => mb_strtolower(trim((string) ($item['material'] ?? ''))));
         return collect($detail)->values()->map(function (array $item, int $index) use ($rekomendasiByMaterial, $rekomendasiList) {
-            $aksi = match ($item['aksi'] ?? null) {
-                'full_booking' => 'booking',
-                'partial' => 'booking sebagian + PR',
-                'full_pr' => 'buat PR',
-                default => 'review manual',
-            };
-
+            $aksi = match ($item['aksi'] ?? null) { 'full_booking' => 'booking', 'partial' => 'booking sebagian + PR', 'full_pr' => 'buat PR', default => 'review manual' };
             $namaMaterial = (string) ($item['nama_material'] ?? ('Material #' . ($item['material_id'] ?? '-')));
-            $materialKey = mb_strtolower(trim($namaMaterial));
-            $llmItem = $rekomendasiByMaterial->get($materialKey, []);
-
-            if (empty($llmItem)) {
-                $llmItem = (array) ($rekomendasiList->get($index) ?? []);
-            }
-
+            $llmItem = $rekomendasiByMaterial->get(mb_strtolower(trim($namaMaterial)), []);
+            if (empty($llmItem)) $llmItem = (array) ($rekomendasiList->get($index) ?? []);
             $fallbackReason = trim((string) ($item['alasan_ai'] ?? 'mengikuti aturan instruksi proyek dan kondisi stok aktual'));
-            $reasonFromLlm = $this->extractReasonPhrase((string) ($llmItem['detail'] ?? ''));
-            $reason = $this->normalizeReasonFromLlm($reasonFromLlm, $fallbackReason);
+            $reason = $this->normalizeReasonFromLlm($this->extractReasonPhrase((string) ($llmItem['detail'] ?? '')), $fallbackReason);
             $reason = $this->sinkronkanAngkaAlasan($reason, $item);
             $reason = $this->sesuaikanAlasanDenganTipeMaterial($reason, $item);
             $reason = rtrim($reason, '.');
-
             if ((bool) ($item['tanpa_potongan'] ?? false)) {
-                $aksiNoCut = (string) ($item['aksi'] ?? '');
                 $stokSisa = $this->formatQty((float) ($item['stok_sisa_potongan'] ?? 0));
-
-                $reason = match ($aksiNoCut) {
-                    'full_booking' => 'aturan tanpa potongan aktif, stok roll utuh tersedia sehingga kebutuhan bisa langsung dibooking',
-                    'partial' => 'aturan tanpa potongan aktif, stok roll utuh hanya menutup sebagian kebutuhan sehingga sisanya dibuat PR',
-                    'full_pr' => "aturan tanpa potongan aktif, stok roll utuh tidak mencukupi sehingga dibuat PR (stok potongan {$stokSisa} tidak dipakai)",
-                    default => $reason,
-                };
+                $reason   = match ((string) ($item['aksi'] ?? '')) { 'full_booking' => 'aturan tanpa potongan aktif, stok roll utuh tersedia sehingga kebutuhan bisa langsung dibooking', 'partial' => 'aturan tanpa potongan aktif, stok roll utuh hanya menutup sebagian kebutuhan sehingga sisanya dibuat PR', 'full_pr' => "aturan tanpa potongan aktif, stok roll utuh tidak mencukupi sehingga dibuat PR (stok potongan {$stokSisa} tidak dipakai)", default => $reason };
             }
-
             $butuh = $this->formatQty((float) ($item['kebutuhan_asli'] ?? ($item['dibutuhkan'] ?? 0)));
             $tersedia = $this->formatQty((float) ($item['available'] ?? 0));
             $booking = $this->formatQty((float) ($item['qty_booking'] ?? 0));
             $pr = $this->formatQty((float) ($item['qty_pr'] ?? 0));
-
-            $detailText = match ($item['aksi'] ?? null) {
-                'full_booking' => "Butuh {$butuh}, tersedia total {$tersedia}, dibooking {$booking}, dikarenakan {$reason}.",
-                'full_pr' => "Butuh {$butuh}, tersedia total {$tersedia}, generate PR {$pr}, dikarenakan {$reason}.",
-                'partial' => "Butuh {$butuh}, tersedia total {$tersedia}, dibooking {$booking}, generate PR {$pr}, dikarenakan {$reason}.",
-                default => "Butuh {$butuh}, tersedia total {$tersedia}, dibooking {$booking}, generate PR {$pr}, dikarenakan {$reason}.",
-            };
-
-            return [
-                'material' => $namaMaterial,
-                'aksi' => $aksi,
-                'detail' => $detailText,
-            ];
+            $detailText = match ($item['aksi'] ?? null) { 'full_booking' => "Butuh {$butuh}, tersedia total {$tersedia}, dibooking {$booking}, dikarenakan {$reason}.", 'full_pr' => "Butuh {$butuh}, tersedia total {$tersedia}, generate PR {$pr}, dikarenakan {$reason}.", default => "Butuh {$butuh}, tersedia total {$tersedia}, dibooking {$booking}, generate PR {$pr}, dikarenakan {$reason}." };
+            return ['material' => $namaMaterial, 'aksi' => $aksi, 'detail' => $detailText];
         })->values()->all();
     }
 
     private function extractReasonPhrase(string $detail): string
     {
-        $text = trim($detail);
-        if ($text === '') {
-            return '';
-        }
-
-        if (preg_match('/dikarenakan\s+(.+)$/iu', $text, $match)) {
-            return trim((string) ($match[1] ?? ''));
-        }
-        if (preg_match('/karena\s+(.+)$/iu', $text, $match)) {
-            return trim((string) ($match[1] ?? ''));
-        }
-        if (preg_match('/alasan\s*[:\-]\s*(.+)$/iu', $text, $match)) {
-            return trim((string) ($match[1] ?? ''));
-        }
-
+        $text = trim($detail); if ($text === '') return '';
+        if (preg_match('/dikarenakan\s+(.+)$/iu', $text, $match)) return trim((string) ($match[1] ?? ''));
+        if (preg_match('/karena\s+(.+)$/iu', $text, $match)) return trim((string) ($match[1] ?? ''));
+        if (preg_match('/alasan\s*[:\-]\s*(.+)$/iu', $text, $match)) return trim((string) ($match[1] ?? ''));
         return $text;
     }
 
     private function normalizeReasonFromLlm(string $reasonFromLlm, string $fallbackReason): string
     {
         $text = trim($reasonFromLlm !== '' ? $reasonFromLlm : $fallbackReason);
-        if ($text === '') {
-            return 'aturan project dan kondisi stok saat ini mengarah ke keputusan tersebut';
-        }
-
-        $normalized = preg_replace('/\s+/', ' ', (string) $text);
-        $normalized = trim((string) $normalized);
-        $normalized = preg_replace('/^(karena|dikarenakan)\s+/iu', '', (string) $normalized);
-        $normalized = rtrim((string) $normalized, '.');
-
-        return (string) $normalized;
+        if ($text === '') return 'aturan project dan kondisi stok saat ini mengarah ke keputusan tersebut';
+        $normalized = trim((string) preg_replace('/\s+/', ' ', (string) $text));
+        return rtrim((string) preg_replace('/^(karena|dikarenakan)\s+/iu', '', $normalized), '.');
     }
 
     private function sinkronkanAngkaAlasan(string $reason, array $item): string
     {
-        $normalized = trim($reason);
-        if ($normalized === '') {
-            return $normalized;
-        }
-
+        $normalized = trim($reason); if ($normalized === '') return $normalized;
         if ((bool) ($item['tanpa_potongan'] ?? false)) {
-            $aksi = (string) ($item['aksi'] ?? '');
-            $qtyPr = (float) ($item['qty_pr'] ?? 0);
+            $aksi               = (string) ($item['aksi'] ?? ''); $qtyPr = (float) ($item['qty_pr'] ?? 0);
             $perluAlasanPotongan = in_array($aksi, ['full_pr', 'partial'], true) || $qtyPr > 0;
-
-            $stokSisa = (float) ($item['stok_sisa_potongan'] ?? 0);
-            $stokSisaText = $this->formatQty($stokSisa);
-            $stokSisaList = collect($item['stok_sisa_potongan_list'] ?? [])
-                ->map(fn ($value) => $this->formatQty((float) $value))
-                ->filter()
-                ->values()
-                ->all();
-
-            if ($stokSisa > 0) {
-                if (preg_match('/stok\s+sisa\s+\d+(?:\.\d+)?/iu', $normalized)) {
-                    $normalized = preg_replace(
-                        '/stok\s+sisa\s+\d+(?:\.\d+)?/iu',
-                        'stok sisa ' . $stokSisaText,
-                        $normalized,
-                        1,
-                    );
-                }
-            }
-
-            if ($perluAlasanPotongan && !empty($stokSisaList)) {
-                $potonganText = implode(' + ', $stokSisaList);
-                if (!preg_match('/potongan\s+tersedia\s+/iu', $normalized)) {
-                    $normalized = rtrim($normalized, '.');
-                    $normalized .= ". Potongan tersedia {$potonganText}, jadi tidak bisa dipakai karena aturan tanpa potongan";
-                }
-            }
+            $stokSisa            = (float) ($item['stok_sisa_potongan'] ?? 0);
+            $stokSisaList        = collect($item['stok_sisa_potongan_list'] ?? [])->map(fn ($value) => $this->formatQty((float) $value))->filter()->values()->all();
+            if ($stokSisa > 0 && preg_match('/stok\s+sisa\s+\d+(?:\.\d+)?/iu', $normalized)) $normalized = (string) preg_replace('/stok\s+sisa\s+\d+(?:\.\d+)?/iu', 'stok sisa ' . $this->formatQty($stokSisa), $normalized, 1);
+            if ($perluAlasanPotongan && !empty($stokSisaList) && !preg_match('/potongan\s+tersedia\s+/iu', $normalized)) $normalized = rtrim($normalized, '.') . '. Potongan tersedia ' . implode(' + ', $stokSisaList) . ', jadi tidak bisa dipakai karena aturan tanpa potongan';
         }
-
         return $this->ringkasAlasanJikaPanjang($normalized, $item);
     }
 
     private function ringkasAlasanJikaPanjang(string $reason, array $item): string
     {
-        $text = trim(preg_replace('/\s+/', ' ', $reason));
-        $aksi = (string) ($item['aksi'] ?? '');
-        $qtyPr = (float) ($item['qty_pr'] ?? 0);
+        $text = trim((string) preg_replace('/\s+/', ' ', $reason));
+        $aksi = (string) ($item['aksi'] ?? ''); $qtyPr = (float) ($item['qty_pr'] ?? 0);
         $perluAlasanPotongan = in_array($aksi, ['full_pr', 'partial'], true) || $qtyPr > 0;
-
         $shouldShorten = mb_strlen($text) > 190;
-
-        if ((bool) ($item['tanpa_potongan'] ?? false)
-            && $perluAlasanPotongan
-            && preg_match('/potongan\s+tersedia\s+/iu', $text)) {
-            $shouldShorten = true;
-        }
-
-        if ($text === '' || !$shouldShorten) {
-            return $text;
-        }
-
+        if ((bool) ($item['tanpa_potongan'] ?? false) && $perluAlasanPotongan && preg_match('/potongan\s+tersedia\s+/iu', $text)) $shouldShorten = true;
+        if ($text === '' || !$shouldShorten) return $text;
         if ((bool) ($item['tanpa_potongan'] ?? false)) {
-            if (!$perluAlasanPotongan) {
-                return 'aturan tanpa potongan aktif dan stok roll utuh tersedia, sehingga kebutuhan bisa langsung dibooking.';
-            }
-
-            $stokSisa = (float) ($item['stok_sisa_potongan'] ?? 0);
-            $stokSisaText = $this->formatQty($stokSisa);
-            $stokSisaList = collect($item['stok_sisa_potongan_list'] ?? [])
-                ->map(fn ($value) => $this->formatQty((float) $value))
-                ->filter()
-                ->take(4)
-                ->values()
-                ->all();
-
-            if (!empty($stokSisaList)) {
-                $potonganText = implode(' + ', $stokSisaList);
-                return "aturan tanpa potongan aktif, stok yang ada hanya potongan {$potonganText} (total {$stokSisaText}) jadi tidak bisa dipakai.";
-            }
-
+            if (!$perluAlasanPotongan) return 'aturan tanpa potongan aktif dan stok roll utuh tersedia, sehingga kebutuhan bisa langsung dibooking.';
+            $stokSisaList = collect($item['stok_sisa_potongan_list'] ?? [])->map(fn ($value) => $this->formatQty((float) $value))->filter()->take(4)->values()->all();
+            if (!empty($stokSisaList)) { $stokSisaText = $this->formatQty((float) ($item['stok_sisa_potongan'] ?? 0)); return "aturan tanpa potongan aktif, stok yang ada hanya potongan " . implode(' + ', $stokSisaList) . " (total {$stokSisaText}) jadi tidak bisa dipakai."; }
             return 'aturan tanpa potongan aktif dan stok roll utuh tidak mencukupi, sehingga kebutuhan dialihkan ke PR.';
         }
-
         return 'stok tersedia belum mencukupi kebutuhan, sehingga sistem melakukan penyesuaian booking dan PR.';
     }
 
     private function isNoCutRelevantMaterial(Material $material): bool
     {
-        if ((float) ($material->default_roll_length ?? 0) > 0) {
-            return true;
-        }
-
-        $text = mb_strtolower(trim((string) ($material->nama_material ?? '')));
-
-        return (bool) preg_match('/kabel|cable|fiber|fo\b|optic|utp|ftp|coax|coaxial|wire|roll/i', $text);
+        if ((float) ($material->default_roll_length ?? 0) > 0) return true;
+        return (bool) preg_match('/kabel|cable|fiber|fo\b|optic|utp|ftp|coax|coaxial|wire|roll/i', mb_strtolower(trim((string) ($material->nama_material ?? ''))));
     }
 
     private function sesuaikanAlasanDenganTipeMaterial(string $reason, array $item): string
     {
         $text = trim($reason);
-        if ($text === '') {
-            return $text;
-        }
-
-        if ((bool) ($item['tanpa_potongan'] ?? false)) {
-            return $text;
-        }
-
-        if (!preg_match('/potong|potongan|roll\s+utuh|tanpa\s+potongan/i', $text)) {
-            return $text;
-        }
-
-        $aksi = (string) ($item['aksi'] ?? '');
-        $available = (float) ($item['available'] ?? 0);
-        $qtyBooking = (float) ($item['qty_booking'] ?? 0);
-
-        return match ($aksi) {
-            'full_booking' => 'stok tersedia mencukupi sehingga kebutuhan bisa langsung dibooking',
-            'partial' => 'stok tersedia hanya mencukupi sebagian, sehingga sisanya perlu dibuatkan PR',
-            'full_pr' => $available > 0 && $qtyBooking <= 0
-                ? 'stok yang tersedia belum memenuhi syarat kebutuhan item ini, sehingga dialihkan ke PR'
-                : 'stok tersedia tidak mencukupi sehingga kebutuhan dialihkan ke PR',
-            default => 'keputusan mengikuti kondisi stok aktual untuk material ini',
-        };
+        if ($text === '' || (bool) ($item['tanpa_potongan'] ?? false)) return $text;
+        if (!preg_match('/potong|potongan|roll\s+utuh|tanpa\s+potongan/i', $text)) return $text;
+        $aksi = (string) ($item['aksi'] ?? ''); $available = (float) ($item['available'] ?? 0); $qtyBooking = (float) ($item['qty_booking'] ?? 0);
+        return match ($aksi) { 'full_booking' => 'stok tersedia mencukupi sehingga kebutuhan bisa langsung dibooking', 'partial' => 'stok tersedia hanya mencukupi sebagian, sehingga sisanya perlu dibuatkan PR', 'full_pr' => $available > 0 && $qtyBooking <= 0 ? 'stok yang tersedia belum memenuhi syarat kebutuhan item ini, sehingga dialihkan ke PR' : 'stok tersedia tidak mencukupi sehingga kebutuhan dialihkan ke PR', default => 'keputusan mengikuti kondisi stok aktual untuk material ini' };
     }
 
     private function formatQty(float|int $value): string
     {
         $number = (float) $value;
-
-        if (fmod($number, 1.0) === 0.0) {
-            return (string) (int) $number;
-        }
-
+        if (fmod($number, 1.0) === 0.0) return (string) (int) $number;
         return rtrim(rtrim(number_format($number, 2, '.', ''), '0'), '.');
     }
 }

@@ -157,6 +157,7 @@ class PurchaseRequest extends Model
 
             MaterialPiece::create([
                 'material_id' => $piece->material_id,
+                'piece_code' => $piece->piece_code,
                 'inbound_id' => $piece->inbound_id,
                 'booked_for_project_id' => $projectId,
                 'shelf_location_id' => $piece->shelf_location_id,

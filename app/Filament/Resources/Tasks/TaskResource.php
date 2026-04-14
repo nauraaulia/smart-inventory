@@ -49,7 +49,15 @@ class TaskResource extends Resource
         $role = auth()->user()?->role;
 
         return self::isAdminIt($role)
-            || self::isManagerTeknik($role)
+            || self::isManagerOperasional($role)
+            || self::isStaffAdministrasiGudang($role);
+    }
+
+    public static function shouldRegisterNavigation(): bool
+    {
+        $role = auth()->user()?->role;
+
+        return self::isAdminIt($role)
             || self::isManagerOperasional($role)
             || self::isStaffAdministrasiGudang($role);
     }
@@ -66,7 +74,7 @@ class TaskResource extends Resource
             return false;
         }
 
-        if (!self::isManagerTeknik($user->role) && !self::isManagerOperasional($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
+        if (!self::isManagerOperasional($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
             return false;
         }
 
@@ -102,7 +110,7 @@ class TaskResource extends Resource
             return $query;
         }
 
-        if (!self::isManagerTeknik($user->role) && !self::isManagerOperasional($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
+        if (!self::isManagerOperasional($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
             return $query->whereRaw('1 = 0');
         }
 
@@ -126,7 +134,7 @@ class TaskResource extends Resource
         $query = Task::query()->where('status', 'pending');
 
         if (!self::isAdminIt($user->role)) {
-            if (!self::isManagerTeknik($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
+            if (!self::isStaffAdministrasiGudang($user->role)) {
                 return null;
             }
 

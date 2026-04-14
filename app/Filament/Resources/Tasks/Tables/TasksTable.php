@@ -14,6 +14,7 @@ use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Utilities\Get;
+use Filament\Notifications\Notification;
 use Filament\Tables\Columns\BadgeColumn;
 use Filament\Tables\Columns\TextColumn;
 use Filament\Forms\Components\Textarea;
@@ -219,6 +220,7 @@ class TasksTable
                         }
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             $suggestions = collect(data_get($record->payload, 'allocation_suggestions', []));
+                            $availablePieces = collect(data_get($record->payload, 'available_pieces', []));
                             $defaultRows = $suggestions->map(fn ($s) => [
                                 'selected' => true,
                                 'project_id' => (int) ($s['project_id'] ?? 0),
@@ -226,8 +228,32 @@ class TasksTable
                                 'pr_status' => (string) ($s['pr_status'] ?? '-'),
                                 'qty' => (float) ($s['suggested_qty'] ?? 0),
                             ])->values()->all();
+                            $pieceOptions = $availablePieces
+                                ->mapWithKeys(function (array $piece): array {
+                                    $id = (int) ($piece['id'] ?? 0);
+                                    $length = rtrim(rtrim(number_format((float) ($piece['panjang'] ?? 0), 2, '.', ''), '0'), '.');
+                                    $rack = (string) ($piece['lokasi_rak'] ?? '-');
+                                    $age = (int) ($piece['umur_hari'] ?? 0);
+                                    $source = (string) ($piece['sumber'] ?? '-');
+
+                                    if ($id <= 0) {
+                                        return [];
+                                    }
+
+                                    return [
+                                        $id => "Piece #{$id} | {$length}m | Rak {$rack} | {$source} | Masuk {$age} hari lalu",
+                                    ];
+                                })
+                                ->all();
 
                             return [
+                                Select::make('selected_piece_ids')
+                                    ->label('Pilih Piece yang Boleh Dipakai')
+                                    ->multiple()
+                                    ->searchable()
+                                    ->options($pieceOptions)
+                                    ->default(array_keys($pieceOptions))
+                                    ->helperText('Pilih 1 atau lebih piece. Jika material perlu potongan, sistem akan split sesuai kebutuhan qty proyek.'),
                                 \Filament\Forms\Components\Repeater::make('manual_allocation')
                                     ->label('Checklist Alokasi Proyek')
                                     ->helperText('Kebutuhan proyek sudah dihitung sistem. Centang proyek yang ingin dialokasikan sekarang; sisanya tetap menjadi stok gudang available.')
@@ -249,8 +275,8 @@ class TasksTable
                                         TextInput::make('qty')
                                             ->label('Kebutuhan Qty')
                                             ->numeric()
+                                            ->minValue(0)
                                             ->required()
-                                            ->disabled()
                                             ->dehydrated(),
                                     ])
                                     ->columns(4)
@@ -276,10 +302,16 @@ class TasksTable
                     ->action(function (Task $record, array $data) {
                         $service = new TaskApprovalService();
                         if ($record->type === 'ai_booking_suggestion') {
+                            Notification::make()
+                                ->title('Sedang Memproses Booking & PR')
+                                ->body('AI sedang diproses. Mohon tunggu sekitar 10-30 detik.')
+                                ->info()
+                                ->send();
+
                             $materialDecisions = collect($data['material_decisions'] ?? []);
 
                             if ($materialDecisions->contains(fn ($row) => ($row['status'] ?? 'pending') === 'pending')) {
-                                \Filament\Notifications\Notification::make()
+                                Notification::make()
                                     ->title('Masih ada material pending')
                                     ->body('Silakan approve atau tolak semua material terlebih dahulu.')
                                     ->warning()
@@ -299,10 +331,29 @@ class TasksTable
                                     ->values()
                                     ->all(),
                             ]);
+
+                            Notification::make()
+                                ->title('Proses Selesai')
+                                ->body('Approval booking/PR selesai diproses.')
+                                ->success()
+                                ->send();
                         } elseif ($record->type === 'ai_inbound_allocation_suggestion') {
+                            Notification::make()
+                                ->title('Sedang Memproses Task Operasional')
+                                ->body('Alokasi inbound sedang diproses. Mohon tunggu sebentar.')
+                                ->info()
+                                ->send();
+
                             $service->approve($record, auth()->user(), [
                                 'manual_allocation' => $data['manual_allocation'] ?? [],
+                                'selected_piece_ids' => $data['selected_piece_ids'] ?? [],
                             ]);
+
+                            Notification::make()
+                                ->title('Alokasi Selesai')
+                                ->body('Task operasional berhasil diproses.')
+                                ->success()
+                                ->send();
                         } elseif ($record->type === 'ai_deadstock_recommendation') {
                             $service->approve($record, auth()->user());
                         }

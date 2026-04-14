@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Jobs\ProsesKebutuhanProyekJob;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Cache;
 
 class ProjectItem extends Model
 {
@@ -20,11 +21,21 @@ class ProjectItem extends Model
                 return;
             }
 
-            ProsesKebutuhanProyekJob::dispatchAfterResponse($item->project_id);
+            $projectId = (int) $item->project_id;
+            if ($projectId <= 0) {
+                return;
+            }
+
+            // Hindari burst queue saat form menyimpan beberapa perubahan item sekaligus.
+            $debounceKey = 'project_item_ai_dispatch_' . $projectId;
+            if (!Cache::add($debounceKey, 1, now()->addSeconds(2))) {
+                return;
+            }
+
+            ProsesKebutuhanProyekJob::dispatch($projectId);
         };
 
-        static::created($dispatchSyncAi);
-        static::updated($dispatchSyncAi);
+        static::saved($dispatchSyncAi);
         static::deleted($dispatchSyncAi);
     }
 

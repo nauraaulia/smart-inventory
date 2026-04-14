@@ -9,6 +9,7 @@ use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
 use Filament\Schemas\Schema;
@@ -202,63 +203,147 @@ class TaskForm
                             ])
                             ->columns(3),
 
-                        TextInput::make('payload.execution_result.allocated_total_qty')
-                            ->label('Total Qty Dialokasikan')
+                        Select::make('payload.selected_piece_ids')
                             ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
-                            ->formatStateUsing(fn ($state, Get $get): float => round(
-                                (float) ($state ?? collect($get('payload.execution_result.allocated_rows') ?? [])->sum(
-                                    fn ($row): float => (float) ($row['allocated_qty'] ?? 0)
-                                )),
-                                2
-                            ))
-                            ->suffix('unit')
-                            ->disabled(),
+                            ->label('Checklist Piece yang Dialokasikan')
+                            ->multiple()
+                            ->searchable()
+                            ->options(function (Get $get): array {
+                                $pieces = collect($get('payload.available_pieces') ?? []);
 
-                        TextInput::make('payload.execution_result.returned_to_stock_qty')
-                            ->label('Qty Masuk ke Stok Available')
-                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
-                            ->formatStateUsing(function ($state, Get $get): float {
-                                if ($state !== null) {
-                                    return round((float) $state, 2);
+                                if ($pieces->isEmpty()) {
+                                    $materialId = (int) ($get('payload.material_id') ?? 0);
+                                    $inboundId = (int) ($get('payload.inbound_id') ?? 0);
+
+                                    if ($materialId > 0) {
+                                        $pieces = MaterialPiece::query()
+                                            ->where('material_id', $materialId)
+                                            ->where('status', 'available')
+                                            ->when($inboundId > 0, fn ($q) => $q->where('inbound_id', $inboundId))
+                                            ->orderBy('created_at')
+                                            ->limit(50)
+                                            ->get(['id', 'panjang', 'sumber'])
+                                            ->map(fn (MaterialPiece $piece): array => [
+                                                'id' => (int) $piece->id,
+                                                'panjang' => (float) $piece->panjang,
+                                                'lokasi_rak' => '-',
+                                                'umur_hari' => 0,
+                                                'sumber' => (string) $piece->sumber,
+                                            ]);
+                                    }
                                 }
 
-                                $allocated = round((float) collect($get('payload.execution_result.allocated_rows') ?? [])->sum(
-                                    fn ($row): float => (float) ($row['allocated_qty'] ?? 0)
-                                ), 2);
+                                return $pieces
+                                    ->mapWithKeys(function (array $piece): array {
+                                        $id = (int) ($piece['id'] ?? 0);
+                                        if ($id <= 0) {
+                                            return [];
+                                        }
+
+                                        $length = rtrim(rtrim(number_format((float) ($piece['panjang'] ?? 0), 2, '.', ''), '0'), '.');
+                                        $rack = (string) ($piece['lokasi_rak'] ?? '-');
+                                        $age = (int) ($piece['umur_hari'] ?? 0);
+                                        $source = (string) ($piece['sumber'] ?? '-');
+
+                                        return [
+                                            $id => "Piece #{$id} | {$length}m | Rak {$rack} | {$source} | Masuk {$age} hari lalu",
+                                        ];
+                                    })
+                                    ->all();
+                            })
+                            ->default(function (Get $get): array {
+                                $selected = collect($get('payload.selected_piece_ids') ?? [])
+                                    ->map(fn ($id): int => (int) $id)
+                                    ->filter(fn (int $id): bool => $id > 0)
+                                    ->values()
+                                    ->all();
+
+                                if (!empty($selected)) {
+                                    return $selected;
+                                }
+
+                                $pieceIds = collect($get('payload.piece_ids') ?? [])
+                                    ->map(fn ($id): int => (int) $id)
+                                    ->filter(fn (int $id): bool => $id > 0)
+                                    ->values()
+                                    ->all();
+
+                                if (!empty($pieceIds)) {
+                                    return $pieceIds;
+                                }
 
                                 $materialId = (int) ($get('payload.material_id') ?? 0);
                                 $inboundId = (int) ($get('payload.inbound_id') ?? 0);
 
-                                if ($materialId > 0 && $inboundId > 0) {
-                                    $totalInbound = (float) MaterialPiece::query()
-                                        ->where('material_id', $materialId)
-                                        ->where('inbound_id', $inboundId)
-                                        ->sum('panjang');
-
-                                    return round(max(0, $totalInbound - $allocated), 2);
+                                if ($materialId <= 0) {
+                                    return [];
                                 }
 
-                                return round((float) ($get('payload.execution_result.remaining_piece_length') ?? 0), 2);
+                                return MaterialPiece::query()
+                                    ->where('material_id', $materialId)
+                                    ->where('status', 'available')
+                                    ->when($inboundId > 0, fn ($q) => $q->where('inbound_id', $inboundId))
+                                    ->orderBy('created_at')
+                                    ->limit(50)
+                                    ->pluck('id')
+                                    ->map(fn ($id): int => (int) $id)
+                                    ->values()
+                                    ->all();
                             })
-                            ->suffix('unit')
-                            ->disabled(),
+                            ->helperText('Centang piece yang ingin dipakai untuk alokasi. Jika kabel/potongan, sistem akan split sesuai qty alokasi.'),
 
-                        Repeater::make('payload.execution_result.allocated_rows')
+                        Repeater::make('payload.manual_allocation')
                             ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
-                            ->label('Realisasi Alokasi')
+                            ->label('Ubah Qty Alokasi per Proyek')
                             ->addable(false)
                             ->deletable(false)
                             ->reorderable(false)
+                            ->default(function (Get $get): array {
+                                $existing = collect($get('payload.manual_allocation') ?? [])->filter(fn ($row): bool => is_array($row))->values();
+                                if ($existing->isNotEmpty()) {
+                                    return $existing->map(fn (array $row): array => [
+                                        'selected' => (bool) ($row['selected'] ?? true),
+                                        'project_id' => (int) ($row['project_id'] ?? 0),
+                                        'project_code' => (string) ($row['project_code'] ?? ('#' . (int) ($row['project_id'] ?? 0))),
+                                        'pr_status' => (string) ($row['pr_status'] ?? '-'),
+                                        'qty' => (float) ($row['qty'] ?? $row['suggested_qty'] ?? 0),
+                                    ])->all();
+                                }
+
+                                return collect($get('payload.allocation_suggestions') ?? [])
+                                    ->filter(fn ($row): bool => is_array($row) && (int) ($row['project_id'] ?? 0) > 0)
+                                    ->map(fn (array $row): array => [
+                                        'selected' => true,
+                                        'project_id' => (int) ($row['project_id'] ?? 0),
+                                        'project_code' => (string) ($row['project_code'] ?? ('#' . (int) ($row['project_id'] ?? 0))),
+                                        'pr_status' => (string) ($row['pr_status'] ?? '-'),
+                                        'qty' => (float) ($row['suggested_qty'] ?? 0),
+                                    ])
+                                    ->values()
+                                    ->all();
+                            })
                             ->schema([
+                                Toggle::make('selected')
+                                    ->label('Alokasikan')
+                                    ->default(true)
+                                    ->inline(false),
                                 TextInput::make('project_code')
-                                    ->label('Proyek Tujuan')
-                                    ->disabled(),
-                                TextInput::make('allocated_qty')
+                                    ->label('Proyek')
+                                    ->disabled()
+                                    ->dehydrated(false),
+                                TextInput::make('pr_status')
+                                    ->label('Keterangan')
+                                    ->disabled()
+                                    ->dehydrated(false),
+                                TextInput::make('qty')
                                     ->label('Qty Dialokasikan')
-                                    ->suffix('unit')
-                                    ->disabled(),
+                                    ->numeric()
+                                    ->minValue(0)
+                                    ->required(),
+                                TextInput::make('project_id')
+                                    ->hidden(),
                             ])
-                            ->columns(2),
+                            ->columns(4),
 
                         Repeater::make('payload.deadstock_items')
                             ->visible(fn (?Task $record): bool => $record?->type === 'ai_deadstock_recommendation')

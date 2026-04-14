@@ -21,24 +21,30 @@ class ListProjects extends ListRecords
             'all' => Tab::make('Semua Proyek')
                 ->badge(Project::query()->count()),
 
-            'perencanaan' => Tab::make('Perencanaan Kebutuhan')
-                ->modifyQueryUsing(fn (Builder $query) => $query->categoryPerencanaan())
-                ->badge(Project::query()->categoryPerencanaan()->count())
-                ->badgeColor('gray'),
+            'pending' => Tab::make('Pending')
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'Pending'))
+                ->badge(Project::query()->where('status', 'Pending')->count())
+                ->badgeColor('warning'),
 
-            'barang_lengkap' => Tab::make('Barang Lengkap')
-                ->modifyQueryUsing(fn (Builder $query) => $query->categoryBarangLengkap())
-                ->badge(Project::query()->categoryBarangLengkap()->count())
+            'approved' => Tab::make('Approved')
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'Approved'))
+                ->badge(Project::query()->where('status', 'Approved')->count())
                 ->badgeColor('info'),
 
-            'siap_diambil' => Tab::make('Siap Diambil')
-                ->modifyQueryUsing(fn (Builder $query) => $query->categorySiapDiambil())
-                ->badge(Project::query()->categorySiapDiambil()->count())
-                ->badgeColor('success'),
+            'processing' => Tab::make('Processing')
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'Processing'))
+                ->badge(Project::query()->where('status', 'Processing')->count())
+                ->badgeColor('warning'),
 
-            'complete' => Tab::make('Complete')
-                ->modifyQueryUsing(fn (Builder $query) => $query->categoryComplete())
-                ->badge(Project::query()->categoryComplete()->count())
+            'completed' => Tab::make('Completed')
+                ->modifyQueryUsing(fn (Builder $query) => $query->where(function (Builder $q): void {
+                    $q->where('status', 'Completed')
+                        ->orWhereNotNull('completed_at');
+                }))
+                ->badge(Project::query()->where(function (Builder $q): void {
+                    $q->where('status', 'Completed')
+                        ->orWhereNotNull('completed_at');
+                })->count())
                 ->badgeColor('success'),
         ];
     }

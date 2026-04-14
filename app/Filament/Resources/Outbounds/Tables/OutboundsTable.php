@@ -102,14 +102,13 @@ class OutboundsTable
     {
         $record->loadMissing([
             'items.material:id,nama_material,satuan',
-            'bookedPieces:id,booked_for_project_id,material_id,panjang,status',
+            'bookedPieces:id,booked_for_project_id,material_id,panjang,status,sumber',
         ]);
 
         $requiredByMaterial = $record->items
             ->groupBy('material_id')
             ->map(function ($items) {
                 $first = $items->first();
-
                 return [
                     'name' => (string) ($first?->material?->nama_material ?? 'Material tidak diketahui'),
                     'unit' => (string) ($first?->material?->satuan ?? 'unit'),
@@ -117,10 +116,9 @@ class OutboundsTable
                 ];
             });
 
-        $bookedByMaterial = $record->bookedPieces
+        $bookedPiecesByMaterial = $record->bookedPieces
             ->where('status', 'booked')
-            ->groupBy('material_id')
-            ->map(fn ($pieces) => (float) $pieces->sum('panjang'));
+            ->groupBy('material_id');
 
         if ($requiredByMaterial->isEmpty()) {
             return new HtmlString('<div class="text-sm text-gray-600">Belum ada daftar kebutuhan barang pada project ini.</div>');
@@ -130,7 +128,8 @@ class OutboundsTable
 
         foreach ($requiredByMaterial as $materialId => $data) {
             $required = (float) ($data['required'] ?? 0);
-            $booked = (float) ($bookedByMaterial[(int) $materialId] ?? 0);
+            $bookedPieces = $bookedPiecesByMaterial[(int) $materialId] ?? collect();
+            $booked = (float) $bookedPieces->sum('panjang');
             $shortage = max(0, round($required - $booked, 2));
             $unit = (string) ($data['unit'] ?? 'unit');
 
@@ -145,6 +144,27 @@ class OutboundsTable
                 . '<td class="px-3 py-2 text-sm text-gray-700 dark:text-gray-200">' . e($bookedText) . '</td>'
                 . '<td class="px-3 py-2 text-sm ' . $shortageClass . '">' . e($shortageText) . '</td>'
                 . '</tr>';
+
+            // Tampilkan detail booked per segmen
+            if ($bookedPieces->isNotEmpty()) {
+                $rowsHtml .= '<tr><td colspan="4" class="p-0"><div class="pl-6 pb-2">'
+                    . '<div class="text-xs font-semibold text-gray-500 dark:text-gray-300 mb-1">Booked Pieces (Kelompok per Segmen):</div>'
+                    . '<table class="min-w-full border border-gray-100 dark:border-white/10 mb-2">'
+                    . '<thead class="bg-gray-50 dark:bg-white/5">'
+                    . '<tr>'
+                    . '<th class="px-2 py-1 text-left text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">Panjang</th>'
+                    . '<th class="px-2 py-1 text-left text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">Sumber</th>'
+                    . '</tr>'
+                    . '</thead>'
+                    . '<tbody>';
+                foreach ($bookedPieces as $piece) {
+                    $rowsHtml .= '<tr>'
+                        . '<td class="px-2 py-1 text-xs">' . e(self::formatQty((float) $piece->panjang, $unit)) . '</td>'
+                        . '<td class="px-2 py-1 text-xs">' . e($piece->sumber ?? '-') . '</td>'
+                        . '</tr>';
+                }
+                $rowsHtml .= '</tbody></table></div></td></tr>';
+            }
         }
 
         return new HtmlString(

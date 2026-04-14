@@ -7,6 +7,8 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Auth\Events\Login;
 use App\Models\UserLog;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Str;
 
 class AppServiceProvider extends ServiceProvider
@@ -24,6 +26,10 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        RateLimiter::for('gemini-api', function (): Limit {
+            return Limit::perMinute(5)->by('global-gemini-api');
+        });
+
         // CCTV LOGIN
         Event::listen(Login::class, function ($event): void {
             UserLog::create([

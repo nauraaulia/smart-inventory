@@ -7,6 +7,8 @@ use App\Services\Inventory\InboundAutoAllocationService;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Str;
 
 class MaterialPiece extends Model
 {
@@ -70,6 +72,12 @@ class MaterialPiece extends Model
 
     protected static function booted()
     {
+        static::creating(function (MaterialPiece $piece): void {
+            if (blank($piece->piece_code)) {
+                $piece->piece_code = self::generatePieceCode((int) $piece->material_id);
+            }
+        });
+
         // Setiap kali piece berubah, update summary di tabel materials
         static::saved(function ($piece) {
             $piece->material->updateStokSummary();
@@ -120,7 +128,46 @@ class MaterialPiece extends Model
             ->all();
 
         foreach ($projectIds as $projectId) {
-            ProsesKebutuhanProyekJob::dispatchAfterResponse((int) $projectId);
+            $debounceKey = 'material_piece_ai_dispatch_' . $materialId . '_' . (int) $projectId;
+            if (!Cache::add($debounceKey, 1, now()->addSeconds(5))) {
+                continue;
+            }
+
+            ProsesKebutuhanProyekJob::dispatch((int) $projectId);
+        }
+    }
+
+    private static function generatePieceCode(int $materialId): string
+    {
+        $material = Material::query()->find($materialId, ['id', 'kategori', 'kode_material']);
+        $rawPrefix = (string) ($material?->kategori ?: $material?->kode_material ?: 'MAT');
+        $prefix = strtoupper(Str::of($rawPrefix)->replaceMatches('/[^A-Za-z0-9]/', '')->substr(0, 4)->toString());
+
+        if ($prefix === '') {
+            $prefix = 'MAT';
+        }
+
+        $base = $prefix . '-' . now()->format('ymd');
+        $sequence = 1;
+
+        $last = self::withTrashed()
+            ->where('piece_code', 'like', $base . '-%')
+            ->orderByDesc('piece_code')
+            ->value('piece_code');
+
+        if (is_string($last) && preg_match('/-(\d{4})$/', $last, $matches)) {
+            $sequence = ((int) $matches[1]) + 1;
+        }
+
+        while (true) {
+            $candidate = $base . '-' . str_pad((string) $sequence, 4, '0', STR_PAD_LEFT);
+            $exists = self::withTrashed()->where('piece_code', $candidate)->exists();
+
+            if (!$exists) {
+                return $candidate;
+            }
+
+            $sequence++;
         }
     }
 }

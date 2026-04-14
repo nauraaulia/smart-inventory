@@ -4,6 +4,7 @@ namespace App\Filament\Resources\Outbounds\Pages;
 
 use App\Filament\Resources\Outbounds\OutboundResource;
 use App\Jobs\AnalyzeDeadstockAfterOutboundJob;
+use App\Models\MaterialPiece;
 use App\Models\Outbound;
 use App\Models\Project;
 use App\Models\Task;
@@ -143,6 +144,8 @@ class ViewOutbound extends Page
                         ]);
 
                         if (!$this->record->outbound_manual && $this->record->project_id) {
+                            $this->normalizeBookedPiecesBeforeTake((int) $this->record->project_id);
+
                             DB::table('material_pieces')
                                 ->where('booked_for_project_id', $this->record->project_id)
                                 ->where('status', 'booked')
@@ -446,5 +449,89 @@ class ViewOutbound extends Page
         $normalized = strtolower(trim($unit));
 
         return in_array($normalized, ['m', 'meter', 'meters', 'mtr'], true);
+    }
+
+    private function normalizeBookedPiecesBeforeTake(int $projectId): void
+    {
+        if ($projectId <= 0) {
+            return;
+        }
+
+        $pieces = MaterialPiece::query()
+            ->with('material:id,kategori,default_roll_length')
+            ->where('booked_for_project_id', $projectId)
+            ->where('status', 'booked')
+            ->lockForUpdate()
+            ->get();
+
+        foreach ($pieces as $piece) {
+            $rollLength = $this->resolveOutboundRollLength($piece);
+            $pieceLength = (float) $piece->panjang;
+
+            if ($rollLength <= 0 || $pieceLength <= ($rollLength + 0.00001)) {
+                continue;
+            }
+
+            $fullRollCount = (int) floor($pieceLength / $rollLength);
+            $remainder = round($pieceLength - ($fullRollCount * $rollLength), 2);
+
+            if ($fullRollCount <= 0) {
+                continue;
+            }
+
+            $piece->update([
+                'panjang' => number_format($rollLength, 2, '.', ''),
+                'keterangan' => trim((string) ($piece->keterangan ?? '') . ' | Auto split outbound per roll.'),
+            ]);
+
+            for ($i = 1; $i < $fullRollCount; $i++) {
+                MaterialPiece::create([
+                    'material_id' => $piece->material_id,
+                    'piece_code' => $piece->piece_code,
+                    'inbound_id' => $piece->inbound_id,
+                    'booked_for_project_id' => $piece->booked_for_project_id,
+                    'shelf_location_id' => $piece->shelf_location_id,
+                    'supplier_id' => $piece->supplier_id,
+                    'panjang' => number_format($rollLength, 2, '.', ''),
+                    'unit_price' => $piece->unit_price,
+                    'status' => 'booked',
+                    'sumber' => 'split_outbound_dispatch',
+                    'booked_at' => $piece->booked_at,
+                    'keterangan' => 'Auto split outbound dari piece #' . $piece->id . '.',
+                ]);
+            }
+
+            if ($remainder > 0) {
+                MaterialPiece::create([
+                    'material_id' => $piece->material_id,
+                    'piece_code' => $piece->piece_code,
+                    'inbound_id' => $piece->inbound_id,
+                    'booked_for_project_id' => $piece->booked_for_project_id,
+                    'shelf_location_id' => $piece->shelf_location_id,
+                    'supplier_id' => $piece->supplier_id,
+                    'panjang' => number_format($remainder, 2, '.', ''),
+                    'unit_price' => $piece->unit_price,
+                    'status' => 'booked',
+                    'sumber' => 'split_outbound_remainder',
+                    'booked_at' => $piece->booked_at,
+                    'keterangan' => 'Sisa split outbound dari piece #' . $piece->id . '.',
+                ]);
+            }
+        }
+    }
+
+    private function resolveOutboundRollLength(MaterialPiece $piece): float
+    {
+        $configured = (float) ($piece->material?->default_roll_length ?? 0);
+        if ($configured > 0) {
+            return $configured;
+        }
+
+        $kategori = strtolower(trim((string) ($piece->material?->kategori ?? '')));
+        if ($kategori !== '' && str_contains($kategori, 'kabel')) {
+            return 300.0;
+        }
+
+        return 0.0;
     }
 }

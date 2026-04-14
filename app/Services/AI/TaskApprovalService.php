@@ -2,6 +2,7 @@
 
 namespace App\Services\AI;
 
+use App\Jobs\ProsesKebutuhanProyekJob;
 use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Inbound;
@@ -16,6 +17,7 @@ use Carbon\Carbon;
 use Filament\Actions\Action;
 use Filament\Notifications\Events\DatabaseNotificationsSent;
 use Filament\Notifications\Notification;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -23,7 +25,7 @@ class TaskApprovalService
 {
     public function approve(Task $task, User $actor, array $options = []): void
     {
-        DB::transaction(function () use ($task, $actor, $options) {
+        DB::transaction(function () use ($task, $actor, $options): void {
             match ($task->type) {
                 'ai_booking_suggestion' => $this->approveAiBookingSuggestion($task, $actor, $options),
                 'ai_inbound_allocation_suggestion' => $this->approveInboundAllocationSuggestion($task, $actor, $options),
@@ -45,6 +47,14 @@ class TaskApprovalService
             module: 'Task AI',
             description: "Approve task {$task->type} (ID {$task->id}) untuk project {$projectCode}.",
         );
+
+        if ($task->type === 'ai_booking_suggestion' && $projectId > 0) {
+            $refreshKey = 'ai_post_approval_refresh_' . $projectId;
+            if (Cache::add($refreshKey, 1, now()->addSeconds(15))) {
+                Cache::forget('ai_booking_project_hash_' . $projectId);
+                ProsesKebutuhanProyekJob::dispatch($projectId)->delay(now()->addSeconds(2));
+            }
+        }
     }
 
     public function reject(Task $task, User $actor, string $reason): void
@@ -75,6 +85,11 @@ class TaskApprovalService
         $projectCode = $this->projectCodeFromPayload($payload, $projectId);
         $detail = data_get($payload, 'detail', []);
         $materialItems = collect(data_get($payload, 'items', []));
+        $instructionSegments = collect(data_get($payload, 'ai_instruction.requested_segments', []))
+            ->map(fn ($value): float => round((float) $value, 2))
+            ->filter(fn (float $value): bool => $value > 0)
+            ->values()
+            ->all();
         $generatePr = (bool) ($options['generate_pr'] ?? true);
         $decisionsInput = collect($options['material_decisions'] ?? []);
         $decisionsByMaterial = $decisionsInput
@@ -116,7 +131,6 @@ class TaskApprovalService
 
         data_set($payload, 'recommendation_lock', [
             'locked' => true,
-            'locked_by_user_id' => $actor->id,
             'locked_at' => now()->toDateTimeString(),
             'reason' => 'Booking dan draft PR dari Task AI sudah dikonfirmasi, rekomendasi dikunci sebagai snapshot historis.',
             'snapshot_ai_summary' => data_get($payload, 'ai_summary', []),
@@ -131,7 +145,7 @@ class TaskApprovalService
 
         if ($materialItems->isEmpty()) {
             $materialItems = collect($detail)->map(function (array $item): array {
-                return [
+            return [
                     'material_id' => (int) ($item['material_id'] ?? 0),
                     'material_name' => (string) ($item['nama_material'] ?? '-'),
                     'dibutuhkan' => (float) ($item['dibutuhkan'] ?? 0),
@@ -145,12 +159,55 @@ class TaskApprovalService
             });
         }
 
+        $detailByMaterial = collect($detail)
+            ->keyBy(fn (array $item): int => (int) ($item['material_id'] ?? 0));
+
         foreach ($materialItems as $item) {
             $materialId = (int) ($item['material_id'] ?? 0);
+            $detailRow = (array) ($detailByMaterial->get($materialId, []));
             $dibutuhkan = (float) ($item['dibutuhkan'] ?? 0);
-            $tanpaPotongan = (bool) ($item['tanpa_potongan'] ?? false);
-            $recommendedPieceIds = collect($item['recommended_piece_ids'] ?? [])->map(fn ($id) => (int) $id)->filter()->values()->all();
+            $tanpaPotongan = (bool) ($item['tanpa_potongan'] ?? ($detailRow['tanpa_potongan'] ?? false));
+            $aiBookingQty = max(0, (float) ($item['recommended_qty'] ?? ($detailRow['recommended_qty'] ?? $dibutuhkan)));
+            $aiPrQtyRaw = (float) ($item['recommended_pr_qty'] ?? ($detailRow['recommended_pr_qty'] ?? ($detailRow['qty_pr'] ?? ($dibutuhkan - $aiBookingQty))));
+            $aiBookingQty = min($dibutuhkan, $aiBookingQty);
+            $aiPrQty = min(max(0, $dibutuhkan - $aiBookingQty), max(0, $aiPrQtyRaw));
+            $recommendedPieceIds = collect(!empty($item['recommended_piece_ids'] ?? []) ? ($item['recommended_piece_ids'] ?? []) : ($detailRow['recommended_piece_ids'] ?? []))
+                ->map(fn ($id) => (int) $id)
+                ->filter()
+                ->values()
+                ->all();
+            $recommendedPieces = collect(!empty($item['recommended_pieces'] ?? null) ? ($item['recommended_pieces'] ?? []) : ($detailRow['recommended_pieces'] ?? []))
+                ->filter(fn ($row): bool => is_array($row) && (int) ($row['id'] ?? 0) > 0 && (float) ($row['take_qty'] ?? 0) > 0)
+                ->values()
+                ->all();
             $decision = strtolower((string) data_get($decisionsByMaterial->get($materialId, []), 'status', 'approved'));
+
+            $normalizedSegments = $this->normalizeRequestedSegmentsForTarget(
+                requestedSegments: $instructionSegments,
+                targetQty: $aiBookingQty,
+            );
+
+            if (!empty($normalizedSegments) && !empty($recommendedPieces)) {
+                $recommendedTakeSorted = collect($recommendedPieces)
+                    ->map(fn (array $row): float => round((float) ($row['take_qty'] ?? 0), 2))
+                    ->filter(fn (float $value): bool => $value > 0)
+                    ->sort()
+                    ->values()
+                    ->all();
+
+                $targetSegmentsSorted = collect($normalizedSegments)
+                    ->map(fn ($value): float => round((float) $value, 2))
+                    ->filter(fn (float $value): bool => $value > 0)
+                    ->sort()
+                    ->values()
+                    ->all();
+
+                if ($recommendedTakeSorted !== $targetSegmentsSorted) {
+                    throw ValidationException::withMessages([
+                        'payload.items' => 'Detail piece rekomendasi tidak sinkron dengan segmen instruksi manager. Jalankan ulang AI agar rekomendasi terbaru sebelum approve.',
+                    ]);
+                }
+            }
 
             if ($materialId <= 0 || $dibutuhkan <= 0) {
                 continue;
@@ -180,6 +237,8 @@ class TaskApprovalService
                     'material_name' => (string) ($item['material_name'] ?? ('Material #' . $materialId)),
                     'status' => 'rejected',
                     'dibutuhkan' => $this->decimal($dibutuhkan),
+                    'ai_booking_qty' => $this->decimal($aiBookingQty),
+                    'ai_pr_qty' => $this->decimal($aiPrQty),
                     'booked_qty' => $this->decimal(0),
                     'shortage_qty' => $this->decimal($dibutuhkan),
                     'allocations' => [],
@@ -190,34 +249,90 @@ class TaskApprovalService
                 continue;
             }
 
-            $bookingResult = $this->bookFromAvailablePieces(
-                materialId: $materialId,
-                projectId: $projectId,
-                qtyNeeded: $dibutuhkan,
-                tanpaPotongan: $tanpaPotongan,
-                preferredPieceIds: $recommendedPieceIds,
-            );
+            $bookingResult = [
+                'booked_qty' => 0.0,
+                'allocations' => [],
+                'ai_reason' => (string) ($item['ai_reason'] ?? ''),
+            ];
+
+            if ($aiBookingQty > 0) {
+                if (!empty($recommendedPieces)) {
+                    $bookingResult = $this->bookFromRecommendedPieces(
+                        materialId: $materialId,
+                        projectId: $projectId,
+                        qtyNeeded: $aiBookingQty,
+                        recommendedPieces: $recommendedPieces,
+                    );
+
+                    $remainingAfterRecommended = max(0, round($aiBookingQty - (float) ($bookingResult['booked_qty'] ?? 0), 2));
+                    if ($remainingAfterRecommended > 0.00001) {
+                        $fallbackResult = $this->bookFromAvailablePieces(
+                            materialId: $materialId,
+                            projectId: $projectId,
+                            qtyNeeded: $remainingAfterRecommended,
+                            tanpaPotongan: $tanpaPotongan,
+                            preferredPieceIds: $recommendedPieceIds,
+                        );
+
+                        $bookingResult['booked_qty'] = round(
+                            (float) ($bookingResult['booked_qty'] ?? 0) + (float) ($fallbackResult['booked_qty'] ?? 0),
+                            2
+                        );
+                        $bookingResult['allocations'] = array_values(array_merge(
+                            (array) ($bookingResult['allocations'] ?? []),
+                            (array) ($fallbackResult['allocations'] ?? []),
+                        ));
+                    }
+                } else {
+                    $bookingResult = $this->bookFromAvailablePieces(
+                        materialId: $materialId,
+                        projectId: $projectId,
+                        qtyNeeded: $aiBookingQty,
+                        tanpaPotongan: $tanpaPotongan,
+                        preferredPieceIds: $recommendedPieceIds,
+                    );
+                }
+            }
 
             $bookedQty = (float) ($bookingResult['booked_qty'] ?? 0);
+            $bookingShortage = max(0, $aiBookingQty - $bookedQty);
+            $createdOperationalTaskId = null;
 
-            $shortage = max(0, $dibutuhkan - $bookedQty);
+            if ($bookingShortage > 0) {
+                $createdOperationalTaskId = $this->createInboundAllocationTaskFromRejectedBooking(
+                    materialId: $materialId,
+                    projectId: $projectId,
+                    qtyNeeded: $bookingShortage,
+                    projectCode: $projectCode,
+                    materialName: (string) ($item['material_name'] ?? ('Material #' . $materialId)),
+                    contextNote: 'belum terpenuhi dari booking AI (stok berubah saat approve)',
+                );
+
+                if ($createdOperationalTaskId) {
+                    $createdInboundSuggestionTaskIds[] = $createdOperationalTaskId;
+                }
+            }
 
             $materialResults[] = [
                 'material_id' => $materialId,
                 'material_name' => (string) ($item['material_name'] ?? ('Material #' . $materialId)),
                 'status' => 'approved',
                 'dibutuhkan' => $this->decimal($dibutuhkan),
+                'ai_booking_qty' => $this->decimal($aiBookingQty),
+                'ai_pr_qty' => $this->decimal($aiPrQty),
                 'booked_qty' => $this->decimal($bookedQty),
-                'shortage_qty' => $this->decimal($shortage),
+                'shortage_qty' => $this->decimal(max(0, $dibutuhkan - $bookedQty)),
+                'booking_shortage_qty' => $this->decimal($bookingShortage),
                 'allocations' => $bookingResult['allocations'] ?? [],
                 'ai_reason' => (string) ($item['ai_reason'] ?? ($bookingResult['ai_reason'] ?? '')),
+                'created_operational_task_id' => $createdOperationalTaskId,
             ];
 
-            if ($shortage > 0) {
+            if ($aiPrQty > 0) {
                 if (!$generatePr) {
                     $pendingShortages[] = [
                         'material_id' => $materialId,
-                        'shortage_qty' => $this->decimal($shortage),
+                        'shortage_qty' => $this->decimal($aiPrQty),
                     ];
                     continue;
                 }
@@ -230,7 +345,7 @@ class TaskApprovalService
                     'draft_approved_at' => null,
                     'approved_by_manager' => null,
                     'approved_by_finance' => null,
-                    'quantity' => $this->decimal($shortage),
+                    'quantity' => $this->decimal($aiPrQty),
                     'reason' => 'Draft auto-generated dari Task AI karena stok kurang.',
                     'status' => 'draft',
                     'priority' => $this->hitungPrioritas(
@@ -248,6 +363,7 @@ class TaskApprovalService
 
                 $createdPrIds[] = $pr->id;
             }
+
         }
 
         Material::query()
@@ -264,9 +380,7 @@ class TaskApprovalService
                 'material_confirmed_at' => $isMaterialReady ? now() : null,
             ]);
         }
-
         $payload = $task->payload ?? [];
-        data_set($payload, 'project_code', $projectCode);
         data_set($payload, 'execution_result', [
             'created_draft_pr_ids' => $createdPrIds,
             'created_draft_pr_count' => count($createdPrIds),
@@ -309,6 +423,7 @@ class TaskApprovalService
         float $qtyNeeded,
         string $projectCode,
         string $materialName,
+        string $contextNote = 'ditolak dari rekomendasi AI',
     ): ?int {
         if ($materialId <= 0 || $projectId <= 0 || $qtyNeeded <= 0) {
             return null;
@@ -349,8 +464,8 @@ class TaskApprovalService
         $task = Task::create([
             'for_role' => 'Staff Administrasi Gudang',
             'type' => 'ai_inbound_allocation_suggestion',
-            'title' => "Task Operasional Material Ditolak ({$materialName})",
-            'message' => "Material {$materialName} ditolak dari rekomendasi AI. Pilih manual piece untuk pemenuhan kebutuhan proyek {$projectCode}.",
+            'title' => "Task Operasional Alokasi Inbound ({$materialName})",
+            'message' => "Material {$materialName} {$contextNote}. Pilih manual piece untuk pemenuhan kebutuhan proyek {$projectCode}.",
             'payload' => [
                 'project_id' => $projectId,
                 'project_code' => $projectCode,
@@ -358,6 +473,7 @@ class TaskApprovalService
                 'material_name' => $materialName,
                 'qty_dibutuhkan' => $this->decimal($qtyNeeded),
                 'total_available_qty' => round((float) $availablePieces->sum('panjang'), 2),
+                'piece_ids' => collect($piecesPayload)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(),
                 'available_pieces' => $piecesPayload,
                 'allocation_suggestions' => $allocationSuggestions,
             ],
@@ -380,9 +496,26 @@ class TaskApprovalService
             ->filter(fn ($id) => $id > 0)
             ->values()
             ->all();
+        $selectedPieceIds = collect($options['selected_piece_ids'] ?? [])
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn ($id) => $id > 0)
+            ->values()
+            ->all();
 
         if (empty($pieceIds) && $pieceId > 0) {
             $pieceIds = [$pieceId];
+        }
+
+        if (!empty($selectedPieceIds)) {
+            $pieceIds = $selectedPieceIds;
+        }
+
+        if (empty($pieceIds)) {
+            $pieceIds = collect(data_get($payload, 'available_pieces', []))
+                ->map(fn ($row) => (int) ($row['id'] ?? 0))
+                ->filter(fn ($id) => $id > 0)
+                ->values()
+                ->all();
         }
 
         $manualAlloc = collect($options['manual_allocation'] ?? []);
@@ -482,6 +615,7 @@ class TaskApprovalService
         data_set($payload, 'execution_result', [
             'status' => 'processed',
             'piece_id' => $pieceId,
+            'selected_piece_ids' => $pieceIds,
             'allocated_rows' => $allocations,
             'allocated_total_qty' => $allocatedTotalQty,
             'returned_to_stock_qty' => $returnedToStockQty,
@@ -720,6 +854,7 @@ class TaskApprovalService
 
             MaterialPiece::create([
                 'material_id' => $piece->material_id,
+                'piece_code' => $piece->piece_code,
                 'inbound_id' => $piece->inbound_id,
                 'booked_for_project_id' => null,
                 'shelf_location_id' => $piece->shelf_location_id,
@@ -1142,6 +1277,7 @@ class TaskApprovalService
 
         MaterialPiece::create([
             'material_id' => $piece->material_id,
+            'piece_code' => $piece->piece_code,
             'inbound_id' => $piece->inbound_id,
             'booked_for_project_id' => $projectId,
             'shelf_location_id' => $piece->shelf_location_id,
@@ -1153,6 +1289,73 @@ class TaskApprovalService
             'booked_at' => now(),
             'keterangan' => 'Split booking dari approval usulan alokasi inbound manual.',
         ]);
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $recommendedPieces
+     * @return array{booked_qty: float, allocations: array<int, array<string, mixed>>, ai_reason: string}
+     */
+    private function bookFromRecommendedPieces(int $materialId, int $projectId, float $qtyNeeded, array $recommendedPieces): array
+    {
+        $remaining = max(0, round($qtyNeeded, 2));
+        $booked = 0.0;
+        $allocations = [];
+
+        foreach ($recommendedPieces as $row) {
+            if ($remaining <= 0.00001) {
+                break;
+            }
+
+            $pieceId = (int) ($row['id'] ?? 0);
+            $takeRequested = max(0, round((float) ($row['take_qty'] ?? 0), 2));
+
+            if ($pieceId <= 0 || $takeRequested <= 0) {
+                continue;
+            }
+
+            /** @var MaterialPiece|null $piece */
+            $piece = MaterialPiece::query()
+                ->with(['shelfLocation:id,kode_lokasi,nama_lokasi'])
+                ->lockForUpdate()
+                ->where('id', $pieceId)
+                ->where('material_id', $materialId)
+                ->where('status', 'available')
+                ->first();
+
+            if (!$piece) {
+                continue;
+            }
+
+            $pieceLength = round((float) $piece->panjang, 2);
+            if ($pieceLength <= 0) {
+                continue;
+            }
+
+            $takeQty = min($takeRequested, $remaining, $pieceLength);
+            if ($takeQty <= 0.00001) {
+                continue;
+            }
+
+            $this->allocatePortionFromSinglePiece($piece, $projectId, $takeQty);
+
+            $booked += $takeQty;
+            $remaining = max(0, round($remaining - $takeQty, 2));
+            $allocations[] = [
+                'piece_id' => (int) $pieceId,
+                'taken_qty' => round($takeQty, 2),
+                'original_length' => $pieceLength,
+                'remaining_length' => round(max(0, $pieceLength - $takeQty), 2),
+                'rack' => (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-')),
+                'was_split' => $takeQty + 0.00001 < $pieceLength,
+                'source' => 'recommended_pieces',
+            ];
+        }
+
+        return [
+            'booked_qty' => round($booked, 2),
+            'allocations' => $allocations,
+            'ai_reason' => 'Booking mengikuti detail piece hasil ACC task AI.',
+        ];
     }
 
     /**
@@ -1219,6 +1422,7 @@ class TaskApprovalService
 
             MaterialPiece::create([
                 'material_id' => $piece->material_id,
+                'piece_code' => $piece->piece_code,
                 'inbound_id' => $piece->inbound_id,
                 'booked_for_project_id' => $projectId,
                 'shelf_location_id' => $piece->shelf_location_id,
@@ -1322,6 +1526,7 @@ class TaskApprovalService
 
             MaterialPiece::create([
                 'material_id' => $piece->material_id,
+                'piece_code' => $piece->piece_code,
                 'inbound_id' => $piece->inbound_id,
                 'booked_for_project_id' => $projectId,
                 'shelf_location_id' => $piece->shelf_location_id,
@@ -1452,6 +1657,86 @@ class TaskApprovalService
             ->value('lead_time_hari');
 
         return $leadTime > 0 ? $leadTime : 7;
+    }
+
+    /**
+     * @param  array<int, float|int|string>  $requestedSegments
+     * @return array<int, float>
+     */
+    private function normalizeRequestedSegmentsForTarget(array $requestedSegments, float $targetQty): array
+    {
+        $target = round((float) $targetQty, 2);
+        if ($target <= 0) {
+            return [];
+        }
+
+        $segments = collect($requestedSegments)
+            ->map(fn ($value): float => round((float) $value, 2))
+            ->filter(fn (float $value): bool => $value > 0)
+            ->values()
+            ->all();
+
+        if (empty($segments)) {
+            return [];
+        }
+
+        $sum = round((float) array_sum($segments), 2);
+        if (abs($sum - $target) <= 0.01) {
+            return $segments;
+        }
+
+        return $this->pickSegmentSubsetForTarget($segments, $target);
+    }
+
+    /**
+     * @param  array<int, float>  $segments
+     * @return array<int, float>
+     */
+    private function pickSegmentSubsetForTarget(array $segments, float $target): array
+    {
+        $targetInt = (int) round($target * 100);
+        if ($targetInt <= 0) {
+            return [];
+        }
+
+        $segmentsInt = array_map(fn (float $value): int => (int) round($value * 100), $segments);
+        $n = count($segmentsInt);
+        if ($n === 0 || $n > 30) {
+            return [];
+        }
+
+        $dp = [0 => []];
+
+        foreach ($segmentsInt as $idx => $valueInt) {
+            $next = $dp;
+            foreach ($dp as $sum => $pickedIdx) {
+                $newSum = $sum + $valueInt;
+                if ($newSum > $targetInt) {
+                    continue;
+                }
+
+                $newPicked = $pickedIdx;
+                $newPicked[] = $idx;
+
+                if (!array_key_exists($newSum, $next)) {
+                    $next[$newSum] = $newPicked;
+                    continue;
+                }
+
+                $current = (array) ($next[$newSum] ?? []);
+                if (count($newPicked) > count($current)) {
+                    $next[$newSum] = $newPicked;
+                }
+            }
+
+            $dp = $next;
+        }
+
+        if (!array_key_exists($targetInt, $dp)) {
+            return [];
+        }
+
+        return array_values(array_map(fn (int $idx): float => round((float) ($segments[$idx] ?? 0), 2), $dp[$targetInt]));
     }
 
     private function logUserAction(User $actor, string $action, string $module, string $description): void

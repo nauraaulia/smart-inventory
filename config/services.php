@@ -17,6 +17,14 @@ return [
 'gemini' => [
     'key' => env('GEMINI_API_KEY'),
     'url' => 'https://generativelanguage.googleapis.com/v1beta/models/' . env('GEMINI_MODEL', 'gemini-2.5-flash') . ':generateContent',
+    'timeout_seconds' => env('GEMINI_TIMEOUT_SECONDS', 90),
+    'connect_timeout_seconds' => env('GEMINI_CONNECT_TIMEOUT_SECONDS', 15),
+    'request_retries' => env('GEMINI_REQUEST_RETRIES', 0),
+    'max_output_tokens' => env('GEMINI_MAX_OUTPUT_TOKENS', 1024),
+    'booking_chunk_size' => env('GEMINI_BOOKING_CHUNK_SIZE', 5),
+    'stock_piece_fetch_limit' => env('GEMINI_STOCK_PIECE_FETCH_LIMIT', 10),
+    'booking_include_history' => env('GEMINI_BOOKING_INCLUDE_HISTORY', false),
+    'enable_compact_retry_prompt' => env('GEMINI_ENABLE_COMPACT_RETRY_PROMPT', false),
 ],
 
     'postmark' => [

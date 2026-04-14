@@ -14,6 +14,52 @@ class EditTask extends EditRecord
 {
     protected static string $resource = TaskResource::class;
 
+    protected function mutateFormDataBeforeFill(array $data): array
+    {
+        $type = (string) ($data['type'] ?? '');
+
+        if ($type !== 'ai_inbound_allocation_suggestion') {
+            return $data;
+        }
+
+        $payload = is_array($data['payload'] ?? null) ? $data['payload'] : [];
+
+        $manualAllocation = collect($payload['manual_allocation'] ?? [])
+            ->filter(fn ($row): bool => is_array($row))
+            ->values();
+
+        if ($manualAllocation->isEmpty()) {
+            $manualAllocation = collect($payload['allocation_suggestions'] ?? [])
+                ->filter(fn ($row): bool => is_array($row) && (int) ($row['project_id'] ?? 0) > 0)
+                ->map(fn (array $row): array => [
+                    'selected' => true,
+                    'project_id' => (int) ($row['project_id'] ?? 0),
+                    'project_code' => (string) ($row['project_code'] ?? ('#' . (int) ($row['project_id'] ?? 0))),
+                    'pr_status' => (string) ($row['pr_status'] ?? '-'),
+                    'qty' => (float) ($row['qty'] ?? $row['suggested_qty'] ?? 0),
+                ])
+                ->values();
+        }
+
+        $selectedPieceIds = collect($payload['selected_piece_ids'] ?? [])
+            ->map(fn ($id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->values();
+
+        if ($selectedPieceIds->isEmpty()) {
+            $selectedPieceIds = collect($payload['piece_ids'] ?? [])
+                ->map(fn ($id): int => (int) $id)
+                ->filter(fn (int $id): bool => $id > 0)
+                ->values();
+        }
+
+        $payload['manual_allocation'] = $manualAllocation->all();
+        $payload['selected_piece_ids'] = $selectedPieceIds->all();
+        $data['payload'] = $payload;
+
+        return $data;
+    }
+
     protected function getRedirectUrl(): string
     {
         return $this->getResource()::getUrl('index');
@@ -82,6 +128,39 @@ class EditTask extends EditRecord
                 }
 
                 $service->reject($record, auth()->user(), $reasonInput);
+                return $record->refresh();
+            }
+
+            return $record->refresh();
+        }
+
+        if ($record->type === 'ai_inbound_allocation_suggestion') {
+            $newStatus = (string) ($data['status'] ?? $record->status);
+            $oldStatus = (string) $record->status;
+            $reasonInput = trim((string) ($data['rejection_reason'] ?? ''));
+
+            if ($newStatus === $oldStatus) {
+                return $record->refresh();
+            }
+
+            if ($newStatus === 'done') {
+                $service->approve($record, auth()->user(), [
+                    'manual_allocation' => data_get($data, 'payload.manual_allocation', []),
+                    'selected_piece_ids' => data_get($data, 'payload.selected_piece_ids', []),
+                ]);
+
+                return $record->refresh();
+            }
+
+            if ($newStatus === 'rejected') {
+                if ($reasonInput === '') {
+                    throw ValidationException::withMessages([
+                        'rejection_reason' => 'Alasan reject wajib diisi.',
+                    ]);
+                }
+
+                $service->reject($record, auth()->user(), $reasonInput);
+
                 return $record->refresh();
             }
 

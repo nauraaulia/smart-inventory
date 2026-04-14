@@ -10,6 +10,8 @@ class ViewTask extends ViewRecord
 {
     protected static string $resource = TaskResource::class;
 
+    protected static ?string $pollingInterval = '8s';
+
     protected function getHeaderActions(): array
     {
         return [

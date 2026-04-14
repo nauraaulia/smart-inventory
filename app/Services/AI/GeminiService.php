@@ -1,7 +1,7 @@
 <?php
- 
+
 namespace App\Services\AI;
- 
+
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -10,43 +10,66 @@ class GeminiService
 {
     protected string $apiKey;
     protected string $apiUrl;
+    protected int $maxAttempts;
  
     public function __construct()
     {
         $this->apiKey = config('services.gemini.key');
         $this->apiUrl = config('services.gemini.url');
+        // request_retries means additional retries after the first request.
+        $configuredRetries = max(0, (int) config('services.gemini.request_retries', 0));
+        $this->maxAttempts = 1 + $configuredRetries;
     }
  
-    public function ask(string $prompt): string
+    public function ask(string $prompt, ?string $systemInstruction = null): string
     {
-        $cooldownUntil = (int) Cache::get('gemini:cooldown_until_ts', 0);
+        $cooldownUntilKey = $this->cooldownKey('until_ts');
+        $cooldownPayloadKey = $this->cooldownKey('payload');
+
+        $cooldownUntil = (int) Cache::get($cooldownUntilKey, 0);
         $nowTs = now()->timestamp;
 
         if ($cooldownUntil > $nowTs) {
-            return json_encode([
-                'error' => 'Gemini cooldown aktif',
-                'status' => 429,
-                'retry_after_seconds' => $cooldownUntil - $nowTs,
-            ]);
+            $payload = Cache::get($cooldownPayloadKey);
+            if (!is_array($payload)) {
+                $payload = [
+                    'error' => 'Gemini cooldown aktif',
+                    'status' => 429,
+                ];
+            }
+
+            $payload['retry_after_seconds'] = $cooldownUntil - $nowTs;
+            return json_encode($payload);
         }
 
-        $maxRetries = 4;
+        $maxAttempts = $this->maxAttempts;
         $lastResponse = null;
         $lastError = null;
  
-        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
             try {
-                $response = Http::timeout(120)
-                    ->connectTimeout(15)
-                    ->post("{$this->apiUrl}?key={$this->apiKey}", [
+                $payload = [
                     'contents' => [
                         ['parts' => [['text' => $prompt]]]
                     ],
                     'generationConfig' => [
                         'temperature' => 0.2,
-                        'maxOutputTokens' => 8192,
+                        'maxOutputTokens' => max(512, (int) config('services.gemini.max_output_tokens', 1024)),
+                        'responseMimeType' => 'application/json',
                     ]
-                ]);
+                ];
+
+                if (is_string($systemInstruction) && trim($systemInstruction) !== '') {
+                    $payload['systemInstruction'] = [
+                        'parts' => [
+                            ['text' => trim($systemInstruction)],
+                        ],
+                    ];
+                }
+
+                $response = Http::timeout(max(30, (int) config('services.gemini.timeout_seconds', 90)))
+                    ->connectTimeout(max(5, (int) config('services.gemini.connect_timeout_seconds', 15)))
+                    ->post("{$this->apiUrl}?key={$this->apiKey}", $payload);
  
                 $lastResponse = $response;
  
@@ -60,8 +83,6 @@ class GeminiService
                         'body' => $response->body(),
                     ]);
 
-                    Cache::put('gemini:cooldown_until_ts', now()->timestamp + $retrySeconds, now()->addSeconds($retrySeconds));
- 
                     $lastError = [
                         'error' => $response->status() === 429
                             ? 'Gemini rate limited'
@@ -71,7 +92,10 @@ class GeminiService
                         'retry_after_seconds' => $retrySeconds,
                     ];
 
-                    if ($attempt < $maxRetries) {
+                    Cache::put($cooldownUntilKey, now()->timestamp + $retrySeconds, now()->addSeconds($retrySeconds));
+                    Cache::put($cooldownPayloadKey, $lastError, now()->addSeconds($retrySeconds));
+
+                    if ($attempt < $maxAttempts) {
                         usleep(400000 * $attempt);
                         continue;
                     }
@@ -91,6 +115,9 @@ class GeminiService
                         'body' => $response->json() ?? $response->body(),
                     ]);
                 }
+
+                Cache::forget($cooldownUntilKey);
+                Cache::forget($cooldownPayloadKey);
  
                 return $response->json('candidates.0.content.parts.0.text')
                     ?? json_encode(['error' => 'Response kosong']);
@@ -98,14 +125,20 @@ class GeminiService
             } catch (\Exception $e) {
                 $lastError = ['error' => $e->getMessage()];
 
-                Cache::put('gemini:cooldown_until_ts', now()->timestamp + 15, now()->addSeconds(15));
+                Cache::put($cooldownUntilKey, now()->timestamp + 15, now()->addSeconds(15));
+                Cache::put($cooldownPayloadKey, [
+                    'error' => 'Gemini sementara unavailable',
+                    'status' => 503,
+                    'body' => ['exception' => $e->getMessage()],
+                    'retry_after_seconds' => 15,
+                ], now()->addSeconds(15));
 
                 Log::error('Gemini Exception', [
                     'attempt' => $attempt,
                     'message' => $e->getMessage(),
                 ]);
 
-                if ($attempt < $maxRetries) {
+                if ($attempt < $maxAttempts) {
                     usleep(400000 * $attempt);
                     continue;
                 }
@@ -134,6 +167,13 @@ class GeminiService
         }
 
         return $default;
+    }
+
+    private function cooldownKey(string $suffix): string
+    {
+        $hash = substr(sha1((string) $this->apiKey), 0, 12);
+
+        return 'gemini:' . $hash . ':' . $suffix;
     }
 }
  

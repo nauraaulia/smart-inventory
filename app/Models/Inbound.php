@@ -312,6 +312,11 @@ static::created(function ($inbound) {
             return $configured;
         }
 
+        $kategori = strtolower(trim((string) ($inbound->material?->kategori ?? '')));
+        if ($kategori !== '' && str_contains($kategori, 'kabel') && $totalQty >= 300) {
+            return 300.0;
+        }
+
         // Fallback: ikuti pola data historis piece inbound sebelumnya untuk material yang sama.
         $historicalLengths = \App\Models\MaterialPiece::query()
             ->where('material_id', $inbound->material_id)
