@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Outbounds\Pages;
 
 use App\Filament\Resources\Outbounds\OutboundResource;
+use App\Filament\Widgets\OutboundStatsWidget;
 use App\Models\Outbound;
 use App\Models\Project;
 use Filament\Actions\Action;
@@ -21,6 +22,13 @@ class ListOutbounds extends ListRecords
     protected static string $resource = OutboundResource::class;
 
     protected ?string $pollingInterval = '2s';
+
+    protected function getHeaderWidgets(): array
+    {
+        return [
+            OutboundStatsWidget::class,
+        ];
+    }
 
     protected function getHeaderActions(): array
     {
@@ -98,19 +106,12 @@ class ListOutbounds extends ListRecords
     {
         return [
             'pending' => Tab::make('Menunggu')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'pending'))
-                ->badge((int) Outbound::query()->where('status', 'pending')->count())
-                ->badgeColor('warning'),
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'pending')),
             'ready' => Tab::make('Siap')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'ready'))
-                ->badge((int) Outbound::query()->where('status', 'ready')->count())
-                ->badgeColor('info'),
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'ready')),
             'taken' => Tab::make('Sudah Diambil')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'taken'))
-                ->badge((int) Outbound::query()->where('status', 'taken')->count())
-                ->badgeColor('success'),
-            'all' => Tab::make('Semua')
-                ->badge((int) Outbound::query()->count()),
+                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'taken')),
+            'all' => Tab::make('Semua'),
         ];
     }
 }

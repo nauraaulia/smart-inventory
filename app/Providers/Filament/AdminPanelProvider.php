@@ -31,17 +31,35 @@ class AdminPanelProvider extends PanelProvider
             ->default()
             ->id('admin')
             ->path('admin')
+
+            // BRAND
             ->brandName('Smart Inventory System PT. JAU')
             ->brandLogo(fn () => view('filament.brand.logo'))
+            ->favicon(asset('favicon.ico'))
+
+            // THEME & WARNA
             ->viteTheme('resources/css/filament/admin/theme.css')
             ->darkMode()
             ->defaultThemeMode(ThemeMode::System)
+            ->colors([
+                'primary' => Color::Indigo, // ganti warna disini
+            ])
+            ->font('Plus Jakarta Sans')
+
+            // LAYOUT
+            ->sidebarCollapsibleOnDesktop()
+            ->collapsibleNavigationGroups(true)
+
+            // GLOBAL SEARCH
+            ->globalSearch(true)
+            ->globalSearchKeyBindings(['command+k', 'ctrl+k'])
+
+            // NOTIFIKASI
             ->login()
             ->databaseNotifications()
             ->databaseNotificationsPolling('10s')
-            ->colors([
-                'primary' => Color::Amber,
-            ])
+
+            // RESOURCES, PAGES, WIDGETS
             ->discoverResources(in: app_path('Filament/Resources'), for: 'App\Filament\Resources')
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\Filament\Pages')
             ->pages([
@@ -54,6 +72,8 @@ class AdminPanelProvider extends PanelProvider
                 StokBarChart::class,
                 AgingStokTable::class,
             ])
+
+            // MIDDLEWARE
             ->middleware([
                 EncryptCookies::class,
                 AddQueuedCookiesToResponse::class,

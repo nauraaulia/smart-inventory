@@ -8,14 +8,31 @@ use Filament\Actions\BulkActionGroup;
 use Filament\Actions\DeleteBulkAction;
 use App\Models\Project;
 use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\SelectFilter;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
 
 class ProjectsTable
 {
     public static function configure(Table $table): Table
     {
+        $allowedStatuses = ['Pending', 'Approved', 'Processing', 'Completed'];
+
         return $table
             ->poll('2s')
+            ->modifyQueryUsing(function (Builder $query) use ($allowedStatuses): Builder {
+                $statusScope = (string) request()->query('status_scope', '');
+                if (in_array($statusScope, $allowedStatuses, true)) {
+                    return $query->where('status', $statusScope);
+                }
+
+                $statusFromFilters = (string) data_get(request()->query(), 'filters.status.value', '');
+                if (in_array($statusFromFilters, $allowedStatuses, true)) {
+                    return $query->where('status', $statusFromFilters);
+                }
+
+                return $query;
+            })
             ->columns([
                 TextColumn::make('nama_proyek')
                     ->searchable(),
@@ -63,7 +80,15 @@ class ProjectsTable
                     ->toggleable(isToggledHiddenByDefault: true),
             ])
             ->filters([
-                //
+                // TAMBAHAN INI — filter status dari URL
+                SelectFilter::make('status')
+                    ->options([
+                        'Pending' => 'Pending',
+                        'Approved' => 'Approved',
+                        'Processing' => 'Processing',
+                        'Completed' => 'Completed',
+                    ])
+                    ->hidden(), // disembunyikan dari UI, hanya aktif via URL
             ])
             ->recordActions([
                 Action::make('view_requirements')

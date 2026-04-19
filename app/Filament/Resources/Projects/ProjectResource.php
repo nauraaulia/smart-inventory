@@ -7,6 +7,7 @@ use App\Filament\Resources\Projects\Pages\EditProject;
 use App\Filament\Resources\Projects\Pages\ListProjects;
 use App\Filament\Resources\Projects\Schemas\ProjectForm;
 use App\Filament\Resources\Projects\Tables\ProjectsTable;
+use App\Filament\Widgets\ProjectStatsWidget;
 use App\Models\Project;
 use BackedEnum;
 use Filament\Resources\Resource;
@@ -52,6 +53,14 @@ class ProjectResource extends Resource
         return ProjectsTable::configure($table);
     }
 
+    // INI YANG DITAMBAHKAN — Stats widget di atas tabel
+    public static function getHeaderWidgets(): array
+    {
+        return [
+            ProjectStatsWidget::class,
+        ];
+    }
+
     public static function getEloquentQuery(): Builder
     {
         $user = auth()->user();
@@ -90,9 +99,7 @@ class ProjectResource extends Resource
 
     public static function getRelations(): array
     {
-        return [
-            //
-        ];
+        return [];
     }
 
     public static function getPages(): array

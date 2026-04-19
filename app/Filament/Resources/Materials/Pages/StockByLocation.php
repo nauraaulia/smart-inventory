@@ -11,30 +11,24 @@ use Filament\Resources\Pages\Page;
 class StockByLocation extends Page
 {
     protected static string $resource = MaterialResource::class;
-
     protected string $view = 'filament.resources.materials.pages.stock-by-location';
-
     protected static ?string $title = 'Lokasi Stok';
 
     public string $search = '';
-
     public string $shelfLocationId = '';
-
     public string $materialId = '';
+    public int $movingPieceId = 0;
+    public string $targetShelfLocationId = '';
+    public string $movingFromShelfLabel = '-';
+    public bool $showMoveModal = false;
 
-    /**
-     * @var array<int|string, string>
-     */
+    /** @var array<int|string, string> */
     public array $shelfLocationOptions = [];
 
-    /**
-     * @var array<int|string, string>
-     */
+    /** @var array<int|string, string> */
     public array $materialOptions = [];
 
-    /**
-     * @var array<int, array<string, mixed>>
-     */
+    /** @var array<int, array<string, mixed>> */
     public array $rows = [];
 
     public function mount(): void
@@ -61,7 +55,61 @@ class StockByLocation extends Page
             ])
             ->toArray();
 
+        // Tampilkan notifikasi setelah redirect berhasil
+        if (request()->query('moved') === '1') {
+            \Filament\Notifications\Notification::make()
+                ->title('Berhasil dipindahkan!')
+                ->success()
+                ->send();
+        }
+
+        // Handle submit pindah rak
+        $doMove = (int) request()->query('do_move', 0);
+        $targetShelfId = (int) request()->query('target_shelf_location_id', 0);
+        $movePieceId = (int) request()->query('move_piece_id', 0);
+
+        if ($doMove && $movePieceId > 0) {
+            $piece = MaterialPiece::find($movePieceId);
+            $targetShelf = $targetShelfId > 0 ? ShelfLocation::find($targetShelfId) : null;
+
+            if (!$piece) {
+                \Filament\Notifications\Notification::make()
+                    ->title('Piece tidak ditemukan.')
+                    ->danger()
+                    ->send();
+            } elseif (!$targetShelf) {
+                \Filament\Notifications\Notification::make()
+                    ->title('Rak tujuan wajib dipilih.')
+                    ->warning()
+                    ->send();
+
+                $this->openMoveModal($movePieceId);
+            } else {
+                $piece->update(['shelf_location_id' => $targetShelfId]);
+                \App\Models\UserLog::create([
+                    'user_id' => auth()->id(),
+                    'action' => 'Update',
+                    'module' => 'Material',
+                    'description' => 'Memindahkan piece #' . $movePieceId . ' ke rak ' . $targetShelf->kode_lokasi,
+                    'ip_address' => request()->ip(),
+                ]);
+
+                $cancelUrl = MaterialResource::getUrl('stock-by-location')
+                    . '?search=' . urlencode($this->search)
+                    . '&shelf_location_id=' . urlencode((string) $targetShelfId)
+                    . '&material_id=' . urlencode($this->materialId)
+                    . '&moved=1';
+
+                header('Location: ' . $cancelUrl);
+                exit();
+            }
+        }
+
         $this->rows = $this->loadRows();
+
+        if ($movePieceId > 0 && !$doMove) {
+            $this->openMoveModal($movePieceId);
+        }
     }
 
     public static function canAccess(array $parameters = []): bool
@@ -77,9 +125,55 @@ class StockByLocation extends Page
         ], true);
     }
 
-    /**
-     * @return array<int, array<string, mixed>>
-     */
+    public function getMoveUrl(int $pieceId): string
+    {
+        return MaterialResource::getUrl('stock-by-location')
+            . '?move_piece_id=' . $pieceId
+            . '&search=' . urlencode($this->search)
+            . '&shelf_location_id=' . urlencode($this->shelfLocationId)
+            . '&material_id=' . urlencode($this->materialId);
+    }
+
+    public function getCancelUrl(): string
+    {
+        return MaterialResource::getUrl('stock-by-location')
+            . '?search=' . urlencode($this->search)
+            . '&shelf_location_id=' . urlencode($this->shelfLocationId)
+            . '&material_id=' . urlencode($this->materialId);
+    }
+
+    public function openMoveModal(int $pieceId): void
+    {
+        $piece = MaterialPiece::query()
+            ->with('shelfLocation:id,kode_lokasi,nama_lokasi')
+            ->find($pieceId);
+
+        if (!$piece) {
+            return;
+        }
+
+        $this->movingPieceId = $pieceId;
+        $shelfCode = (string) ($piece->shelfLocation?->kode_lokasi ?: 'TANPA RAK');
+        $shelfName = (string) ($piece->shelfLocation?->nama_lokasi ?: 'Tanpa lokasi rak');
+        $this->movingFromShelfLabel = trim($shelfCode . ' - ' . $shelfName);
+        $this->targetShelfLocationId = '';
+        $this->showMoveModal = true;
+    }
+
+    public function applyFilter(): void
+    {
+        $this->rows = $this->loadRows();
+    }
+
+    public function resetFilter(): void
+    {
+        $this->search = '';
+        $this->shelfLocationId = '';
+        $this->materialId = '';
+        $this->rows = $this->loadRows();
+    }
+
+    /** @return array<int, array<string, mixed>> */
     private function loadRows(): array
     {
         $query = MaterialPiece::query()
@@ -105,17 +199,16 @@ class StockByLocation extends Page
 
         if ($this->search !== '') {
             $keyword = '%' . strtolower($this->search) . '%';
-
             $query->where(function ($builder) use ($keyword): void {
                 $builder
-                        ->whereRaw("LOWER(COALESCE(materials.nama_material, '')) LIKE ?", [$keyword])
-                        ->orWhereRaw("LOWER(COALESCE(materials.kode_material, '')) LIKE ?", [$keyword])
-                        ->orWhereRaw("LOWER(COALESCE(shelf_locations.kode_lokasi, '')) LIKE ?", [$keyword])
-                        ->orWhereRaw("LOWER(COALESCE(shelf_locations.nama_lokasi, '')) LIKE ?", [$keyword]);
+                    ->whereRaw("LOWER(COALESCE(materials.nama_material, '')) LIKE ?", [$keyword])
+                    ->orWhereRaw("LOWER(COALESCE(materials.kode_material, '')) LIKE ?", [$keyword])
+                    ->orWhereRaw("LOWER(COALESCE(shelf_locations.kode_lokasi, '')) LIKE ?", [$keyword])
+                    ->orWhereRaw("LOWER(COALESCE(shelf_locations.nama_lokasi, '')) LIKE ?", [$keyword]);
             });
         }
 
-        $rows = $query
+        return $query
             ->orderBy('shelf_code')
             ->orderBy('material_code')
             ->orderBy('material_name')
@@ -144,7 +237,5 @@ class StockByLocation extends Page
             })
             ->values()
             ->all();
-
-        return $rows;
     }
 }

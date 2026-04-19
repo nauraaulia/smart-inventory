@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Tasks\Pages;
 
 use App\Filament\Resources\Tasks\TaskResource;
+use App\Filament\Widgets\TaskStatsWidget;
 use App\Models\Task;
 use Filament\Notifications\Notification;
 use Filament\Schemas\Components\Tabs\Tab;
@@ -24,13 +25,19 @@ class ListTasks extends ListRecords
     public function mount(): void
     {
         parent::mount();
-
         $this->syncAiBookingNotifications(sendInfoNotification: true, sendReadyNotification: false);
     }
 
     public function hydrate(): void
     {
         $this->syncAiBookingNotifications(sendInfoNotification: true, sendReadyNotification: true);
+    }
+
+    protected function getHeaderWidgets(): array
+    {
+        return [
+            TaskStatsWidget::class,
+        ];
     }
 
     public function getTabs(): array
@@ -53,11 +60,6 @@ class ListTasks extends ListRecords
                 ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'pending'))
                 ->badge($this->countVisibleTasks('pending'))
                 ->badgeColor('warning'),
-
-            'approved' => Tab::make('Approved')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'approved'))
-                ->badge($this->countVisibleTasks('approved'))
-                ->badgeColor('info'),
 
             'done' => Tab::make('Done')
                 ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'done'))
@@ -86,9 +88,7 @@ class ListTasks extends ListRecords
 
     protected function getHeaderActions(): array
     {
-        return [
-            // CreateAction::make(),
-        ];
+        return [];
     }
 
     private function countVisibleTasks(?string $status = null): int
