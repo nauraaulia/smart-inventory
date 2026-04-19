@@ -3,12 +3,20 @@
 namespace App\Filament\Resources\ShelfLocations\Pages;
 
 use App\Filament\Resources\ShelfLocations\ShelfLocationResource;
+use App\Filament\Widgets\ShelfLocationStatsWidget;
 use Filament\Actions\CreateAction;
 use Filament\Resources\Pages\ListRecords;
 
 class ListShelfLocations extends ListRecords
 {
     protected static string $resource = ShelfLocationResource::class;
+
+    protected function getHeaderWidgets(): array
+    {
+        return [
+            ShelfLocationStatsWidget::class,
+        ];
+    }
 
     protected function getHeaderActions(): array
     {

@@ -38,7 +38,7 @@ class AdminPanelProvider extends PanelProvider
             ->favicon(asset('favicon.ico'))
 
             // THEME & WARNA
-            ->viteTheme('resources/css/filament/admin/theme.css')
+            ->viteTheme(['resources/css/filament/admin/theme.css', 'resources/js/app.js'])
             ->darkMode()
             ->defaultThemeMode(ThemeMode::System)
             ->colors([
