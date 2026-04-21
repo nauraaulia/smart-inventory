@@ -4,8 +4,10 @@ namespace App\Filament\Resources\Tasks\Tables;
 
 use App\Filament\Resources\PurchaseRequests\PurchaseRequestResource;
 use App\Filament\Resources\Tasks\TaskResource;
+use App\Models\MaterialPiece;
 use App\Models\Task;
 use App\Services\AI\TaskApprovalService;
+use Carbon\Carbon;
 use Filament\Forms\Components\Hidden;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
@@ -237,7 +239,22 @@ class TasksTable
                         }
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             $suggestions = collect(data_get($record->payload, 'allocation_suggestions', []));
-                            $availablePieces = collect(data_get($record->payload, 'available_pieces', []));
+                            $materialId = (int) data_get($record->payload, 'material_id');
+
+                            $availablePieces = $materialId > 0
+                                ? MaterialPiece::query()
+                                    ->with(['shelfLocation:id,kode_lokasi,nama_lokasi', 'inbound:id,entry_date'])
+                                    ->where('material_id', $materialId)
+                                    ->where('status', 'available')
+                                    ->orderByRaw("CASE
+                                        WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 1
+                                        WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 2
+                                        ELSE 3
+                                    END ASC")
+                                    ->orderBy('created_at')
+                                    ->get(['id', 'panjang', 'sumber', 'shelf_location_id', 'inbound_id', 'created_at'])
+                                : collect();
+
                             $defaultRows = $suggestions->map(fn ($s) => [
                                 'selected' => true,
                                 'project_id' => (int) ($s['project_id'] ?? 0),
@@ -246,12 +263,15 @@ class TasksTable
                                 'qty' => (float) ($s['suggested_qty'] ?? 0),
                             ])->values()->all();
                             $pieceOptions = $availablePieces
-                                ->mapWithKeys(function (array $piece): array {
-                                    $id = (int) ($piece['id'] ?? 0);
-                                    $length = rtrim(rtrim(number_format((float) ($piece['panjang'] ?? 0), 2, '.', ''), '0'), '.');
-                                    $rack = (string) ($piece['lokasi_rak'] ?? '-');
-                                    $age = (int) ($piece['umur_hari'] ?? 0);
-                                    $source = (string) ($piece['sumber'] ?? '-');
+                                ->mapWithKeys(function (MaterialPiece $piece): array {
+                                    $id = (int) $piece->id;
+                                    $length = rtrim(rtrim(number_format((float) $piece->panjang, 2, '.', ''), '0'), '.');
+                                    $rack = (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-'));
+                                    $source = (string) ($piece->sumber ?: '-');
+                                    $receivedAt = $piece->inbound?->entry_date
+                                        ? Carbon::parse($piece->inbound->entry_date)
+                                        : $piece->created_at;
+                                    $age = $receivedAt ? (int) $receivedAt->diffInDays(now()) : 0;
 
                                     if ($id <= 0) {
                                         return [];
@@ -268,12 +288,11 @@ class TasksTable
                                     ->label('Pilih Piece yang Boleh Dipakai')
                                     ->multiple()
                                     ->searchable()
+                                    ->required()
                                     ->options($pieceOptions)
-                                    ->default(array_keys($pieceOptions))
-                                    ->helperText('Pilih 1 atau lebih piece. Jika material perlu potongan, sistem akan split sesuai kebutuhan qty proyek.'),
+                                    ->default([]),
                                 Toggle::make('add_purchase_request')
                                     ->label('Tambahkan Purchase Request')
-                                    ->helperText('Jika aktif, setelah save change Anda akan diarahkan ke form Create Purchase Request.')
                                     ->default(false)
                                     ->inline(false),
                                 \Filament\Forms\Components\Repeater::make('manual_allocation')
@@ -285,23 +304,27 @@ class TasksTable
                                         Toggle::make('selected')
                                             ->label('Alokasikan ke proyek ini')
                                             ->default(true)
+                                            ->columnSpan(2)
                                             ->inline(false),
                                         TextInput::make('project_code')
                                             ->label('Proyek')
+                                            ->columnSpan(4)
                                             ->disabled()
                                             ->dehydrated(false),
                                         TextInput::make('pr_status')
                                             ->label('Status PR')
+                                            ->columnSpan(3)
                                             ->disabled()
                                             ->dehydrated(false),
                                         TextInput::make('qty')
                                             ->label('Kebutuhan Qty')
                                             ->numeric()
                                             ->minValue(0)
+                                            ->columnSpan(3)
                                             ->required()
                                             ->dehydrated(),
                                     ])
-                                    ->columns(4)
+                                    ->columns(12)
                                     ->default($defaultRows)
                                     ->addable(false)
                                     ->deletable(false)

@@ -5,7 +5,9 @@ namespace App\Filament\Resources\Tasks\Schemas;
 use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Task;
+use Carbon\Carbon;
 use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\Repeater;
@@ -19,6 +21,7 @@ class TaskForm
     public static function configure(Schema $schema): Schema
     {
         return $schema
+            ->columns(1)
             ->components([
                 Section::make('Informasi Task')
                     ->schema([
@@ -32,6 +35,7 @@ class TaskForm
                             ->disabled()
                             ->dehydrated(false),
                         Select::make('status')
+                            ->visible(fn (?Task $record): bool => $record?->type !== 'ai_inbound_allocation_suggestion')
                             ->options([
                                 'pending' => 'Pending (Menunggu Konfirmasi)',
                                 'done' => 'Done (Disetujui & Diproses)',
@@ -175,12 +179,11 @@ class TaskForm
                             ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
                             ->formatStateUsing(function ($state, Get $get): float {
                                 $materialId = (int) ($get('payload.material_id') ?? 0);
-                                $inboundId = (int) ($get('payload.inbound_id') ?? 0);
 
-                                if ($materialId > 0 && $inboundId > 0) {
+                                if ($materialId > 0) {
                                     return round((float) MaterialPiece::query()
                                         ->where('material_id', $materialId)
-                                        ->where('inbound_id', $inboundId)
+                                        ->where('status', 'available')
                                         ->sum('panjang'), 2);
                                 }
 
@@ -198,58 +201,58 @@ class TaskForm
                             ->schema([
                                 TextInput::make('project_code')
                                     ->label('Proyek')
+                                    ->columnSpan(5)
                                     ->disabled(),
                                 TextInput::make('suggested_qty')
                                     ->label('Qty Dibutuhkan Proyek')
                                     ->suffix('unit')
+                                    ->columnSpan(4)
                                     ->disabled(),
                                 TextInput::make('pr_status')
                                     ->label('Keterangan')
+                                    ->columnSpan(3)
                                     ->disabled(),
                             ])
-                            ->columns(3),
+                            ->columns(12),
 
                         Select::make('payload.selected_piece_ids')
                             ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
                             ->label('Checklist Piece yang Dialokasikan')
                             ->multiple()
                             ->searchable()
+                            ->required()
                             ->options(function (Get $get): array {
-                                $pieces = collect($get('payload.available_pieces') ?? []);
+                                $materialId = (int) ($get('payload.material_id') ?? 0);
 
-                                if ($pieces->isEmpty()) {
-                                    $materialId = (int) ($get('payload.material_id') ?? 0);
-                                    $inboundId = (int) ($get('payload.inbound_id') ?? 0);
-
-                                    if ($materialId > 0) {
-                                        $pieces = MaterialPiece::query()
-                                            ->where('material_id', $materialId)
-                                            ->where('status', 'available')
-                                            ->when($inboundId > 0, fn ($q) => $q->where('inbound_id', $inboundId))
-                                            ->orderBy('created_at')
-                                            ->limit(50)
-                                            ->get(['id', 'panjang', 'sumber'])
-                                            ->map(fn (MaterialPiece $piece): array => [
-                                                'id' => (int) $piece->id,
-                                                'panjang' => (float) $piece->panjang,
-                                                'lokasi_rak' => '-',
-                                                'umur_hari' => 0,
-                                                'sumber' => (string) $piece->sumber,
-                                            ]);
-                                    }
+                                if ($materialId <= 0) {
+                                    return [];
                                 }
 
-                                return $pieces
-                                    ->mapWithKeys(function (array $piece): array {
-                                        $id = (int) ($piece['id'] ?? 0);
+                                return MaterialPiece::query()
+                                    ->with(['shelfLocation:id,kode_lokasi,nama_lokasi', 'inbound:id,entry_date'])
+                                    ->where('material_id', $materialId)
+                                    ->where('status', 'available')
+                                    ->orderByRaw("CASE
+                                        WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 1
+                                        WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 2
+                                        ELSE 3
+                                    END ASC")
+                                    ->orderBy('created_at')
+                                    ->get(['id', 'panjang', 'sumber', 'shelf_location_id', 'inbound_id', 'created_at'])
+                                    ->mapWithKeys(function (MaterialPiece $piece): array {
+                                        $id = (int) $piece->id;
+
                                         if ($id <= 0) {
                                             return [];
                                         }
 
-                                        $length = rtrim(rtrim(number_format((float) ($piece['panjang'] ?? 0), 2, '.', ''), '0'), '.');
-                                        $rack = (string) ($piece['lokasi_rak'] ?? '-');
-                                        $age = (int) ($piece['umur_hari'] ?? 0);
-                                        $source = (string) ($piece['sumber'] ?? '-');
+                                        $length = rtrim(rtrim(number_format((float) $piece->panjang, 2, '.', ''), '0'), '.');
+                                        $rack = (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-'));
+                                        $source = (string) ($piece->sumber ?: '-');
+                                        $receivedAt = $piece->inbound?->entry_date
+                                            ? Carbon::parse($piece->inbound->entry_date)
+                                            : $piece->created_at;
+                                        $age = $receivedAt ? (int) $receivedAt->diffInDays(now()) : 0;
 
                                         return [
                                             $id => "Piece #{$id} | {$length}m | Rak {$rack} | {$source} | Masuk {$age} hari lalu",
@@ -264,44 +267,12 @@ class TaskForm
                                     ->values()
                                     ->all();
 
-                                if (!empty($selected)) {
-                                    return $selected;
-                                }
-
-                                $pieceIds = collect($get('payload.piece_ids') ?? [])
-                                    ->map(fn ($id): int => (int) $id)
-                                    ->filter(fn (int $id): bool => $id > 0)
-                                    ->values()
-                                    ->all();
-
-                                if (!empty($pieceIds)) {
-                                    return $pieceIds;
-                                }
-
-                                $materialId = (int) ($get('payload.material_id') ?? 0);
-                                $inboundId = (int) ($get('payload.inbound_id') ?? 0);
-
-                                if ($materialId <= 0) {
-                                    return [];
-                                }
-
-                                return MaterialPiece::query()
-                                    ->where('material_id', $materialId)
-                                    ->where('status', 'available')
-                                    ->when($inboundId > 0, fn ($q) => $q->where('inbound_id', $inboundId))
-                                    ->orderBy('created_at')
-                                    ->limit(50)
-                                    ->pluck('id')
-                                    ->map(fn ($id): int => (int) $id)
-                                    ->values()
-                                    ->all();
-                            })
-                            ->helperText('Centang piece yang ingin dipakai untuk alokasi. Jika kabel/potongan, sistem akan split sesuai qty alokasi.'),
+                                return $selected;
+                            }),
 
                         Toggle::make('payload.add_purchase_request')
                             ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
                             ->label('Tambahkan Purchase Request')
-                            ->helperText('Jika aktif, setelah Save changes Anda akan diarahkan ke form Create Purchase Request.')
                             ->default(false)
                             ->inline(false),
 
@@ -339,24 +310,27 @@ class TaskForm
                                 Toggle::make('selected')
                                     ->label('Alokasikan')
                                     ->default(true)
+                                    ->columnSpan(2)
                                     ->inline(false),
                                 TextInput::make('project_code')
                                     ->label('Proyek')
+                                    ->columnSpan(4)
                                     ->disabled()
                                     ->dehydrated(false),
                                 TextInput::make('pr_status')
                                     ->label('Keterangan')
+                                    ->columnSpan(3)
                                     ->disabled()
                                     ->dehydrated(false),
                                 TextInput::make('qty')
                                     ->label('Qty Dialokasikan')
                                     ->numeric()
                                     ->minValue(0)
+                                    ->columnSpan(3)
                                     ->required(),
-                                TextInput::make('project_id')
-                                    ->hidden(),
+                                Hidden::make('project_id'),
                             ])
-                            ->columns(4),
+                            ->columns(12),
 
                         Repeater::make('payload.deadstock_items')
                             ->visible(fn (?Task $record): bool => $record?->type === 'ai_deadstock_recommendation')

@@ -56,6 +56,18 @@ class TaskApprovalService
                 ProsesKebutuhanProyekJob::dispatch($projectId)->delay(now()->addSeconds(2));
             }
         }
+
+        if ($task->type === 'ai_inbound_allocation_suggestion' && $projectId > 0) {
+            $allocatedTotalQty = (float) data_get($payload, 'execution_result.allocated_total_qty', 0);
+
+            if ($allocatedTotalQty > 0) {
+                $refreshKey = 'ai_post_operational_approval_refresh_' . $projectId;
+                if (Cache::add($refreshKey, 1, now()->addSeconds(15))) {
+                    Cache::forget('ai_booking_project_hash_' . $projectId);
+                    ProsesKebutuhanProyekJob::dispatch($projectId)->delay(now()->addSeconds(2));
+                }
+            }
+        }
     }
 
     public function reject(Task $task, User $actor, string $reason): void
@@ -495,6 +507,7 @@ class TaskApprovalService
     private function approveInboundAllocationSuggestion(Task $task, User $actor, array $options = []): void
     {
         $payload = $task->payload ?? [];
+        $defaultProjectId = (int) data_get($payload, 'project_id');
         $pieceId = (int) data_get($payload, 'piece_id');
         $inboundId = (int) data_get($payload, 'inbound_id');
         $materialId = (int) data_get($payload, 'material_id');
@@ -526,13 +539,17 @@ class TaskApprovalService
         }
 
         $manualAlloc = collect($options['manual_allocation'] ?? []);
-        $suggestions = $manualAlloc->isNotEmpty()
+        $selectedManualAlloc = $manualAlloc->isNotEmpty()
             ? $manualAlloc
                 ->filter(fn ($row) => (bool) ($row['selected'] ?? true))
                 ->map(fn($row) => [
-                    'project_id' => (int) ($row['project_id'] ?? 0),
-                    'suggested_qty' => (float) ($row['qty'] ?? 0),
+                    'project_id' => (int) ($row['project_id'] ?? $defaultProjectId),
+                    'suggested_qty' => (float) ($row['qty'] ?? ($row['suggested_qty'] ?? 0)),
                 ])
+            : collect();
+
+        $suggestions = $selectedManualAlloc->isNotEmpty()
+            ? $selectedManualAlloc
             : collect(data_get($payload, 'allocation_suggestions', []));
 
         if (($pieceId <= 0 && empty($pieceIds)) || $suggestions->isEmpty()) {
@@ -542,6 +559,15 @@ class TaskApprovalService
         }
 
         $availablePoolQty = $this->availablePoolQty($materialId, $inboundId, $pieceIds);
+
+        if ($suggestions->isEmpty() && $defaultProjectId > 0 && $availablePoolQty > 0) {
+            $suggestions = collect([
+                [
+                    'project_id' => $defaultProjectId,
+                    'suggested_qty' => $availablePoolQty,
+                ],
+            ]);
+        }
 
         if ($availablePoolQty <= 0) {
             data_set($payload, 'execution_result', [
@@ -572,20 +598,15 @@ class TaskApprovalService
             $projectId = (int) data_get($row, 'project_id');
             $requestedQty = (float) data_get($row, 'suggested_qty', 0);
 
+            if ($projectId <= 0 && $defaultProjectId > 0) {
+                $projectId = $defaultProjectId;
+            }
+
             if ($projectId <= 0 || $requestedQty <= 0) {
                 continue;
             }
 
-            $outstanding = $this->outstandingNeed(
-                projectId: $projectId,
-                materialId: $materialId,
-            );
-
-            if ($outstanding <= 0) {
-                continue;
-            }
-
-            $allocQty = min($remaining, $requestedQty, $outstanding);
+            $allocQty = min($remaining, $requestedQty);
 
             if ($allocQty <= 0) {
                 continue;
@@ -618,6 +639,39 @@ class TaskApprovalService
 
         $allocatedTotalQty = round((float) collect($allocations)->sum(fn ($row): float => (float) ($row['allocated_qty'] ?? 0)), 2);
         $returnedToStockQty = round(max(0, (float) $remaining), 2);
+
+        $manualAllocationForPayload = $manualAlloc->isNotEmpty()
+            ? $manualAlloc
+                ->map(function ($row) use ($defaultProjectId): array {
+                    $projectId = (int) ($row['project_id'] ?? $defaultProjectId);
+
+                    return [
+                        'selected' => (bool) ($row['selected'] ?? true),
+                        'project_id' => $projectId,
+                        'project_code' => (string) ($row['project_code'] ?? $this->projectCodeFromPayload(['project_id' => $projectId], $projectId)),
+                        'pr_status' => (string) ($row['pr_status'] ?? '-'),
+                        'qty' => (float) ($row['qty'] ?? ($row['suggested_qty'] ?? 0)),
+                    ];
+                })
+                ->values()
+                ->all()
+            : collect($suggestions)
+                ->map(function ($row) use ($defaultProjectId): array {
+                    $projectId = (int) data_get($row, 'project_id', $defaultProjectId);
+
+                    return [
+                        'selected' => true,
+                        'project_id' => $projectId,
+                        'project_code' => $this->projectCodeFromPayload(['project_id' => $projectId], $projectId),
+                        'pr_status' => (string) data_get($row, 'pr_status', '-'),
+                        'qty' => (float) data_get($row, 'suggested_qty', 0),
+                    ];
+                })
+                ->values()
+                ->all();
+
+        data_set($payload, 'selected_piece_ids', array_values(array_unique(array_map('intval', $pieceIds))));
+        data_set($payload, 'manual_allocation', $manualAllocationForPayload);
 
         data_set($payload, 'execution_result', [
             'status' => 'processed',

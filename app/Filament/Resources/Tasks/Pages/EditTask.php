@@ -50,7 +50,7 @@ class EditTask extends EditRecord
             ->values();
 
         if ($selectedPieceIds->isEmpty()) {
-            $selectedPieceIds = collect($payload['piece_ids'] ?? [])
+            $selectedPieceIds = collect(data_get($payload, 'execution_result.selected_piece_ids', []))
                 ->map(fn ($id): int => (int) $id)
                 ->filter(fn (int $id): bool => $id > 0)
                 ->values();
@@ -66,7 +66,7 @@ class EditTask extends EditRecord
 
     protected function getRedirectUrl(): string
     {
-        return $this->getResource()::getUrl('index');
+        return $this->redirectAfterSaveUrl ?: $this->getResource()::getUrl('index');
     }
 
     protected function handleRecordUpdate(Model $record, array $data): Model
@@ -193,8 +193,8 @@ class EditTask extends EditRecord
             return $record;
         }
 
-        return $this->redirectAfterSaveUrl ?: $this->getResource()::getUrl('index');
-        $oldStatus = $record->status;
+        $newStatus = (string) ($data['status'] ?? $record->status);
+        $oldStatus = (string) $record->status;
         $reasonInput = trim((string) ($data['rejection_reason'] ?? ''));
 
         // Field virtual (bukan kolom DB), jangan ikut ke parent update.
