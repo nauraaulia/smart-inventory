@@ -139,100 +139,7 @@ class BookingAIService
                 $instruksiAi            = $this->parseInstruksiOperasionalDariCatatan($catatanTeknis, $projectId);
                 $tanpaPotonganDariPrompt = (bool) ($instruksiAi['tanpa_potongan'] ?? false);
 
-                foreach ($kebutuhanDelta as $item) {
-                    $material = Material::query()->find((int) $item['material_id']);
-                    if (!$material) continue;
-
-                    $fallbackAnalisa = $this->analisaSatuItem(material: $material, dibutuhkan: (float) ($item['qty'] ?? 0), projectId: $projectId, tanpaPotongan: $tanpaPotonganDariPrompt, alasanInstruksi: (string) ($instruksiAi['alasan'] ?? ''));
-                    $fallbackSelection = $this->fallbackPieceSelection(materialId: (int) $material->id, dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0), materialName: (string) ($material->nama_material ?? ''), satuan: (string) ($material->satuan ?? 'unit'), instruksiAi: $instruksiAi);
-                    $pieceById = collect((array) data_get($stockData, (string) $material->id . '.pieces', []))->keyBy(fn (array $piece): int => (int) ($piece['id'] ?? 0));
-
-                    $normalizedSegments = $this->normalizeRequestedSegmentsForTarget(
-                        requestedSegments: (array) ($instruksiAi['requested_segments'] ?? []),
-                        targetQty: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                    );
-
-                    ['chosen' => $chosen, 'remaining' => $remaining] = $this->buildChosenPiecesFromSelection(selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(), pieceById: $pieceById, dibutuhkan: (float) ($fallbackAnalisa['qty_booking'] ?? 0));
-
-                    $requestedPieceCount = (int) ($instruksiAi['requested_piece_count'] ?? 0);
-                    if (!(bool) ($instruksiAi['require_no_joint'] ?? false)
-                        && $requestedPieceCount > 1
-                        && empty($normalizedSegments)
-                        && !empty($chosen)
-                    ) {
-                        $chosen = $this->enforceRequestedPieceCount($chosen, $requestedPieceCount);
-                        $pickedTotal = round((float) collect($chosen)->sum(fn (array $piece): float => (float) ($piece['take_qty'] ?? 0)), 2);
-                        $remaining = max(0, round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - $pickedTotal, 2));
-                    }
-
-                    if (!(bool) ($instruksiAi['require_no_joint'] ?? false)
-                        && $requestedPieceCount <= 0
-                        && empty($normalizedSegments)
-                        && !empty($chosen)
-                    ) {
-                        $chosen = $this->rebalanceNonSegmentedChosenPieces($chosen);
-                        $pickedTotal = round((float) collect($chosen)->sum(fn (array $piece): float => (float) ($piece['take_qty'] ?? 0)), 2);
-                        $remaining = max(0, round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - $pickedTotal, 2));
-                    }
-
-                    if ((bool) ($instruksiAi['require_no_joint'] ?? false) && !empty($normalizedSegments)) {
-                        $segmented = $this->buildChosenPiecesFromSegments(
-                            selectedIds: collect($fallbackSelection['selected_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->values()->all(),
-                            pieceById: $pieceById,
-                            qtyBooking: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                            requestedSegments: $normalizedSegments,
-                        );
-
-                        // If Gemini-selected IDs cannot satisfy strict segments, retry against full pool.
-                        if (empty($segmented['chosen'] ?? [])) {
-                            $segmented = $this->buildChosenPiecesFromSegments(
-                                selectedIds: [],
-                                pieceById: $pieceById,
-                                qtyBooking: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                                requestedSegments: $normalizedSegments,
-                            );
-                        }
-
-                        if (!empty($segmented['chosen'] ?? [])) {
-                            $chosen = $segmented['chosen'];
-                            $remaining = (float) ($segmented['remaining'] ?? $remaining);
-                        } else {
-                            // Strict no-joint: if segments cannot be matched, do not fallback to mixed cuts.
-                            $chosen = [];
-                            $remaining = (float) ($fallbackAnalisa['qty_booking'] ?? 0);
-                            $fallbackAnalisa['qty_pr'] = (float) ($fallbackAnalisa['dibutuhkan'] ?? ($item['qty'] ?? 0));
-                            $fallbackAnalisa['qty_booking'] = 0.0;
-                            $fallbackAnalisa['aksi'] = 'full_pr';
-                        }
-                    }
-
-                    $fallbackAnalisa['recommended_piece_ids']    = collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
-                    $fallbackAnalisa['recommended_qty']          = round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - max(0, $remaining), 2);
-                    $fallbackAnalisa['recommended_pieces']       = $chosen;
-                    $fallbackAnalisa['alasan_ai_gemini']         = trim(implode('. ', array_filter([(string) ($fallbackSelection['overall_reason'] ?? ''), (string) ($fallbackAnalisa['alasan_ai'] ?? '')])));
-                    $fallbackAnalisa['alasan_ai']                = $this->buildGeminiPrimarySyncedReason(
-                        rawReason: (string) ($fallbackAnalisa['alasan_ai_gemini'] ?? ''),
-                        item: [
-                            'aksi' => (string) ($fallbackAnalisa['aksi'] ?? ''),
-                            'qty_pr' => (float) ($fallbackAnalisa['qty_pr'] ?? 0),
-                            'tanpa_potongan' => (bool) ($fallbackAnalisa['tanpa_potongan'] ?? false),
-                            'available' => (float) ($fallbackAnalisa['available'] ?? 0),
-                            'qty_booking' => (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                        ],
-                        materialName: (string) ($material->nama_material ?? ('Material #' . (int) $material->id)),
-                        satuan: (string) ($material->satuan ?? 'unit'),
-                        dibutuhkan: (float) ($item['qty'] ?? 0),
-                        qtyBooking: (float) ($fallbackAnalisa['qty_booking'] ?? 0),
-                        qtyPr: (float) ($fallbackAnalisa['qty_pr'] ?? 0),
-                        chosenPieces: $chosen,
-                        requestedSegments: $normalizedSegments,
-                        requireNoJoint: (bool) ($instruksiAi['require_no_joint'] ?? false),
-                    );
-                    $fallbackAnalisa['kebutuhan_asli']           = (float) ($item['qty_original'] ?? $item['qty'] ?? 0);
-                    $fallbackAnalisa['kebutuhan_setelah_buffer'] = (float) ($item['qty'] ?? 0);
-                    $fallbackAnalisa['kebutuhan_belum_tercover'] = max(0, (float) ($fallbackAnalisa['qty_pr'] ?? 0));
-                    $hasilAnalisis[] = $fallbackAnalisa;
-                }
+                $hasilAnalisis = $this->buildFallbackAnalysis($projectId, $kebutuhanDelta, $stockData, $instruksiAi);
 
                 $ringkasanGemini = 'AI sedang tidak tersedia (quota/error), rekomendasi lokal digunakan. Silakan review dan sesuaikan bila perlu.';
                 if ($geminiFailureReason !== '') $ringkasanGemini .= ' (' . $geminiFailureReason . ')';
@@ -240,34 +147,22 @@ class BookingAIService
 
             } else {
                 $instruksiNode = is_array($geminiResponse['instruksi_manager'] ?? null) ? $geminiResponse['instruksi_manager'] : [];
-                $instruksiFallback = $this->parseInstruksiOperasionalDariCatatan($catatanTeknis, $projectId);
                 $requestedSegmentsFromNode = collect($instruksiNode['requested_segments'] ?? [])
                     ->map(fn ($value): float => round((float) $value, 2))
                     ->filter(fn (float $value): bool => $value > 0)
                     ->values()
                     ->all();
-                $requestedSegmentsFromFallback = collect($instruksiFallback['requested_segments'] ?? [])
-                    ->map(fn ($value): float => round((float) $value, 2))
-                    ->filter(fn (float $value): bool => $value > 0)
-                    ->values()
-                    ->all();
                 $requestedPieceCountFromNode = max(0, (int) ($instruksiNode['requested_piece_count'] ?? 0));
-                $requestedPieceCountFromFallback = max(0, (int) ($instruksiFallback['requested_piece_count'] ?? 0));
-                $requestedPieceCountMerged = max($requestedPieceCountFromNode, $requestedPieceCountFromFallback);
-                $requestedSegmentsMerged = !empty($requestedSegmentsFromNode)
-                    ? $requestedSegmentsFromNode
-                    : $requestedSegmentsFromFallback;
-                $hasReliableSegmentSpec = !empty($requestedSegmentsMerged)
-                    && !($requestedPieceCountMerged > 1 && count($requestedSegmentsMerged) <= 1);
-                $requestedSegmentsFinal = $hasReliableSegmentSpec ? $requestedSegmentsMerged : [];
+                $hasReliableSegmentSpec = !empty($requestedSegmentsFromNode)
+                    && !($requestedPieceCountFromNode > 1 && count($requestedSegmentsFromNode) <= 1);
+                $requestedSegmentsFinal = $hasReliableSegmentSpec ? $requestedSegmentsFromNode : [];
                 $requireNoJointMerged = (bool) ($instruksiNode['require_no_joint'] ?? false)
-                    || (bool) ($instruksiFallback['require_no_joint'] ?? false)
                     || $hasReliableSegmentSpec;
                 $instruksiAi   = [
                     'tanpa_potongan' => (bool) ($instruksiNode['tanpa_potongan'] ?? false),
                     'require_no_joint' => $requireNoJointMerged,
                     'requested_segments' => $requestedSegmentsFinal,
-                    'requested_piece_count' => $requestedPieceCountMerged,
+                    'requested_piece_count' => $requestedPieceCountFromNode,
                     'ringkas' => (string) ($instruksiNode['ringkas'] ?? 'Tidak ada instruksi khusus soal potongan.'),
                     'alasan' => (string) ($instruksiNode['alasan'] ?? ''),
                     'sumber' => 'gemini_full_analysis',
@@ -286,7 +181,6 @@ class BookingAIService
                     $pieces         = (array) data_get($stockData, (string) $materialId . '.pieces', []);
                     $materialGemini = $materialsNode[(string) $materialId] ?? null;
 
-                    $useMaterialFallback = false;
                     $aksi = ''; $selectedIds = []; $alasanPerPiece = []; $overallReason = ''; $sisaAnalysis = ''; $geminiAllocations = [];
 
                     if (!is_array($materialGemini)) {
@@ -314,10 +208,6 @@ class BookingAIService
                         }
                     }
 
-                    if ($useMaterialFallback) {
-                        throw new \RuntimeException("Fallback per-material dimatikan untuk material_id {$materialId}.");
-                    }
-
                     [$qtyBooking, $qtyPr] = match ($aksi) {
                         'full_booking' => [$dibutuhkan, 0.0],
                         'partial'      => [min($available, $dibutuhkan), max(0, $dibutuhkan - min($available, $dibutuhkan))],
@@ -340,6 +230,8 @@ class BookingAIService
                             targetQty: $qtyBooking,
                         );
 
+                    $shouldUsePureFallback = false;
+
                     if ((bool) ($instruksiAi['require_no_joint'] ?? false) && !empty($segmentsForNeed)) {
                         $limitBooking = min($available, $dibutuhkan);
                         $segmentPlan = $this->pickSegmentSubsetWithinLimit($segmentsForNeed, $limitBooking);
@@ -349,32 +241,13 @@ class BookingAIService
                             $qtyBooking = round((float) array_sum($segmentPlan), 2);
                             $qtyPr = max(0, round($dibutuhkan - $qtyBooking, 2));
                             $aksi = $qtyPr > 0.00001 ? 'partial' : 'full_booking';
-
-                            // Keep Gemini for strategy text, but force allocation from manager segments.
-                            $geminiAllocations = [];
-                            $overallReason = trim(implode('. ', array_filter([
-                                $overallReason,
-                                'Instruksi manager tanpa sambungan diprioritaskan sebagai aturan wajib, sehingga alokasi dihitung ulang oleh sistem PHP agar patuh segmen.',
-                            ])));
                         } else {
-                            $normalizedSegments = $segmentsForNeed;
-                            $qtyBooking = 0.0;
-                            $qtyPr = $dibutuhkan;
-                            $aksi = 'full_pr';
-                            $selectedIds = [];
-                            $geminiAllocations = [];
-                            $overallReason = trim(implode('. ', array_filter([
-                                $overallReason,
-                                'Instruksi segmen tanpa sambungan tidak dapat dipenuhi dari stok saat ini, sehingga dialihkan ke PR.',
-                            ])));
+                            $shouldUsePureFallback = true;
                         }
                     }
 
                     if ((bool) ($instruksiAi['require_no_joint'] ?? false) && !empty($normalizedSegments) && empty($geminiAllocations)) {
-                        $overallReason = trim(implode('. ', array_filter([
-                            $overallReason,
-                            'Gemini tidak memberi alokasi_kabel per segmen, sehingga sistem PHP menyusun alokasi segmentasi agar instruksi tanpa sambungan tetap terpenuhi.',
-                        ])));
+                        $shouldUsePureFallback = true;
                     }
 
                     ['chosen' => $chosen, 'remaining' => $remaining] = !empty($geminiAllocations)
@@ -426,51 +299,93 @@ class BookingAIService
                         }
                     }
 
-                    if ((bool) ($instruksiAi['require_no_joint'] ?? false) && !empty($normalizedSegments)) {
-                        $segmented = $this->buildChosenPiecesFromSegments(
-                            selectedIds: $selectedIds,
-                            pieceById: $pieceById,
-                            qtyBooking: $qtyBooking,
-                            requestedSegments: $normalizedSegments,
-                        );
-
-                        // If Gemini-selected IDs cannot satisfy strict segments, retry against full pool.
-                        if (empty($segmented['chosen'] ?? [])) {
-                            $segmented = $this->buildChosenPiecesFromSegments(
-                                selectedIds: [],
-                                pieceById: $pieceById,
-                                qtyBooking: $qtyBooking,
-                                requestedSegments: $normalizedSegments,
-                            );
-                        }
-
-                        if (!empty($segmented['chosen'] ?? [])) {
-                            $chosen = $segmented['chosen'];
-                            $remaining = (float) ($segmented['remaining'] ?? $remaining);
-                            $overallReason = trim(implode('. ', array_filter([
-                                $overallReason,
-                                'Segment kebutuhan tanpa sambungan diterapkan: ' . implode(' + ', collect($normalizedSegments)->map(fn ($v) => $this->formatQty((float) $v))->all()),
-                            ])));
-                        } else {
-                            // Strict no-joint: do not continue with non-segmented plan.
-                            $aksi = 'full_pr';
-                            $qtyBooking = 0.0;
-                            $qtyPr = $dibutuhkan;
-                            $chosen = [];
-                            $remaining = 0.0;
-                            $overallReason = trim(implode('. ', array_filter([
-                                $overallReason,
-                                'Segmen tanpa sambungan tidak dapat dipenuhi dari stok yang tersedia.',
-                            ])));
-                        }
+                    if ((bool) ($instruksiAi['require_no_joint'] ?? false) && !empty($normalizedSegments) && empty($chosen)) {
+                        $shouldUsePureFallback = true;
                     }
 
                     if ($qtyBooking > 0 && empty($chosen)) {
-                        throw new \RuntimeException("Gemini memilih piece yang tidak bisa dipakai sistem untuk material_id {$materialId}.");
+                        $shouldUsePureFallback = true;
                     }
 
-                    $perPieceReasonText = collect($chosen)->map(function (array $piece) use ($alasanPerPiece): string { $pieceId = (int) ($piece['id'] ?? 0); $reason = trim((string) ($alasanPerPiece[(string) $pieceId] ?? '')); return $reason !== '' ? ('Piece #' . $pieceId . ': ' . $reason) : ''; })->filter()->implode('. ');
+                    if ($shouldUsePureFallback) {
+                        $fallbackRows = $this->buildFallbackAnalysis(
+                            $projectId,
+                            [[
+                                'material_id' => $materialId,
+                                'qty' => $dibutuhkan,
+                                'qty_original' => (float) ($item['qty_original'] ?? $dibutuhkan),
+                            ]],
+                            $stockData,
+                            $instruksiAi,
+                        );
+
+                        $fallbackRow = (array) ($fallbackRows[0] ?? []);
+
+                        if (empty($fallbackRow)) {
+                            throw new \RuntimeException("Fallback tidak menghasilkan analisis untuk material_id {$materialId}.");
+                        }
+
+                        $hasilAnalisis[] = $fallbackRow;
+                        $rekomendasiGemini[] = [
+                            'material' => (string) ($fallbackRow['nama_material'] ?? $material->nama_material),
+                            'aksi' => match ($fallbackRow['aksi'] ?? null) {
+                                'full_booking' => 'booking',
+                                'partial' => 'booking sebagian + PR',
+                                'full_pr' => 'buat PR',
+                                default => 'review manual',
+                            },
+                            'detail' => (string) ($fallbackRow['alasan_ai'] ?? ''),
+                        ];
+
+                        continue;
+                    }
+
+                    $perPieceReasonText = collect($chosen)
+                        ->unique(fn (array $piece): int => (int) ($piece['id'] ?? 0))
+                        ->map(function (array $piece) use ($alasanPerPiece): string {
+                            $pieceId = (int) ($piece['id'] ?? 0);
+                            $reason = trim((string) ($alasanPerPiece[(string) $pieceId] ?? ''));
+
+                            return $reason !== '' ? ('Piece #' . $pieceId . ': ' . $reason) : '';
+                        })
+                        ->filter()
+                        ->unique()
+                        ->implode('. ');
                     $geminiReason = implode('. ', array_values(array_filter([$overallReason, $perPieceReasonText, $sisaAnalysis], fn ($segment): bool => trim((string) $segment) !== '')));
+
+                    if ($geminiReason === '') {
+                        $fallbackRows = $this->buildFallbackAnalysis(
+                            $projectId,
+                            [[
+                                'material_id' => $materialId,
+                                'qty' => $dibutuhkan,
+                                'qty_original' => (float) ($item['qty_original'] ?? $dibutuhkan),
+                            ]],
+                            $stockData,
+                            $instruksiAi,
+                        );
+
+                        $fallbackRow = (array) ($fallbackRows[0] ?? []);
+
+                        if (empty($fallbackRow)) {
+                            throw new \RuntimeException("Fallback tidak menghasilkan analisis untuk material_id {$materialId}.");
+                        }
+
+                        $hasilAnalisis[] = $fallbackRow;
+                        $rekomendasiGemini[] = [
+                            'material' => (string) ($fallbackRow['nama_material'] ?? $material->nama_material),
+                            'aksi' => match ($fallbackRow['aksi'] ?? null) {
+                                'full_booking' => 'booking',
+                                'partial' => 'booking sebagian + PR',
+                                'full_pr' => 'buat PR',
+                                default => 'review manual',
+                            },
+                            'detail' => (string) ($fallbackRow['alasan_ai'] ?? ''),
+                        ];
+
+                        continue;
+                    }
+
                     $displayReason = $this->buildGeminiPrimarySyncedReason(
                         rawReason: $geminiReason,
                         item: [
@@ -490,7 +405,7 @@ class BookingAIService
                         requireNoJoint: (bool) ($instruksiAi['require_no_joint'] ?? false),
                     );
 
-                    $hasilAnalisis[] = ['material_id' => $materialId, 'nama_material' => (string) $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => round($available, 2), 'aksi' => $aksi, 'qty_booking' => round($qtyBooking, 2), 'qty_pr' => round($qtyPr, 2), 'tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false), 'recommended_piece_ids' => collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(), 'recommended_qty' => round($qtyBooking - max(0, $remaining), 2), 'recommended_pieces' => $chosen, 'alasan_ai' => $displayReason, 'alasan_ai_gemini' => $geminiReason, 'kebutuhan_asli' => (float) ($item['qty_original'] ?? $dibutuhkan), 'kebutuhan_setelah_buffer' => $dibutuhkan, 'kebutuhan_belum_tercover' => round($qtyPr, 2)];
+                    $hasilAnalisis[] = ['material_id' => $materialId, 'nama_material' => (string) $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => round($available, 2), 'aksi' => $aksi, 'qty_booking' => round($qtyBooking, 2), 'qty_pr' => round($qtyPr, 2), 'tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false), 'recommended_piece_ids' => collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(), 'recommended_qty' => round($qtyBooking - max(0, $remaining), 2), 'recommended_pieces' => $chosen, 'alasan_ai' => $displayReason, 'alasan_ai_gemini' => $geminiReason, 'ai_reason_source' => 'gemini', 'kebutuhan_asli' => (float) ($item['qty_original'] ?? $dibutuhkan), 'kebutuhan_setelah_buffer' => $dibutuhkan, 'kebutuhan_belum_tercover' => round($qtyPr, 2)];
                     $rekomendasiGemini[] = ['material' => (string) $material->nama_material, 'aksi' => match ($aksi) { 'full_booking' => 'booking', 'partial' => 'booking sebagian + PR', 'full_pr' => 'buat PR', default => 'review manual' }, 'detail' => $displayReason];
                 }
             }
@@ -974,7 +889,7 @@ PROMPT;
                 );
             }
 
-            return ['material_id' => $materialId, 'material_name' => (string) ($row['nama_material'] ?? ('Material #' . $materialId)), 'dibutuhkan' => round($dibutuhkan, 2), 'satuan' => $satuan, 'available_qty' => round((float) ($row['available'] ?? $row['available_qty'] ?? 0), 2), 'recommended_booking_qty' => round((float) ($row['qty_booking'] ?? 0), 2), 'recommended_pr_qty' => round((float) ($row['qty_pr'] ?? 0), 2), 'recommended_piece_ids' => collect($row['recommended_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->values()->all(), 'recommended_qty' => round((float) ($row['recommended_qty'] ?? ($row['qty_booking'] ?? 0)), 2), 'recommended_pieces' => $recommendedPieces, 'tanpa_potongan' => (bool) ($row['tanpa_potongan'] ?? false), 'ai_reason' => $reason, 'status' => 'pending'];
+            return ['material_id' => $materialId, 'material_name' => (string) ($row['nama_material'] ?? ('Material #' . $materialId)), 'dibutuhkan' => round($dibutuhkan, 2), 'satuan' => $satuan, 'available_qty' => round((float) ($row['available'] ?? $row['available_qty'] ?? 0), 2), 'recommended_booking_qty' => round((float) ($row['qty_booking'] ?? 0), 2), 'recommended_pr_qty' => round((float) ($row['qty_pr'] ?? 0), 2), 'recommended_piece_ids' => collect($row['recommended_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->values()->all(), 'recommended_qty' => round((float) ($row['recommended_qty'] ?? ($row['qty_booking'] ?? 0)), 2), 'recommended_pieces' => $recommendedPieces, 'tanpa_potongan' => (bool) ($row['tanpa_potongan'] ?? false), 'ai_reason' => $reason, 'ai_reason_source' => (string) ($row['ai_reason_source'] ?? 'unknown'), 'status' => 'pending'];
         })->values()->all();
     }
 
@@ -1045,7 +960,7 @@ PROMPT;
     }
 
     /**
-     * Keep Gemini as primary explanation source, then normalize wording so it stays in sync with final allocation.
+     * Keep Gemini reason pure: only show Gemini wording, without PHP-added allocation narrative.
      *
      * @param  array<string, mixed>  $item
      * @param  array<int, array<string, mixed>>  $chosenPieces
@@ -1066,26 +981,6 @@ PROMPT;
         $strategicReason = trim($rawReason);
         $strategicReason = trim((string) preg_replace('/\s+/', ' ', str_replace(['..', ' .', '. .'], '.', $strategicReason)));
         if ($strategicReason === '') {
-            $strategicReason = $this->normalizeReasonFromLlm('', 'pemilihan mengikuti instruksi manager dan kondisi stok aktual');
-        }
-
-        $segmentsInfo = '';
-        if ($requireNoJoint && !empty($requestedSegments)) {
-            $segmentsInfo = 'Memenuhi instruksi tanpa sambungan: ' . implode('m + ', collect($requestedSegments)->map(fn ($v): string => $this->formatQty((float) $v))->all()) . 'm. ';
-        }
-
-        $pieceDetails = collect($chosenPieces)
-            ->map(function (array $piece): string {
-                $id = (int) ($piece['id'] ?? 0);
-                $len = $this->formatQty((float) ($piece['panjang'] ?? 0));
-                $take = $this->formatQty((float) ($piece['take_qty'] ?? 0));
-
-                return "Piece #{$id} ({$len}m) dipotong {$take}m";
-            })
-            ->filter(fn (string $line): bool => trim($line) !== '')
-            ->implode(', ');
-
-        if ($pieceDetails === '') {
             return $this->buildSystemReasonFromPieces(
                 materialName: $materialName,
                 satuan: $satuan,
@@ -1098,7 +993,7 @@ PROMPT;
             );
         }
 
-        return 'Analisis AI: ' . rtrim($strategicReason, '. ') . '. Detail alokasi sistem: ' . $segmentsInfo . $pieceDetails . '.';
+        return 'Analisis AI: ' . rtrim($strategicReason, '. ') . '.';
     }
 
     /**
@@ -1830,10 +1725,7 @@ PROMPT;
             $fallbackAnalisa['recommended_piece_ids'] = collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
             $fallbackAnalisa['recommended_qty'] = round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - max(0, $remaining), 2);
             $fallbackAnalisa['recommended_pieces'] = $chosen;
-            $fallbackAnalisa['alasan_ai_gemini'] = trim(implode('. ', array_filter([
-                (string) ($fallbackSelection['overall_reason'] ?? ''),
-                (string) ($fallbackAnalisa['alasan_ai'] ?? ''),
-            ])));
+            $fallbackAnalisa['alasan_ai_gemini'] = '';
             $fallbackAnalisa['alasan_ai'] = $this->buildSystemReasonFromPieces(
                 materialName: (string) ($material->nama_material ?? ('Material #' . (int) $material->id)),
                 satuan: (string) ($material->satuan ?? 'unit'),
@@ -1844,6 +1736,7 @@ PROMPT;
                 requestedSegments: (array) ($instruksiAi['requested_segments'] ?? []),
                 requireNoJoint: (bool) ($instruksiAi['require_no_joint'] ?? false),
             );
+            $fallbackAnalisa['ai_reason_source'] = 'fallback_local';
             $fallbackAnalisa['kebutuhan_asli'] = (float) ($item['qty_original'] ?? $item['qty'] ?? 0);
             $fallbackAnalisa['kebutuhan_setelah_buffer'] = (float) ($item['qty'] ?? 0);
             $fallbackAnalisa['kebutuhan_belum_tercover'] = max(0, (float) ($fallbackAnalisa['qty_pr'] ?? 0));
