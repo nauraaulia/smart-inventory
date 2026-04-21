@@ -5,6 +5,8 @@ namespace App\Filament\Widgets;
 use App\Models\Inbound;
 use App\Models\Material;
 use App\Models\MaterialPiece;
+use App\Models\Outbound;
+use App\Models\Project;
 use App\Models\PurchaseOrder;
 use Carbon\Carbon;
 use Filament\Widgets\Widget;
@@ -17,11 +19,18 @@ class StokBarChart extends Widget
 
     public static function canView(): bool
     {
-        return auth()->user()?->role === 'Staff Administrasi Gudang';
+        return in_array(auth()->user()?->role, [
+            'Staff Administrasi Gudang',
+            'Administrator IT',
+            'Manager Operasional',
+            'Manager Teknik',
+            'Finance',
+        ], true);
     }
 
     protected function getViewData(): array
     {
+        // ── MATERIAL STOCK ──────────────────────────────────────────
         $rows = Material::query()
             ->leftJoin('material_pieces as mp', function ($join): void {
                 $join->on('materials.id', '=', 'mp.material_id')
@@ -53,6 +62,7 @@ class StokBarChart extends Widget
             ->whereDate('created_at', '>=', now()->startOfMonth()->toDateString())
             ->sum('quantity');
 
+        // ── MONTHLY DATA ─────────────────────────────────────────────
         $startMonth = now()->startOfMonth()->subMonths(11);
         $monthKeys = collect(range(0, 11))
             ->map(fn (int $offset): string => $startMonth->copy()->addMonths($offset)->format('Y-m'))
@@ -92,6 +102,7 @@ class StokBarChart extends Widget
             ->map(fn (string $key): float => (float) ($monthlyInboundQtyRaw[$key] ?? 0.0))
             ->all();
 
+        // ── TOP MATERIALS ─────────────────────────────────────────────
         $topMaterialRows = collect($categories)
             ->map(function (string $materialName, int $index) use ($availableSeries, $satuanPerMaterial): array {
                 return [
@@ -108,6 +119,7 @@ class StokBarChart extends Widget
         $topMaterialsSeries = $topMaterialRows->pluck('available')->map(fn ($value): float => round((float) $value, 2))->all();
         $topMaterialsSatuan = $topMaterialRows->pluck('satuan')->all();
 
+        // ── AGING ─────────────────────────────────────────────────────
         $availablePieces = MaterialPiece::query()
             ->select(['id', 'created_at'])
             ->where('status', 'available')
@@ -115,7 +127,6 @@ class StokBarChart extends Widget
             ->get();
 
         $agingBuckets = ['<=30 Hari' => 0, '31-60 Hari' => 0, '61-90 Hari' => 0, '>90 Hari' => 0];
-
         foreach ($availablePieces as $piece) {
             $age = now()->diffInDays($piece->created_at);
             if ($age <= 30) { $agingBuckets['<=30 Hari']++; continue; }
@@ -137,22 +148,55 @@ class StokBarChart extends Widget
             $riskSeries[] = round(($old / $total) * 100, 2);
         }
 
-        // KPI: hitung total available dan stock on hand dengan satuan berbeda
-        $availableKpi = $rows->map(fn ($row): string =>
-            number_format((float) ($row->available_total ?? 0), 2) . ' ' . (strtolower(trim((string) ($row->satuan ?? ''))) ?: 'unit')
-        )->join(' | ');
+        // ── OUTBOUND DATA ─────────────────────────────────────────────
+        $outboundCollection = Outbound::query()
+            ->select(['status', 'created_at', 'taken_at'])
+            ->whereDate('created_at', '>=', $startMonth->toDateString())
+            ->get();
 
-        // Untuk KPI card, tampilkan total piece count saja kalau satuan campuran
+        $outboundPendingSeries = $monthKeys->map(fn (string $key): int =>
+            $outboundCollection->filter(fn (Outbound $o): bool =>
+                Carbon::parse($o->created_at)->format('Y-m') === $key && $o->status === 'pending'
+            )->count()
+        )->all();
+
+        $outboundReadySeries = $monthKeys->map(fn (string $key): int =>
+            $outboundCollection->filter(fn (Outbound $o): bool =>
+                Carbon::parse($o->created_at)->format('Y-m') === $key && $o->status === 'ready'
+            )->count()
+        )->all();
+
+        $outboundTakenSeries = $monthKeys->map(fn (string $key): int =>
+            $outboundCollection->filter(fn (Outbound $o): bool =>
+                Carbon::parse($o->created_at)->format('Y-m') === $key && $o->status === 'taken'
+            )->count()
+        )->all();
+
+        // ── PROJECT DATA ──────────────────────────────────────────────
+        $projectPending = (int) Project::query()->where('status', 'Pending')->count();
+        $projectCompleted = (int) Project::query()->where('status', 'Completed')->count();
+
+        $projectMonthlySeries = $monthKeys->map(fn (string $key): int =>
+            Project::query()
+                ->whereDate('created_at', '>=', Carbon::createFromFormat('Y-m', $key)->startOfMonth())
+                ->whereDate('created_at', '<=', Carbon::createFromFormat('Y-m', $key)->endOfMonth())
+                ->count()
+        )->all();
+
+        // ── KPI ───────────────────────────────────────────────────────
         $allSameSatuan = count(array_unique($satuanPerMaterial)) === 1;
         $kpiSuffix = $allSameSatuan ? ($satuanPerMaterial[0] ?? 'unit') : 'unit';
+
+        $outboundPendingCount = (int) Outbound::query()->where('status', 'pending')->count();
+        $outboundReadyCount = (int) Outbound::query()->where('status', 'ready')->count();
 
         return [
             'chartBaseId' => 'stok-charts-' . $this->getId(),
             'kpiCards' => [
                 ['label' => 'Material Available', 'value' => number_format($composition['available'], 2), 'suffix' => $kpiSuffix],
                 ['label' => 'Stock On Hand', 'value' => number_format($totalStockOnHand, 2), 'suffix' => $kpiSuffix],
-                ['label' => 'Inbound Bulan Ini', 'value' => number_format($inboundThisMonth, 2), 'suffix' => 'item'],
-                ['label' => 'PO Waiting Inbound', 'value' => number_format($waitingPoCount), 'suffix' => 'PO'],
+                ['label' => 'Project Pending', 'value' => number_format($projectPending), 'suffix' => 'proyek'],
+                ['label' => 'Outbound Pending', 'value' => number_format($outboundPendingCount), 'suffix' => 'outbound'],
             ],
             'categories' => $categories,
             'satuanPerMaterial' => $satuanPerMaterial,
@@ -169,6 +213,13 @@ class StokBarChart extends Widget
             'agingLabels' => array_keys($agingBuckets),
             'agingSeries' => array_values($agingBuckets),
             'riskSeries' => $riskSeries,
+            'outboundMonths' => $inboundMonths,
+            'outboundPendingSeries' => $outboundPendingSeries,
+            'outboundReadySeries' => $outboundReadySeries,
+            'outboundTakenSeries' => $outboundTakenSeries,
+            'projectPending' => $projectPending,
+            'projectCompleted' => $projectCompleted,
+            'projectMonthlySeries' => $projectMonthlySeries,
         ];
     }
 }
