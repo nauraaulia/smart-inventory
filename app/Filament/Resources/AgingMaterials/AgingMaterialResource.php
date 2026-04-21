@@ -25,6 +25,11 @@ class AgingMaterialResource extends Resource
 
     protected static ?string $pluralModelLabel = 'Aging Materials';
 
+    public static function getNavigationGroup(): ?string
+    {
+        return auth()->user()?->role === 'Administrator IT' ? 'Gudang' : null;
+    }
+
     public static function table(Table $table): Table
     {
         return AgingMaterialsTable::configure($table);
@@ -75,7 +80,7 @@ class AgingMaterialResource extends Resource
 
     public static function getNavigationBadge(): ?string
     {
-        if (!self::canViewAny()) {
+        if (! self::canViewAny()) {
             return null;
         }
 

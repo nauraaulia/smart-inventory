@@ -16,6 +16,51 @@ class PurchaseOrder extends Model
         'received_at' => 'datetime',
     ];
 
+    protected static function booted(): void
+    {
+        static::created(function (PurchaseOrder $purchaseOrder): void {
+            if (! auth()->check()) {
+                return;
+            }
+
+            UserLog::create([
+                'user_id' => auth()->id(),
+                'action' => 'Create',
+                'module' => 'Purchase Order',
+                'description' => 'Membuat PO '.(string) ($purchaseOrder->po_number ?? ('#'.$purchaseOrder->id)),
+                'ip_address' => request()?->ip(),
+            ]);
+        });
+
+        static::updated(function (PurchaseOrder $purchaseOrder): void {
+            if (! auth()->check() || empty($purchaseOrder->getChanges())) {
+                return;
+            }
+
+            UserLog::create([
+                'user_id' => auth()->id(),
+                'action' => 'Update',
+                'module' => 'Purchase Order',
+                'description' => 'Update PO '.(string) ($purchaseOrder->po_number ?? ('#'.$purchaseOrder->id)),
+                'ip_address' => request()?->ip(),
+            ]);
+        });
+
+        static::deleted(function (PurchaseOrder $purchaseOrder): void {
+            if (! auth()->check()) {
+                return;
+            }
+
+            UserLog::create([
+                'user_id' => auth()->id(),
+                'action' => 'Delete',
+                'module' => 'Purchase Order',
+                'description' => 'Menghapus PO '.(string) ($purchaseOrder->po_number ?? ('#'.$purchaseOrder->id)),
+                'ip_address' => request()?->ip(),
+            ]);
+        });
+    }
+
     public function supplier(): BelongsTo
     {
         return $this->belongsTo(Supplier::class);

@@ -4,13 +4,13 @@ namespace App\Exports;
 
 use App\Models\UserLog;
 use Maatwebsite\Excel\Concerns\FromQuery;
+use Maatwebsite\Excel\Concerns\ShouldAutoSize;
 use Maatwebsite\Excel\Concerns\WithHeadings;
 use Maatwebsite\Excel\Concerns\WithMapping;
-use Maatwebsite\Excel\Concerns\ShouldAutoSize;
 use Maatwebsite\Excel\Concerns\WithStyles;
 use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
-class UserLogsExport implements FromQuery, WithHeadings, WithMapping, ShouldAutoSize, WithStyles
+class UserLogsExport implements FromQuery, ShouldAutoSize, WithHeadings, WithMapping, WithStyles
 {
     protected array $filters;
 
@@ -22,21 +22,17 @@ class UserLogsExport implements FromQuery, WithHeadings, WithMapping, ShouldAuto
     public function query()
     {
         return UserLog::query()
+            ->visibleInAudit()
             ->with('user')
-            ->when($this->filters['date_from'] ?? null, fn($q, $date) =>
-                $q->whereDate('created_at', '>=', $date)
+            ->when($this->filters['date_from'] ?? null, fn ($q, $date) => $q->whereDate('created_at', '>=', $date)
             )
-            ->when($this->filters['date_to'] ?? null, fn($q, $date) =>
-                $q->whereDate('created_at', '<=', $date)
+            ->when($this->filters['date_to'] ?? null, fn ($q, $date) => $q->whereDate('created_at', '<=', $date)
             )
-            ->when($this->filters['user_id'] ?? null, fn($q, $id) =>
-                $q->where('user_id', $id)
+            ->when($this->filters['user_id'] ?? null, fn ($q, $id) => $q->where('user_id', $id)
             )
-            ->when($this->filters['action'] ?? null, fn($q, $action) =>
-                $q->where('action', $action)
+            ->when($this->filters['action'] ?? null, fn ($q, $action) => $q->where('action', $action)
             )
-            ->when($this->filters['module'] ?? null, fn($q, $module) =>
-                $q->where('module', $module)
+            ->when($this->filters['module'] ?? null, fn ($q, $module) => $q->where('module', $module)
             )
             ->orderBy('created_at', 'desc');
     }
@@ -67,7 +63,7 @@ class UserLogsExport implements FromQuery, WithHeadings, WithMapping, ShouldAuto
             1 => [
                 'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
                 'fill' => [
-                    'fillType'   => 'solid',
+                    'fillType' => 'solid',
                     'startColor' => ['rgb' => '4F46E5'],
                 ],
             ],

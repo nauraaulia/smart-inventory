@@ -16,6 +16,51 @@ class Outbound extends Model
         'ready_at' => 'datetime',
     ];
 
+    protected static function booted(): void
+    {
+        static::created(function (Outbound $outbound): void {
+            if (! auth()->check()) {
+                return;
+            }
+
+            UserLog::create([
+                'user_id' => auth()->id(),
+                'action' => 'Create',
+                'module' => 'Outbound',
+                'description' => 'Membuat outbound #'.$outbound->id.' untuk project #'.(int) ($outbound->project_id ?? 0),
+                'ip_address' => request()?->ip(),
+            ]);
+        });
+
+        static::updated(function (Outbound $outbound): void {
+            if (! auth()->check() || empty($outbound->getChanges())) {
+                return;
+            }
+
+            UserLog::create([
+                'user_id' => auth()->id(),
+                'action' => 'Update',
+                'module' => 'Outbound',
+                'description' => 'Update outbound #'.$outbound->id.' (status: '.(string) ($outbound->status ?? '-').')',
+                'ip_address' => request()?->ip(),
+            ]);
+        });
+
+        static::deleted(function (Outbound $outbound): void {
+            if (! auth()->check()) {
+                return;
+            }
+
+            UserLog::create([
+                'user_id' => auth()->id(),
+                'action' => 'Delete',
+                'module' => 'Outbound',
+                'description' => 'Menghapus outbound #'.$outbound->id,
+                'ip_address' => request()?->ip(),
+            ]);
+        });
+    }
+
     public function project(): BelongsTo
     {
         return $this->belongsTo(Project::class);

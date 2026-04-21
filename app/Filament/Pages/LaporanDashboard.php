@@ -2,19 +2,19 @@
 
 namespace App\Filament\Pages;
 
-use Barryvdh\DomPDF\Facade\Pdf;
 use App\Models\Inbound;
+use App\Models\Material;
+use App\Models\MaterialPiece;
 use App\Models\Outbound;
 use App\Models\Project;
 use App\Models\ProjectItem;
 use App\Models\ProjectTemplate;
-use App\Models\Material;
-use App\Models\MaterialPiece;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseRequest;
 use App\Models\Task;
 use App\Models\UserLog;
 use BackedEnum;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Filament\Pages\Page;
 use Illuminate\Database\Eloquent\Builder;
@@ -111,10 +111,14 @@ class LaporanDashboard extends Page
             'Staff Administrasi Gudang',
             'Staff Adm Gudang',
             'Staff Gudang',
-            'Administrator IT',
             'Admin Gudang',
             'Administrator Gudang',
         ], true);
+    }
+
+    public static function shouldRegisterNavigation(): bool
+    {
+        return self::canAccess();
     }
 
     public function applyFilters(): void
@@ -136,8 +140,8 @@ class LaporanDashboard extends Page
 
         $this->logCctv(
             'Filter Laporan',
-            'Menerapkan filter laporan. date_from=' . ($this->dateFrom ?: '-')
-                . ', date_to=' . ($this->dateTo ?: '-')
+            'Menerapkan filter laporan. date_from='.($this->dateFrom ?: '-')
+                .', date_to='.($this->dateTo ?: '-')
         );
     }
 
@@ -145,16 +149,15 @@ class LaporanDashboard extends Page
     {
         [$headings, $rows] = $this->buildExportRows();
 
-        $filename = 'laporan-operasional-' . now()->format('Ymd-His') . '.xlsx';
+        $filename = 'laporan-operasional-'.now()->format('Ymd-His').'.xlsx';
 
-        return Excel::download(new class($headings, $rows) implements FromArray, WithHeadings {
+        return Excel::download(new class($headings, $rows) implements FromArray, WithHeadings
+        {
             /**
              * @param  array<int, string>  $headings
              * @param  array<int, array<int, string>>  $rows
              */
-            public function __construct(private array $headings, private array $rows)
-            {
-            }
+            public function __construct(private array $headings, private array $rows) {}
 
             public function headings(): array
             {
@@ -184,7 +187,7 @@ class LaporanDashboard extends Page
         ])->render();
 
         $pdf = Pdf::loadHTML($pdfHtml)->setPaper('a4', 'landscape');
-        $filename = 'laporan-operasional-' . now()->format('Ymd-His') . '.pdf';
+        $filename = 'laporan-operasional-'.now()->format('Ymd-His').'.pdf';
 
         return response()->streamDownload(function () use ($pdf): void {
             echo $pdf->output();
@@ -237,7 +240,7 @@ class LaporanDashboard extends Page
         $waitingProjects = $projects->filter(function (Project $project): bool {
             $status = mb_strtolower((string) $project->status);
 
-            return !in_array($status, ['completed', 'complete'], true);
+            return ! in_array($status, ['completed', 'complete'], true);
         });
 
         $avgWaitDays = $waitingProjects->isEmpty()
@@ -366,7 +369,7 @@ class LaporanDashboard extends Page
             ->orderBy('nama_template')
             ->get(['id', 'nama_template', 'kode_template'])
             ->each(function (ProjectTemplate $template) use (&$options): void {
-                $label = trim((string) ($template->nama_template ?: $template->kode_template ?: ('Template #' . $template->id)));
+                $label = trim((string) ($template->nama_template ?: $template->kode_template ?: ('Template #'.$template->id)));
                 $options[(string) $template->id] = $label;
             });
 
@@ -459,7 +462,7 @@ class LaporanDashboard extends Page
                     : ((string) data_get($task->payload, 'workflow_state', '') === 'approved_for_aging' ? 'pending' : 'draft'));
 
             foreach ((array) data_get($task->payload, 'deadstock_items', []) as $item) {
-                if (!is_array($item)) {
+                if (! is_array($item)) {
                     continue;
                 }
 
@@ -630,7 +633,7 @@ class LaporanDashboard extends Page
             ->map(function (Collection $rows, $projectId) use ($projectIndex): array {
                 /** @var Project|null $project */
                 $project = $projectIndex->get((int) $projectId);
-                $projectCode = (string) ($project?->kode_proyek ?? ('#' . (int) $projectId));
+                $projectCode = (string) ($project?->kode_proyek ?? ('#'.(int) $projectId));
                 $projectName = (string) ($project?->nama_proyek ?? '-');
 
                 $materialRows = $rows
@@ -692,13 +695,13 @@ class LaporanDashboard extends Page
             $taskStockSnapshot = (float) data_get($task->payload, 'total_available_qty', data_get($task->payload, 'available_qty', 0));
 
             foreach ((array) data_get($task->payload, 'allocation_suggestions', []) as $suggestion) {
-                if (!is_array($suggestion)) {
+                if (! is_array($suggestion)) {
                     continue;
                 }
 
                 $bookingQty = (float) ($suggestion['suggested_qty'] ?? 0);
                 $stockAtApproval = $this->resolveTaskStockAtApproval($task, $suggestion, $taskStockSnapshot);
-                $rowKey = 'task-' . (int) $task->id . '-alloc-' . $rowsAdded;
+                $rowKey = 'task-'.(int) $task->id.'-alloc-'.$rowsAdded;
 
                 $rowsAdded++;
                 $aiMatchingRows[] = [
@@ -718,14 +721,14 @@ class LaporanDashboard extends Page
             }
 
             foreach ((array) data_get($task->payload, 'items', []) as $item) {
-                if (!is_array($item)) {
+                if (! is_array($item)) {
                     continue;
                 }
 
                 $bookingQty = (float) ($item['recommended_booking_qty'] ?? $item['qty_booking'] ?? 0);
                 $prQty = (float) ($item['recommended_pr_qty'] ?? $item['qty_pr'] ?? 0);
                 $stockAtApproval = $this->resolveTaskStockAtApproval($task, $item, $taskStockSnapshot);
-                $rowKey = 'task-' . (int) $task->id . '-item-' . $rowsAdded;
+                $rowKey = 'task-'.(int) $task->id.'-item-'.$rowsAdded;
 
                 $rowsAdded++;
                 $aiMatchingRows[] = [
@@ -746,7 +749,7 @@ class LaporanDashboard extends Page
 
             if ($rowsAdded === 0) {
                 $aiMatchingRows[] = [
-                    'row_key' => 'task-' . (int) $task->id . '-fallback',
+                    'row_key' => 'task-'.(int) $task->id.'-fallback',
                     'task_id' => (int) $task->id,
                     'material' => (string) data_get($task->payload, 'material_name', '-'),
                     'project' => (string) data_get($task->payload, 'project_code', '-'),
@@ -774,7 +777,7 @@ class LaporanDashboard extends Page
             ->map(fn (Inbound $inbound): array => [
                 'id' => (int) $inbound->id,
                 'tipe' => 'inbound_manual',
-                'judul' => 'Inbound Manual - ' . (string) ($inbound->material?->nama_material ?? '-'),
+                'judul' => 'Inbound Manual - '.(string) ($inbound->material?->nama_material ?? '-'),
                 'untuk' => (string) ($inbound->project?->kode_proyek ?? 'Staff Administrasi Gudang'),
                 'kebutuhan' => (string) number_format((float) ($inbound->project?->items?->sum('jumlah_diminta') ?? $inbound->quantity ?? 0), 2, '.', ''),
                 'alokasi' => (string) number_format((float) ($inbound->quantity ?? 0), 2, '.', ''),
@@ -795,7 +798,7 @@ class LaporanDashboard extends Page
             ->map(fn (Outbound $outbound): array => [
                 'id' => (int) $outbound->id,
                 'tipe' => 'alokasi_manual',
-                'judul' => 'Alokasi Manual - ' . (string) ($outbound->project?->kode_proyek ?? '-'),
+                'judul' => 'Alokasi Manual - '.(string) ($outbound->project?->kode_proyek ?? '-'),
                 'untuk' => (string) ($outbound->project?->kode_proyek ?? '-'),
                 'kebutuhan' => (string) number_format((float) $outbound->project?->items?->sum('jumlah_diminta'), 2, '.', ''),
                 'alokasi' => (string) number_format((float) $outbound->items->sum('qty'), 2, '.', ''),
@@ -809,10 +812,10 @@ class LaporanDashboard extends Page
             ->sortByDesc('sort_at')
             ->values()
             ->map(function (array $row): array {
-                if (!array_key_exists('kebutuhan', $row)) {
+                if (! array_key_exists('kebutuhan', $row)) {
                     $row['kebutuhan'] = '-';
                 }
-                if (!array_key_exists('alokasi', $row)) {
+                if (! array_key_exists('alokasi', $row)) {
                     $row['alokasi'] = '-';
                 }
                 unset($row['sort_at']);
@@ -976,19 +979,19 @@ class LaporanDashboard extends Page
      */
     private function resolveRoleReportData(): array
     {
-        if ($this->canViewFinanceSection() && !$this->canViewOperasionalSection() && !$this->canViewTeknikSection() && !$this->canViewGudangSection()) {
+        if ($this->canViewFinanceSection() && ! $this->canViewOperasionalSection() && ! $this->canViewTeknikSection() && ! $this->canViewGudangSection()) {
             return ['finance' => $this->financeRoleData()];
         }
 
-        if ($this->canViewOperasionalSection() && !$this->canViewFinanceSection() && !$this->canViewTeknikSection() && !$this->canViewGudangSection()) {
+        if ($this->canViewOperasionalSection() && ! $this->canViewFinanceSection() && ! $this->canViewTeknikSection() && ! $this->canViewGudangSection()) {
             return ['manager_operasional' => $this->operasionalRoleData()];
         }
 
-        if ($this->canViewTeknikSection() && !$this->canViewFinanceSection() && !$this->canViewOperasionalSection() && !$this->canViewGudangSection()) {
+        if ($this->canViewTeknikSection() && ! $this->canViewFinanceSection() && ! $this->canViewOperasionalSection() && ! $this->canViewGudangSection()) {
             return ['manager_teknik' => $this->teknikRoleData()];
         }
 
-        if ($this->canViewGudangSection() && !$this->canViewFinanceSection() && !$this->canViewOperasionalSection() && !$this->canViewTeknikSection()) {
+        if ($this->canViewGudangSection() && ! $this->canViewFinanceSection() && ! $this->canViewOperasionalSection() && ! $this->canViewTeknikSection()) {
             return ['staff_administrasi_gudang' => $this->gudangStaffRoleData()];
         }
 
@@ -1062,7 +1065,7 @@ class LaporanDashboard extends Page
 
     private function logCctv(string $action, string $description): void
     {
-        if (!auth()->check()) {
+        if (! auth()->check()) {
             return;
         }
 
@@ -1095,7 +1098,7 @@ class LaporanDashboard extends Page
 
     private function formatPrNumber(int $id): string
     {
-        return 'PR-' . str_pad((string) $id, 5, '0', STR_PAD_LEFT);
+        return 'PR-'.str_pad((string) $id, 5, '0', STR_PAD_LEFT);
     }
 
     private function extractAiReason(?array $row, Task $task): string
@@ -1130,9 +1133,9 @@ class LaporanDashboard extends Page
             data_get($row, 'stock_at_approval'),
             data_get($row, 'available_qty'),
             data_get($row, 'available'),
-            data_get($task->payload, 'items.' . $this->findTaskItemIndexByMaterial($task, $materialId) . '.stock_at_approval'),
-            data_get($task->payload, 'items.' . $this->findTaskItemIndexByMaterial($task, $materialId) . '.available_qty'),
-            data_get($task->payload, 'detail.' . $this->findTaskDetailIndexByMaterial($task, $materialId) . '.available'),
+            data_get($task->payload, 'items.'.$this->findTaskItemIndexByMaterial($task, $materialId).'.stock_at_approval'),
+            data_get($task->payload, 'items.'.$this->findTaskItemIndexByMaterial($task, $materialId).'.available_qty'),
+            data_get($task->payload, 'detail.'.$this->findTaskDetailIndexByMaterial($task, $materialId).'.available'),
             data_get($task->payload, 'total_available_qty'),
             $fallback,
         ];

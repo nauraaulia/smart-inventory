@@ -2,8 +2,6 @@
 
 namespace App\Filament\Resources\UserLogs;
 
-use App\Filament\Resources\UserLogs\Pages\CreateUserLog;
-use App\Filament\Resources\UserLogs\Pages\EditUserLog;
 use App\Filament\Resources\UserLogs\Pages\ListUserLogs;
 use App\Filament\Resources\UserLogs\Pages\ViewUserLog;
 use App\Filament\Resources\UserLogs\Schemas\UserLogForm;
@@ -15,6 +13,7 @@ use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
 
 class UserLogResource extends Resource
 {
@@ -54,6 +53,11 @@ class UserLogResource extends Resource
         return UserLogsTable::configure($table);
     }
 
+    public static function getEloquentQuery(): Builder
+    {
+        return parent::getEloquentQuery()->visibleInAudit();
+    }
+
     public static function getRelations(): array
     {
         return [
@@ -65,7 +69,7 @@ class UserLogResource extends Resource
     {
         return auth()->user()->role === 'Administrator IT';
     }
-    
+
     public static function getPages(): array
     {
         return [

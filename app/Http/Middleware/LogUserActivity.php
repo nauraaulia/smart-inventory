@@ -13,7 +13,7 @@ class LogUserActivity
     {
         $response = $next($request);
 
-        if (!auth()->check()) {
+        if (! auth()->check()) {
             return $response;
         }
 
@@ -32,7 +32,7 @@ class LogUserActivity
             'user_id' => auth()->id(),
             'action' => 'Activity',
             'module' => $module,
-            'description' => "{$method} {$uri}",
+            'description' => $this->buildDescription($request, $method, $uri),
             'ip_address' => $request->ip(),
         ]);
 
@@ -41,24 +41,30 @@ class LogUserActivity
 
     private function shouldSkip(Request $request, ?string $routeName, string $uri): bool
     {
-        if ($request->expectsJson()) {
+        if (str_starts_with($uri, '_debugbar') || str_starts_with($uri, 'up')) {
             return true;
         }
 
-        if (str_starts_with($uri, 'livewire') || str_starts_with($uri, '_debugbar')) {
-            return true;
-        }
-
-        if ($routeName && str_contains($routeName, 'livewire')) {
+        if (
+            str_starts_with($uri, 'livewire')
+            || str_contains($uri, '/livewire')
+            || str_contains((string) $routeName, 'livewire')
+            || $request->headers->has('X-Livewire')
+        ) {
             return true;
         }
 
         return false;
     }
 
+    private function buildDescription(Request $request, string $method, string $uri): string
+    {
+        return "{$method} {$uri}";
+    }
+
     private function resolveModule(?string $routeName, string $uri): string
     {
-        if (!empty($routeName)) {
+        if (! empty($routeName)) {
             return str_replace(['.', '-', '_'], ' ', ucfirst($routeName));
         }
 

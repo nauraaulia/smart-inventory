@@ -4,14 +4,15 @@ namespace App\Providers\Filament;
 
 use App\Filament\Widgets\StaffWelcomeWidget;
 use App\Filament\Widgets\StokBarChart;
+use Filament\Actions\Action;
+use Filament\Enums\ThemeMode;
+use Filament\Facades\Filament;
 use Filament\Http\Middleware\Authenticate;
 use Filament\Http\Middleware\AuthenticateSession;
 use Filament\Http\Middleware\DisableBladeIconComponents;
 use Filament\Http\Middleware\DispatchServingFilamentEvent;
-use Filament\Pages\Dashboard;
 use Filament\Panel;
 use Filament\PanelProvider;
-use Filament\Enums\ThemeMode;
 use Filament\Support\Colors\Color;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
@@ -55,13 +56,27 @@ class AdminPanelProvider extends PanelProvider
             ->login()
             ->databaseNotifications()
             ->databaseNotificationsPolling('10s')
+            ->userMenuItems([
+                'logout' => Action::make('logout')
+                    ->label('Sign out')
+                    ->icon('heroicon-o-arrow-left-end-on-rectangle')
+                    ->requiresConfirmation()
+                    ->modalHeading('Yakin ingin sign out?')
+                    ->modalDescription('Kalau lanjut, sesi kamu akan langsung diakhiri dan kamu perlu login lagi.')
+                    ->modalSubmitActionLabel('Ya, sign out')
+                    ->modalCancelActionLabel('Batal')
+                    ->action(function (): void {
+                        Filament::auth()->logout();
+
+                        session()->invalidate();
+                        session()->regenerateToken();
+                    })
+                    ->successRedirectUrl(fn (): string => Filament::getLoginUrl()),
+            ])
 
             // RESOURCES, PAGES, WIDGETS
             ->discoverResources(in: app_path('Filament/Resources'), for: 'App\Filament\Resources')
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\Filament\Pages')
-            ->pages([
-                Dashboard::class,
-            ])
             ->widgets([
                 StaffWelcomeWidget::class,
                 StokBarChart::class,
