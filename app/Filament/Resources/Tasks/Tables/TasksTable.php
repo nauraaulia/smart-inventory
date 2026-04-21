@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Tasks\Tables;
 
+use App\Filament\Resources\PurchaseRequests\PurchaseRequestResource;
 use App\Filament\Resources\Tasks\TaskResource;
 use App\Models\Task;
 use App\Services\AI\TaskApprovalService;
@@ -72,7 +73,7 @@ class TasksTable
                     ->label('Status Task')
                     ->formatStateUsing(fn (string $state): string => match ($state) {
                         'pending' => 'Pending',
-                        'done' => 'Approved/Done',
+                        'done' => 'Approved',
                         'rejected' => 'Rejected',
                         default => ucfirst($state),
                     })
@@ -130,6 +131,7 @@ class TasksTable
                     ->label('Approve')
                     ->color('success')
                     ->icon('heroicon-o-check-circle')
+                    ->modalSubmitActionLabel('Approve')
                     ->visible(fn (Task $record) => $record->status === 'pending'
                         && self::canHandleTask($record)
                         && !($record->type === 'ai_deadstock_recommendation'
@@ -269,6 +271,11 @@ class TasksTable
                                     ->options($pieceOptions)
                                     ->default(array_keys($pieceOptions))
                                     ->helperText('Pilih 1 atau lebih piece. Jika material perlu potongan, sistem akan split sesuai kebutuhan qty proyek.'),
+                                Toggle::make('add_purchase_request')
+                                    ->label('Tambahkan Purchase Request')
+                                    ->helperText('Jika aktif, setelah save change Anda akan diarahkan ke form Create Purchase Request.')
+                                    ->default(false)
+                                    ->inline(false),
                                 \Filament\Forms\Components\Repeater::make('manual_allocation')
                                     ->label('Checklist Alokasi Proyek')
                                     ->helperText('Kebutuhan proyek sudah dihitung sistem. Centang proyek yang ingin dialokasikan sekarang; sisanya tetap menjadi stok gudang available.')
@@ -314,8 +321,10 @@ class TasksTable
                         }
                         return [];
                     })
-                    ->action(function (Task $record, array $data) {
+                    ->action(function (Task $record, array $data, $livewire) {
                         $service = new TaskApprovalService();
+                        $redirectUrl = TaskResource::getUrl('index');
+
                         if ($record->type === 'ai_booking_suggestion') {
                             Notification::make()
                                 ->title('Sedang Memproses Booking & PR')
@@ -369,12 +378,42 @@ class TasksTable
                                 ->body('Task operasional berhasil diproses.')
                                 ->success()
                                 ->send();
+
+                            $shouldRedirectToManualPr = (bool) ($data['add_purchase_request'] ?? false)
+                                && (string) (auth()->user()?->role ?? '') === 'Staff Administrasi Gudang';
+
+                            if ($shouldRedirectToManualPr) {
+                                $record->refresh();
+                                $payload = $record->payload ?? [];
+                                $projectId = (int) data_get($payload, 'project_id');
+                                $materialId = (int) data_get($payload, 'material_id');
+                                $qtyNeeded = (float) data_get($payload, 'qty_dibutuhkan', 0);
+                                $allocatedQty = (float) data_get($payload, 'execution_result.allocated_total_qty', 0);
+                                $shortageQty = max(0, round($qtyNeeded - $allocatedQty, 2));
+
+                                $manualPrData = [
+                                    'request_target' => $projectId > 0 ? 'project' : 'warehouse',
+                                    'project_id' => $projectId > 0 ? $projectId : null,
+                                    'material_id' => $materialId > 0 ? $materialId : null,
+                                    'quantity' => $shortageQty > 0 ? $shortageQty : ($qtyNeeded > 0 ? $qtyNeeded : null),
+                                    'priority' => 'medium',
+                                    'needed_date' => now()->addDays(7)->toDateString(),
+                                    'reason' => 'PR manual dari task operasional alokasi #' . $record->id,
+                                ];
+
+                                $manualPrData = collect($manualPrData)
+                                    ->reject(fn ($value) => $value === null || $value === '')
+                                    ->all();
+
+                                $redirectUrl = PurchaseRequestResource::getUrl('create', [
+                                    'data' => $manualPrData,
+                                ]);
+                            }
                         } elseif ($record->type === 'ai_deadstock_recommendation') {
                             $service->approve($record, auth()->user());
                         }
-                    })
-                    ->after(function ($livewire): void {
-                        $livewire->redirect(TaskResource::getUrl('index'), navigate: true);
+
+                        $livewire->redirect($redirectUrl, navigate: true);
                     }),
 
                 Action::make('reject')

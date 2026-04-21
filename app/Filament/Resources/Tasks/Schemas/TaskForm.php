@@ -39,6 +39,10 @@ class TaskForm
                             ])
                             ->live()
                             ->disabled(function (Get $get, ?Task $record): bool {
+                                if ($record?->type === 'ai_inbound_allocation_suggestion') {
+                                    return true;
+                                }
+
                                 if ($record?->type !== 'ai_booking_suggestion') {
                                     return false;
                                 }
@@ -48,7 +52,9 @@ class TaskForm
                             })
                             ->helperText(fn (?Task $record): ?string => $record?->type === 'ai_booking_suggestion'
                                 ? 'Pilih Approve atau Tolak untuk setiap material, lalu klik Submit.'
-                                : null)
+                                : ($record?->type === 'ai_inbound_allocation_suggestion'
+                                    ? 'Untuk task operasional, langsung edit alokasi lalu klik Save changes untuk approve + booking.'
+                                    : null))
                             ->required(),
                         Textarea::make('rejection_reason')
                             ->label('Alasan Reject')
@@ -291,6 +297,13 @@ class TaskForm
                                     ->all();
                             })
                             ->helperText('Centang piece yang ingin dipakai untuk alokasi. Jika kabel/potongan, sistem akan split sesuai qty alokasi.'),
+
+                        Toggle::make('payload.add_purchase_request')
+                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
+                            ->label('Tambahkan Purchase Request')
+                            ->helperText('Jika aktif, setelah Save changes Anda akan diarahkan ke form Create Purchase Request.')
+                            ->default(false)
+                            ->inline(false),
 
                         Repeater::make('payload.manual_allocation')
                             ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
