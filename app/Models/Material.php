@@ -14,6 +14,8 @@ class Material extends Model
 
     private const DISCRETE_UNIT_SATUAN = ['unit', 'buah', 'pcs', 'pc', 'set', 'pasang'];
 
+    private const LINEAR_SATUAN = ['m', 'meter', 'meters', 'metre', 'meteran'];
+
     protected $guarded = [];
 
     protected $casts = [
@@ -101,17 +103,43 @@ class Material extends Model
         );
     }
 
+    public function resolveTrackingUnit(): string
+    {
+        return self::resolveTrackingUnitFor(
+            satuan: (string) $this->satuan,
+            defaultRollLength: $this->default_roll_length,
+        );
+    }
+
     public static function usesDiscreteUnitTrackingFor(
         ?string $satuan,
         float|int|string|null $defaultRollLength = null,
     ): bool {
+        return in_array(
+            self::resolveTrackingUnitFor(
+                satuan: $satuan,
+                defaultRollLength: $defaultRollLength,
+            ),
+            self::DISCRETE_UNIT_SATUAN,
+            true
+        );
+    }
+
+    public static function resolveTrackingUnitFor(
+        ?string $satuan,
+        float|int|string|null $defaultRollLength = null,
+    ): string {
         if ((float) ($defaultRollLength ?? 0) > 0) {
-            return false;
+            return 'meter';
         }
 
         $normalized = strtolower(trim((string) $satuan));
 
-        return in_array($normalized, self::DISCRETE_UNIT_SATUAN, true);
+        if (in_array($normalized, self::LINEAR_SATUAN, true)) {
+            return 'meter';
+        }
+
+        return $normalized !== '' ? $normalized : 'unit';
     }
 
     // ============================================

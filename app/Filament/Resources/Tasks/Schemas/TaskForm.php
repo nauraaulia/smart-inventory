@@ -6,11 +6,11 @@ use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Task;
 use Carbon\Carbon;
-use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Hidden;
-use Filament\Forms\Components\TextInput;
-use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
 use Filament\Schemas\Components\Section;
 use Filament\Schemas\Components\Utilities\Get;
@@ -113,12 +113,18 @@ class TaskForm
                                 Textarea::make('recommended_pieces')
                                     ->label('Detail Piece')
                                     ->rows(4)
-                                    ->formatStateUsing(function ($state): string {
-                                        if (!is_array($state)) {
+                                    ->formatStateUsing(function ($state, Get $get): string {
+                                        if (! is_array($state)) {
                                             return '-';
                                         }
 
-                                        $lines = collect($state)->map(function ($piece): string {
+                                        $materialId = (int) ($get('material_id') ?? 0);
+                                        $material = $materialId > 0 ? Material::query()->find($materialId) : null;
+                                        $satuan = (string) ($material?->resolveTrackingUnit() ?: data_get($state, '0.satuan', 'unit'));
+                                        $isDiscreteUnit = Material::usesDiscreteUnitTrackingFor($satuan, $material?->default_roll_length);
+                                        $itemLabel = $isDiscreteUnit ? 'Item' : 'Piece';
+
+                                        $lines = collect($state)->map(function ($piece) use ($itemLabel, $isDiscreteUnit, $satuan): string {
                                             $id = (int) data_get($piece, 'id', 0);
                                             $take = (float) data_get($piece, 'take_qty', 0);
                                             $len = (float) data_get($piece, 'panjang', 0);
@@ -128,9 +134,13 @@ class TaskForm
                                             $takeText = rtrim(rtrim(number_format($take, 2, '.', ''), '0'), '.');
                                             $sisaText = rtrim(rtrim(number_format(max(0, $len - $take), 2, '.', ''), '0'), '.');
 
-                                            $text = "Piece #{$id} | {$totalText}m | Rak {$rack} | Masuk {$age} hari lalu";
+                                            $text = "{$itemLabel} #{$id} | {$totalText} {$satuan} | Rak {$rack} | Masuk {$age} hari lalu";
                                             if ($take + 0.00001 < $len) {
-                                                $text .= " | Potong: {$takeText}m, Sisa: {$sisaText}m";
+                                                if ($isDiscreteUnit) {
+                                                    $text .= " | Ambil: {$takeText} {$satuan}, Sisa: {$sisaText} {$satuan}";
+                                                } else {
+                                                    $text .= " | Potong: {$takeText} {$satuan}, Sisa: {$sisaText} {$satuan}";
+                                                }
                                             } else {
                                                 $text .= ' | Ambil utuh';
                                             }
@@ -172,7 +182,7 @@ class TaskForm
                                 )),
                                 2
                             ))
-                            ->suffix('unit')
+                            ->suffix(fn (Get $get): string => self::resolveTaskMaterialUnit($get))
                             ->disabled(),
                         TextInput::make('payload.total_available_qty')
                             ->label('Stok Tersedia untuk Dialokasikan')
@@ -189,7 +199,7 @@ class TaskForm
 
                                 return round((float) ($state ?? 0), 2);
                             })
-                            ->suffix('unit')
+                            ->suffix(fn (Get $get): string => self::resolveTaskMaterialUnit($get))
                             ->disabled(),
 
                         Repeater::make('payload.allocation_suggestions')
@@ -205,7 +215,7 @@ class TaskForm
                                     ->disabled(),
                                 TextInput::make('suggested_qty')
                                     ->label('Qty Dibutuhkan Proyek')
-                                    ->suffix('unit')
+                                    ->suffix(fn (Get $get): string => self::resolveTaskMaterialUnit($get))
                                     ->columnSpan(4)
                                     ->disabled(),
                                 TextInput::make('pr_status')
@@ -223,13 +233,14 @@ class TaskForm
                             ->required()
                             ->options(function (Get $get): array {
                                 $materialId = (int) ($get('payload.material_id') ?? 0);
+                                $fallbackUnit = self::resolveTaskMaterialUnit($get);
 
                                 if ($materialId <= 0) {
                                     return [];
                                 }
 
                                 return MaterialPiece::query()
-                                    ->with(['shelfLocation:id,kode_lokasi,nama_lokasi', 'inbound:id,entry_date'])
+                                    ->with(['shelfLocation:id,kode_lokasi,nama_lokasi', 'inbound:id,entry_date', 'material:id,satuan,default_roll_length'])
                                     ->where('material_id', $materialId)
                                     ->where('status', 'available')
                                     ->orderByRaw("CASE
@@ -238,8 +249,8 @@ class TaskForm
                                         ELSE 3
                                     END ASC")
                                     ->orderBy('created_at')
-                                    ->get(['id', 'panjang', 'sumber', 'shelf_location_id', 'inbound_id', 'created_at'])
-                                    ->mapWithKeys(function (MaterialPiece $piece): array {
+                                    ->get(['id', 'material_id', 'panjang', 'sumber', 'shelf_location_id', 'inbound_id', 'created_at'])
+                                    ->mapWithKeys(function (MaterialPiece $piece) use ($fallbackUnit): array {
                                         $id = (int) $piece->id;
 
                                         if ($id <= 0) {
@@ -249,13 +260,15 @@ class TaskForm
                                         $length = rtrim(rtrim(number_format((float) $piece->panjang, 2, '.', ''), '0'), '.');
                                         $rack = (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-'));
                                         $source = (string) ($piece->sumber ?: '-');
+                                        $unit = (string) ($piece->material?->resolveTrackingUnit() ?: $fallbackUnit);
+                                        $itemLabel = Material::usesDiscreteUnitTrackingFor($unit, $piece->material?->default_roll_length) ? 'Item' : 'Piece';
                                         $receivedAt = $piece->inbound?->entry_date
                                             ? Carbon::parse($piece->inbound->entry_date)
                                             : $piece->created_at;
                                         $age = $receivedAt ? (int) $receivedAt->diffInDays(now()) : 0;
 
                                         return [
-                                            $id => "Piece #{$id} | {$length}m | Rak {$rack} | {$source} | Masuk {$age} hari lalu",
+                                            $id => "{$itemLabel} #{$id} | {$length} {$unit} | Rak {$rack} | {$source} | Masuk {$age} hari lalu",
                                         ];
                                     })
                                     ->all();
@@ -288,7 +301,7 @@ class TaskForm
                                     return $existing->map(fn (array $row): array => [
                                         'selected' => (bool) ($row['selected'] ?? true),
                                         'project_id' => (int) ($row['project_id'] ?? 0),
-                                        'project_code' => (string) ($row['project_code'] ?? ('#' . (int) ($row['project_id'] ?? 0))),
+                                        'project_code' => (string) ($row['project_code'] ?? ('#'.(int) ($row['project_id'] ?? 0))),
                                         'pr_status' => (string) ($row['pr_status'] ?? '-'),
                                         'qty' => (float) ($row['qty'] ?? $row['suggested_qty'] ?? 0),
                                     ])->all();
@@ -299,7 +312,7 @@ class TaskForm
                                     ->map(fn (array $row): array => [
                                         'selected' => true,
                                         'project_id' => (int) ($row['project_id'] ?? 0),
-                                        'project_code' => (string) ($row['project_code'] ?? ('#' . (int) ($row['project_id'] ?? 0))),
+                                        'project_code' => (string) ($row['project_code'] ?? ('#'.(int) ($row['project_id'] ?? 0))),
                                         'pr_status' => (string) ($row['pr_status'] ?? '-'),
                                         'qty' => (float) ($row['suggested_qty'] ?? 0),
                                     ])
@@ -326,6 +339,7 @@ class TaskForm
                                     ->label('Qty Dialokasikan')
                                     ->numeric()
                                     ->minValue(0)
+                                    ->suffix(fn (Get $get): string => self::resolveTaskMaterialUnit($get))
                                     ->columnSpan(3)
                                     ->required(),
                                 Hidden::make('project_id'),
@@ -370,5 +384,33 @@ class TaskForm
                             ->columns(3),
                     ]),
             ]);
+    }
+
+    private static function resolveTaskMaterialUnit(Get $get): string
+    {
+        $materialId = (int) ($get('payload.material_id') ?? $get('material_id') ?? 0);
+
+        if ($materialId > 0) {
+            $material = Material::query()->find($materialId, ['id', 'satuan', 'default_roll_length']);
+
+            if ($material) {
+                return (string) $material->resolveTrackingUnit();
+            }
+        }
+
+        foreach ([
+            (string) ($get('payload.unit') ?? ''),
+            (string) ($get('payload.satuan') ?? ''),
+            (string) ($get('unit') ?? ''),
+            (string) ($get('satuan') ?? ''),
+        ] as $fallback) {
+            $normalized = trim($fallback);
+
+            if ($normalized !== '') {
+                return $normalized;
+            }
+        }
+
+        return 'unit';
     }
 }

@@ -15,10 +15,11 @@ use Filament\Actions\Action;
 use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Hidden;
-use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\Page;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -47,9 +48,9 @@ class ViewOutbound extends Page
 
     public function getHeading(): string
     {
-        $projectCode = $this->record->project?->kode_proyek ?: ('#' . $this->record->project_id);
+        $projectCode = $this->record->project?->kode_proyek ?: ('#'.$this->record->project_id);
 
-        return 'Outbound - ' . $projectCode;
+        return 'Outbound - '.$projectCode;
     }
 
     public function getSubheading(): ?string
@@ -73,7 +74,7 @@ class ViewOutbound extends Page
                 ->requiresConfirmation()
                 ->modalHeading('Tandai outbound siap diambil?')
                 ->action(function (): void {
-                    if (!$this->canProceedOutbound()) {
+                    if (! $this->canProceedOutbound()) {
                         Notification::make()
                             ->title('Outbound belum bisa diproses')
                             ->body('Status barang masih kurang. Lengkapi kebutuhan material terlebih dahulu.')
@@ -132,7 +133,7 @@ class ViewOutbound extends Page
                     ];
                 })
                 ->action(function (array $data): void {
-                    if (!$this->canProceedOutbound()) {
+                    if (! $this->canProceedOutbound()) {
                         Notification::make()
                             ->title('Konfirmasi ditolak')
                             ->body('Status barang masih kurang, outbound belum bisa dikonfirmasi pengambilan.')
@@ -163,7 +164,7 @@ class ViewOutbound extends Page
                             'taken_by' => auth()->id(),
                         ]);
 
-                        if (!$this->record->outbound_manual && $this->record->project_id) {
+                        if (! $this->record->outbound_manual && $this->record->project_id) {
                             $this->normalizeBookedPiecesBeforeTake((int) $this->record->project_id);
 
                             DB::table('material_pieces')
@@ -185,7 +186,7 @@ class ViewOutbound extends Page
                             'user_id' => auth()->id(),
                             'action' => 'Outbound Taken',
                             'module' => 'Outbound',
-                            'description' => 'Outbound #' . $this->record->id . ' dikonfirmasi diambil oleh ' . (string) ($data['nama_pengambil'] ?? '-') . '. Catatan: ' . (string) ($data['catatan_pengambilan'] ?? '-'),
+                            'description' => 'Outbound #'.$this->record->id.' dikonfirmasi diambil oleh '.(string) ($data['nama_pengambil'] ?? '-').'. Catatan: '.(string) ($data['catatan_pengambilan'] ?? '-'),
                             'ip_address' => request()->ip(),
                         ]);
                     });
@@ -198,7 +199,7 @@ class ViewOutbound extends Page
                     $outboundId = (int) $this->record->id;
 
                     try {
-                        $taskId = (new DeadstockAIService(new GeminiService()))->analyzeAfterOutbound($outboundId);
+                        $taskId = (new DeadstockAIService(new GeminiService))->analyzeAfterOutbound($outboundId);
 
                         if ($taskId) {
                             $deadstockTask = Task::query()->find($taskId);
@@ -229,9 +230,9 @@ class ViewOutbound extends Page
     public function getDisplayItems(): array
     {
         $this->record->loadMissing([
-            'items.material:id,nama_material,satuan',
+            'items.material:id,nama_material,satuan,default_roll_length',
             'project.bookedPieces:id,booked_for_project_id,material_id,panjang,status,shelf_location_id',
-            'project.bookedPieces.material:id,nama_material,satuan',
+            'project.bookedPieces.material:id,nama_material,satuan,default_roll_length',
             'project.bookedPieces.shelfLocation:id,kode_lokasi,nama_lokasi',
         ]);
 
@@ -239,10 +240,10 @@ class ViewOutbound extends Page
             return $this->record->items
                 ->map(fn ($item): array => [
                     'material' => (string) ($item->material?->nama_material ?? 'Material tidak diketahui'),
-                    'qty' => $this->formatQty((float) $item->qty, (string) ($item->unit ?: ($item->material?->satuan ?: 'unit'))),
-                    'required_qty' => $this->formatQty((float) $item->qty, (string) ($item->unit ?: ($item->material?->satuan ?: 'unit'))),
-                    'provided_qty' => $this->formatQty((float) $item->qty, (string) ($item->unit ?: ($item->material?->satuan ?: 'unit'))),
-                    'shortage_qty' => $this->formatQty(0, (string) ($item->unit ?: ($item->material?->satuan ?: 'unit'))),
+                    'qty' => $this->formatQty((float) $item->qty, (string) ($item->material?->resolveTrackingUnit() ?: $item->unit ?: 'unit')),
+                    'required_qty' => $this->formatQty((float) $item->qty, (string) ($item->material?->resolveTrackingUnit() ?: $item->unit ?: 'unit')),
+                    'provided_qty' => $this->formatQty((float) $item->qty, (string) ($item->material?->resolveTrackingUnit() ?: $item->unit ?: 'unit')),
+                    'shortage_qty' => $this->formatQty(0, (string) ($item->material?->resolveTrackingUnit() ?: $item->unit ?: 'unit')),
                     'fulfillment_status' => 'Manual',
                     'racks' => 'Belum dipetakan (outbound manual)',
                     'is_potongan' => false,
@@ -253,12 +254,12 @@ class ViewOutbound extends Page
         }
 
         $project = $this->record->project;
-        if (!$project) {
+        if (! $project) {
             return [];
         }
 
         $requiredByMaterial = $project->items()
-            ->with('material:id,nama_material,satuan')
+            ->with('material:id,nama_material,satuan,default_roll_length')
             ->get()
             ->groupBy('material_id')
             ->map(function ($items): array {
@@ -266,7 +267,7 @@ class ViewOutbound extends Page
 
                 return [
                     'material' => (string) ($first?->material?->nama_material ?? 'Material tidak diketahui'),
-                    'unit' => (string) ($first?->material?->satuan ?? 'unit'),
+                    'unit' => (string) ($first?->material?->resolveTrackingUnit() ?? 'unit'),
                     'required' => (float) $items->sum('jumlah_diminta'),
                 ];
             });
@@ -287,7 +288,7 @@ class ViewOutbound extends Page
                 $pieces = collect($piecesByMaterial->get($materialId, []));
                 $first = $pieces->first();
                 $requiredData = $requiredByMaterial->get($materialId, []);
-                $unit = (string) ($requiredData['unit'] ?? ($first?->material?->satuan ?: 'unit'));
+                $unit = (string) ($requiredData['unit'] ?? ($first?->material?->resolveTrackingUnit() ?: 'unit'));
                 $pieceCount = $pieces->count();
                 $isPotongan = $this->isLengthUnit($unit) && $pieceCount > 1;
                 $rackText = $pieces
@@ -302,7 +303,7 @@ class ViewOutbound extends Page
                         $rack = (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-'));
                         $qty = $this->formatQty((float) $piece->panjang, $unit);
 
-                        return $qty . ' - Rak ' . $rack;
+                        return $qty.' - Rak '.$rack;
                     })
                     ->values()
                     ->all();
@@ -323,12 +324,12 @@ class ViewOutbound extends Page
                         $original = (float) ($row['original_length'] ?? 0);
                         $remaining = (float) ($row['remaining_length'] ?? 0);
 
-                        $text = 'Ambil piece #' . $pieceId . ' dari Rak ' . $rack
-                            . ' (potong ' . $this->formatQty($takeQty, 'm')
-                            . ' dari ' . $this->formatQty($original, 'm') . ')';
+                        $text = 'Ambil piece #'.$pieceId.' dari Rak '.$rack
+                            .' (potong '.$this->formatQty($takeQty, 'm')
+                            .' dari '.$this->formatQty($original, 'm').')';
 
                         if ($remaining > 0) {
-                            $text .= ' | Sisa: ' . $this->formatQty($remaining, 'm') . ' dikembalikan ke rak';
+                            $text .= ' | Sisa: '.$this->formatQty($remaining, 'm').' dikembalikan ke rak';
                         }
 
                         return $text;
@@ -353,9 +354,9 @@ class ViewOutbound extends Page
             ->all();
     }
 
-    private function aiInstructionsByMaterial(): \Illuminate\Support\Collection
+    private function aiInstructionsByMaterial(): Collection
     {
-        if (!$this->record->project_id) {
+        if (! $this->record->project_id) {
             return collect();
         }
 
@@ -368,14 +369,14 @@ class ViewOutbound extends Page
             ->latest('id')
             ->first();
 
-        if (!$task) {
+        if (! $task) {
             return collect();
         }
 
         $results = collect(data_get($task->payload, 'execution_result.material_results', []));
 
         return $results
-            ->filter(fn ($row) => is_array($row) && !empty($row['material_id']))
+            ->filter(fn ($row) => is_array($row) && ! empty($row['material_id']))
             ->mapWithKeys(function (array $row): array {
                 return [
                     (int) ($row['material_id'] ?? 0) => collect($row['allocations'] ?? [])->values()->all(),
@@ -393,7 +394,7 @@ class ViewOutbound extends Page
         $options = collect($rows)
             ->values()
             ->mapWithKeys(function (array $row, int $index): array {
-                $id = 'item-' . (string) $index;
+                $id = 'item-'.(string) $index;
                 $material = (string) ($row['material'] ?? 'Material tidak diketahui');
                 $qty = (string) ($row['qty'] ?? '-');
                 $racks = (string) ($row['racks'] ?? '-');
@@ -401,10 +402,10 @@ class ViewOutbound extends Page
                 $status = (string) ($row['fulfillment_status'] ?? '-');
 
                 return [
-                    $id => '<span class="font-semibold">' . e($material) . '</span>'
-                        . '<div class="mt-1 text-xs text-gray-500">'
-                        . e($qty) . ' | Rak ' . e($racks) . ' | ' . e($type) . ' | Status ' . e($status)
-                        . '</div>',
+                    $id => '<span class="font-semibold">'.e($material).'</span>'
+                        .'<div class="mt-1 text-xs text-gray-500">'
+                        .e($qty).' | Rak '.e($racks).' | '.e($type).' | Status '.e($status)
+                        .'</div>',
                 ];
             })
             ->all();
@@ -459,7 +460,7 @@ class ViewOutbound extends Page
 
     private function canProceedOutbound(): bool
     {
-        if ($this->record->outbound_manual || !$this->record->project_id) {
+        if ($this->record->outbound_manual || ! $this->record->project_id) {
             return true;
         }
 
@@ -468,7 +469,7 @@ class ViewOutbound extends Page
             ->groupBy('material_id')
             ->get();
 
-        if (!$requiredRows || $requiredRows->isEmpty()) {
+        if (! $requiredRows || $requiredRows->isEmpty()) {
             return true;
         }
 
@@ -487,14 +488,14 @@ class ViewOutbound extends Page
             return $required > 0 && $provided + 0.00001 < $required;
         });
 
-        return !$hasShortage;
+        return ! $hasShortage;
     }
 
     private function formatQty(float $value, string $unit): string
     {
         $number = rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.');
 
-        return trim($number . ' ' . $unit);
+        return trim($number.' '.$unit);
     }
 
     private function isLengthUnit(string $unit): bool
@@ -534,13 +535,12 @@ class ViewOutbound extends Page
 
             $piece->update([
                 'panjang' => number_format($rollLength, 2, '.', ''),
-                'keterangan' => trim((string) ($piece->keterangan ?? '') . ' | Auto split outbound per roll.'),
+                'keterangan' => trim((string) ($piece->keterangan ?? '').' | Auto split outbound per roll.'),
             ]);
 
             for ($i = 1; $i < $fullRollCount; $i++) {
                 MaterialPiece::create([
                     'material_id' => $piece->material_id,
-                    'piece_code' => $piece->piece_code,
                     'inbound_id' => $piece->inbound_id,
                     'booked_for_project_id' => $piece->booked_for_project_id,
                     'shelf_location_id' => $piece->shelf_location_id,
@@ -550,14 +550,13 @@ class ViewOutbound extends Page
                     'status' => 'booked',
                     'sumber' => 'split_outbound_dispatch',
                     'booked_at' => $piece->booked_at,
-                    'keterangan' => 'Auto split outbound dari piece #' . $piece->id . '.',
+                    'keterangan' => 'Auto split outbound dari piece #'.$piece->id.'.',
                 ]);
             }
 
             if ($remainder > 0) {
                 MaterialPiece::create([
                     'material_id' => $piece->material_id,
-                    'piece_code' => $piece->piece_code,
                     'inbound_id' => $piece->inbound_id,
                     'booked_for_project_id' => $piece->booked_for_project_id,
                     'shelf_location_id' => $piece->shelf_location_id,
@@ -567,7 +566,7 @@ class ViewOutbound extends Page
                     'status' => 'booked',
                     'sumber' => 'split_outbound_remainder',
                     'booked_at' => $piece->booked_at,
-                    'keterangan' => 'Sisa split outbound dari piece #' . $piece->id . '.',
+                    'keterangan' => 'Sisa split outbound dari piece #'.$piece->id.'.',
                 ]);
             }
         }

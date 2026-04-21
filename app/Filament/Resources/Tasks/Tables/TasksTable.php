@@ -4,23 +4,24 @@ namespace App\Filament\Resources\Tasks\Tables;
 
 use App\Filament\Resources\PurchaseRequests\PurchaseRequestResource;
 use App\Filament\Resources\Tasks\TaskResource;
+use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Task;
 use App\Services\AI\TaskApprovalService;
 use Carbon\Carbon;
-use Filament\Forms\Components\Hidden;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
 use Filament\Actions\ViewAction;
+use Filament\Forms\Components\Hidden;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
-use Filament\Schemas\Components\Utilities\Get;
 use Filament\Notifications\Notification;
+use Filament\Schemas\Components\Utilities\Get;
 use Filament\Tables\Columns\BadgeColumn;
 use Filament\Tables\Columns\TextColumn;
-use Filament\Forms\Components\Textarea;
 use Filament\Tables\Table;
 
 class TasksTable
@@ -33,7 +34,7 @@ class TasksTable
                 TextColumn::make('id')
                     ->label('ID')
                     ->sortable()
-                    ->formatStateUsing(fn ($state) => 'Task #' . $state),
+                    ->formatStateUsing(fn ($state) => 'Task #'.$state),
 
                 TextColumn::make('for_role')
                     ->label('Untuk')
@@ -44,13 +45,16 @@ class TasksTable
                     ->badge()
                     ->color('info')
                     ->formatStateUsing(function ($state, $record) {
-                        if (!$record) return $state;
+                        if (! $record) {
+                            return $state;
+                        }
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             return 'Alokasi Inbound';
                         }
                         if ($record->type === 'ai_deadstock_recommendation') {
                             return 'Screening Deadstock';
                         }
+
                         return $state;
                     }),
 
@@ -58,7 +62,9 @@ class TasksTable
                     ->label('Judul')
                     ->searchable()
                     ->formatStateUsing(function ($state, $record) {
-                        if (!$record) return $state;
+                        if (! $record) {
+                            return $state;
+                        }
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             return 'Usulan Alokasi Inbound';
                         }
@@ -68,6 +74,7 @@ class TasksTable
                         if (str_starts_with($record->type, 'ai_')) {
                             return $state ?: 'AI: Konfirmasi Kebutuhan Material Proyek';
                         }
+
                         return $state;
                     }),
 
@@ -102,7 +109,9 @@ class TasksTable
                 TextColumn::make('acc_staff')
                     ->label('ACC')
                     ->getStateUsing(function ($record) {
-                        if (!$record) return '-';
+                        if (! $record) {
+                            return '-';
+                        }
                         if ($record->type === 'ai_deadstock_recommendation') {
                             return (string) data_get($record->payload, 'approval_trail.manager_operasional.status', '-');
                         }
@@ -110,6 +119,7 @@ class TasksTable
                         if ($record->type === 'ai_inbound_allocation_suggestion') {
                             return $record->status !== 'pending' ? ($status === '-' ? 'approved' : $status) : '-';
                         }
+
                         return $status;
                     })
                     ->badge()
@@ -127,7 +137,7 @@ class TasksTable
                 EditAction::make()
                     ->visible(fn (Task $record) => $record->status === 'pending'
                         && self::canHandleTask($record)
-                        && !in_array($record->type, ['ai_booking_suggestion', 'ai_inbound_allocation_suggestion'], true)),
+                        && ! in_array($record->type, ['ai_booking_suggestion', 'ai_inbound_allocation_suggestion'], true)),
 
                 Action::make('approve')
                     ->label('Approve')
@@ -136,15 +146,20 @@ class TasksTable
                     ->modalSubmitActionLabel('Approve')
                     ->visible(fn (Task $record) => $record->status === 'pending'
                         && self::canHandleTask($record)
-                        && !($record->type === 'ai_deadstock_recommendation'
+                        && ! ($record->type === 'ai_deadstock_recommendation'
                             && (string) data_get($record->payload, 'workflow_state', '') === 'approved_for_aging'))
                     ->form(function (Task $record): array {
                         if ($record->type === 'ai_booking_suggestion') {
                             $items = collect(data_get($record->payload, 'items', []));
 
                             $materialRows = $items->map(function (array $item): array {
+                                $materialId = (int) ($item['material_id'] ?? 0);
+                                $material = $materialId > 0 ? Material::query()->find($materialId) : null;
+                                $satuan = (string) ($material?->resolveTrackingUnit() ?: ($item['satuan'] ?? 'unit'));
+                                $isDiscreteUnit = Material::usesDiscreteUnitTrackingFor($satuan, $material?->default_roll_length);
+                                $itemLabel = $isDiscreteUnit ? 'Item' : 'Piece';
                                 $recommendedPieces = collect($item['recommended_pieces'] ?? [])
-                                    ->map(function (array $piece): string {
+                                    ->map(function (array $piece) use ($satuan, $isDiscreteUnit, $itemLabel): string {
                                         $id = (int) ($piece['id'] ?? 0);
                                         $total = rtrim(rtrim(number_format((float) ($piece['panjang'] ?? 0), 2, '.', ''), '0'), '.');
                                         $take = rtrim(rtrim(number_format((float) ($piece['take_qty'] ?? 0), 2, '.', ''), '0'), '.');
@@ -152,9 +167,13 @@ class TasksTable
                                         $rack = (string) ($piece['rack_label'] ?? '-');
                                         $age = (int) ($piece['age_days'] ?? 0);
 
-                                        $text = "Piece #{$id} | {$total}m | Rak {$rack} | Masuk {$age} hari lalu";
+                                        $text = "{$itemLabel} #{$id} | {$total} {$satuan} | Rak {$rack} | Masuk {$age} hari lalu";
                                         if ((float) ($piece['take_qty'] ?? 0) < (float) ($piece['panjang'] ?? 0)) {
-                                            $text .= " | Potong: {$take}m, Sisa: {$sisa}m";
+                                            if ($isDiscreteUnit) {
+                                                $text .= " | Ambil: {$take} {$satuan}, Sisa: {$sisa} {$satuan}";
+                                            } else {
+                                                $text .= " | Potong: {$take} {$satuan}, Sisa: {$sisa} {$satuan}";
+                                            }
                                         } else {
                                             $text .= ' | Ambil utuh';
                                         }
@@ -164,10 +183,10 @@ class TasksTable
                                     ->implode("\n");
 
                                 return [
-                                    'material_id' => (int) ($item['material_id'] ?? 0),
+                                    'material_id' => $materialId,
                                     'material_name' => (string) ($item['material_name'] ?? '-'),
                                     'dibutuhkan' => (float) ($item['dibutuhkan'] ?? 0),
-                                    'satuan' => (string) ($item['satuan'] ?? 'unit'),
+                                    'satuan' => $satuan,
                                     'recommended_piece_ids' => json_encode($item['recommended_piece_ids'] ?? []),
                                     'recommended_qty' => (float) ($item['recommended_qty'] ?? 0),
                                     'qty_pr' => max(0, round(
@@ -243,7 +262,7 @@ class TasksTable
 
                             $availablePieces = $materialId > 0
                                 ? MaterialPiece::query()
-                                    ->with(['shelfLocation:id,kode_lokasi,nama_lokasi', 'inbound:id,entry_date'])
+                                    ->with(['shelfLocation:id,kode_lokasi,nama_lokasi', 'inbound:id,entry_date', 'material:id,satuan,default_roll_length'])
                                     ->where('material_id', $materialId)
                                     ->where('status', 'available')
                                     ->orderByRaw("CASE
@@ -258,7 +277,7 @@ class TasksTable
                             $defaultRows = $suggestions->map(fn ($s) => [
                                 'selected' => true,
                                 'project_id' => (int) ($s['project_id'] ?? 0),
-                                'project_code' => (string) ($s['project_code'] ?? ('#' . ($s['project_id'] ?? '-'))),
+                                'project_code' => (string) ($s['project_code'] ?? ('#'.($s['project_id'] ?? '-'))),
                                 'pr_status' => (string) ($s['pr_status'] ?? '-'),
                                 'qty' => (float) ($s['suggested_qty'] ?? 0),
                             ])->values()->all();
@@ -268,6 +287,8 @@ class TasksTable
                                     $length = rtrim(rtrim(number_format((float) $piece->panjang, 2, '.', ''), '0'), '.');
                                     $rack = (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-'));
                                     $source = (string) ($piece->sumber ?: '-');
+                                    $unit = (string) ($piece->material?->satuan ?: 'unit');
+                                    $itemLabel = Material::usesDiscreteUnitTrackingFor($unit, $piece->material?->default_roll_length) ? 'Item' : 'Piece';
                                     $receivedAt = $piece->inbound?->entry_date
                                         ? Carbon::parse($piece->inbound->entry_date)
                                         : $piece->created_at;
@@ -278,7 +299,7 @@ class TasksTable
                                     }
 
                                     return [
-                                        $id => "Piece #{$id} | {$length}m | Rak {$rack} | {$source} | Masuk {$age} hari lalu",
+                                        $id => "{$itemLabel} #{$id} | {$length} {$unit} | Rak {$rack} | {$source} | Masuk {$age} hari lalu",
                                     ];
                                 })
                                 ->all();
@@ -295,7 +316,7 @@ class TasksTable
                                     ->label('Tambahkan Purchase Request')
                                     ->default(false)
                                     ->inline(false),
-                                \Filament\Forms\Components\Repeater::make('manual_allocation')
+                                Repeater::make('manual_allocation')
                                     ->label('Checklist Alokasi Proyek')
                                     ->helperText('Kebutuhan proyek sudah dihitung sistem. Centang proyek yang ingin dialokasikan sekarang; sisanya tetap menjadi stok gudang available.')
                                     ->schema([
@@ -342,10 +363,11 @@ class TasksTable
                                     ->dehydrated(false),
                             ];
                         }
+
                         return [];
                     })
                     ->action(function (Task $record, array $data, $livewire) {
-                        $service = new TaskApprovalService();
+                        $service = new TaskApprovalService;
                         $redirectUrl = TaskResource::getUrl('index');
 
                         if ($record->type === 'ai_booking_suggestion') {
@@ -421,7 +443,7 @@ class TasksTable
                                     'quantity' => $shortageQty > 0 ? $shortageQty : ($qtyNeeded > 0 ? $qtyNeeded : null),
                                     'priority' => 'medium',
                                     'needed_date' => now()->addDays(7)->toDateString(),
-                                    'reason' => 'PR manual dari task operasional alokasi #' . $record->id,
+                                    'reason' => 'PR manual dari task operasional alokasi #'.$record->id,
                                 ];
 
                                 $manualPrData = collect($manualPrData)
@@ -445,7 +467,7 @@ class TasksTable
                     ->icon('heroicon-o-x-circle')
                     ->visible(fn (Task $record) => $record->status === 'pending'
                         && self::canHandleTask($record)
-                        && !($record->type === 'ai_deadstock_recommendation'
+                        && ! ($record->type === 'ai_deadstock_recommendation'
                             && (string) data_get($record->payload, 'workflow_state', '') === 'approved_for_aging'))
                     ->form([
                         Textarea::make('reason')
@@ -454,7 +476,7 @@ class TasksTable
                             ->rows(3),
                     ])
                     ->action(function (Task $record, array $data) {
-                        $service = new TaskApprovalService();
+                        $service = new TaskApprovalService;
                         $service->reject($record, auth()->user(), (string) ($data['reason'] ?? 'Ditolak'));
                     })
                     ->after(function ($livewire): void {
@@ -468,7 +490,7 @@ class TasksTable
     {
         $user = auth()->user();
 
-        if (!$user) {
+        if (! $user) {
             return false;
         }
 

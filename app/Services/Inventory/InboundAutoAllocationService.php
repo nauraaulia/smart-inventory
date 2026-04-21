@@ -37,7 +37,7 @@ class InboundAutoAllocationService
             /** @var MaterialPiece|null $lockedPiece */
             $lockedPiece = MaterialPiece::query()->lockForUpdate()->find($piece->id);
 
-            if (!$lockedPiece || $lockedPiece->status !== 'available') {
+            if (! $lockedPiece || $lockedPiece->status !== 'available') {
                 return;
             }
 
@@ -94,7 +94,7 @@ class InboundAutoAllocationService
         /** @var Inbound|null $inbound */
         $inbound = $piece->relationLoaded('inbound') ? $piece->inbound : $piece->inbound()->first();
 
-        if (!$inbound) {
+        if (! $inbound) {
             return false;
         }
 
@@ -108,14 +108,14 @@ class InboundAutoAllocationService
             /** @var MaterialPiece|null $lockedPiece */
             $lockedPiece = MaterialPiece::query()->lockForUpdate()->find($piece->id);
 
-            if (!$lockedPiece || $lockedPiece->status !== 'available') {
+            if (! $lockedPiece || $lockedPiece->status !== 'available') {
                 return;
             }
 
             /** @var Inbound|null $inbound */
             $inbound = Inbound::query()->find($lockedPiece->inbound_id);
 
-            if (!$inbound || !empty($inbound->purchase_order_id)) {
+            if (! $inbound || ! empty($inbound->purchase_order_id)) {
                 return;
             }
 
@@ -151,7 +151,7 @@ class InboundAutoAllocationService
                 return;
             }
 
-            $materialName = (string) ($lockedPiece->material?->nama_material ?? ('Material #' . $lockedPiece->material_id));
+            $materialName = (string) ($lockedPiece->material?->nama_material ?? ('Material #'.$lockedPiece->material_id));
 
             $payload = [
                 'piece_id' => $lockedPiece->id,
@@ -279,7 +279,7 @@ class InboundAutoAllocationService
 
             $result[] = [
                 'project_id' => $projectId,
-                'project_code' => (string) ($projectCodes[$projectId] ?? ('#' . $projectId)),
+                'project_code' => (string) ($projectCodes[$projectId] ?? ('#'.$projectId)),
                 'pr_status' => (string) ($prStatusByProject[$projectId] ?? 'no_active_pr'),
                 'suggested_qty' => round($allocated, 2),
             ];
@@ -327,7 +327,7 @@ class InboundAutoAllocationService
                 'status' => 'booked',
                 'booked_for_project_id' => $projectId,
                 'booked_at' => now(),
-                'keterangan' => trim(($piece->keterangan ?? '') . ' | Auto-allocate inbound untuk project prioritas.'),
+                'keterangan' => trim(($piece->keterangan ?? '').' | Auto-allocate inbound untuk project prioritas.'),
             ]);
 
             return;
@@ -339,7 +339,6 @@ class InboundAutoAllocationService
 
         MaterialPiece::create([
             'material_id' => $piece->material_id,
-            'piece_code' => $piece->piece_code,
             'inbound_id' => $piece->inbound_id,
             'booked_for_project_id' => $projectId,
             'shelf_location_id' => $piece->shelf_location_id,

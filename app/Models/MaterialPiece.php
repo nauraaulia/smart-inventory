@@ -5,8 +5,8 @@ namespace App\Models;
 use App\Jobs\ProsesKebutuhanProyekJob;
 use App\Services\Inventory\InboundAutoAllocationService;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 
@@ -57,14 +57,14 @@ class MaterialPiece extends Model
     public function scopeUtuh($query, $threshold = 250)
     {
         return $query->where('sumber', 'inbound_baru')
-                     ->where('panjang', '>=', $threshold);
+            ->where('panjang', '>=', $threshold);
     }
 
     public function scopePotongan($query, $threshold = 250)
     {
-        return $query->where(function($q) use ($threshold) {
+        return $query->where(function ($q) use ($threshold) {
             $q->where('sumber', '!=', 'inbound_baru')
-              ->orWhere('panjang', '<', $threshold);
+                ->orWhere('panjang', '<', $threshold);
         });
     }
 
@@ -74,7 +74,7 @@ class MaterialPiece extends Model
     {
         static::creating(function (MaterialPiece $piece): void {
             if (blank($piece->piece_code)) {
-                $piece->piece_code = self::generatePieceCode((int) $piece->material_id);
+                $piece->piece_code = self::generateNextPieceCode((int) $piece->material_id);
             }
         });
 
@@ -109,6 +109,11 @@ class MaterialPiece extends Model
         });
     }
 
+    public static function syncAffectedProjectsForMaterial(int $materialId): void
+    {
+        self::dispatchAffectedProjectSync($materialId);
+    }
+
     private static function dispatchAffectedProjectSync(int $materialId): void
     {
         if ($materialId <= 0) {
@@ -128,8 +133,8 @@ class MaterialPiece extends Model
             ->all();
 
         foreach ($projectIds as $projectId) {
-            $debounceKey = 'material_piece_ai_dispatch_' . $materialId . '_' . (int) $projectId;
-            if (!Cache::add($debounceKey, 1, now()->addSeconds(5))) {
+            $debounceKey = 'material_piece_ai_dispatch_'.$materialId.'_'.(int) $projectId;
+            if (! Cache::add($debounceKey, 1, now()->addSeconds(5))) {
                 continue;
             }
 
@@ -137,7 +142,7 @@ class MaterialPiece extends Model
         }
     }
 
-    private static function generatePieceCode(int $materialId): string
+    public static function generateNextPieceCode(int $materialId): string
     {
         $material = Material::query()->find($materialId, ['id', 'kategori', 'kode_material']);
         $rawPrefix = (string) ($material?->kategori ?: $material?->kode_material ?: 'MAT');
@@ -147,11 +152,11 @@ class MaterialPiece extends Model
             $prefix = 'MAT';
         }
 
-        $base = $prefix . '-' . now()->format('ymd');
+        $base = $prefix.'-'.now()->format('ymd');
         $sequence = 1;
 
         $last = self::withTrashed()
-            ->where('piece_code', 'like', $base . '-%')
+            ->where('piece_code', 'like', $base.'-%')
             ->orderByDesc('piece_code')
             ->value('piece_code');
 
@@ -160,10 +165,10 @@ class MaterialPiece extends Model
         }
 
         while (true) {
-            $candidate = $base . '-' . str_pad((string) $sequence, 4, '0', STR_PAD_LEFT);
+            $candidate = $base.'-'.str_pad((string) $sequence, 4, '0', STR_PAD_LEFT);
             $exists = self::withTrashed()->where('piece_code', $candidate)->exists();
 
-            if (!$exists) {
+            if (! $exists) {
                 return $candidate;
             }
 

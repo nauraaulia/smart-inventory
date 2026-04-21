@@ -3,9 +3,9 @@
 namespace App\Models;
 
 use Carbon\Carbon;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\DB;
 
 class PurchaseRequest extends Model
 {
@@ -30,11 +30,11 @@ class PurchaseRequest extends Model
         static::updated(function (PurchaseRequest $pr): void {
             $statusChangedToReceived = $pr->wasChanged('status') && $pr->status === 'received';
 
-            if (!$statusChangedToReceived) {
+            if (! $statusChangedToReceived) {
                 return;
             }
 
-            if (!$pr->project_id || !$pr->material_id) {
+            if (! $pr->project_id || ! $pr->material_id) {
                 return;
             }
 
@@ -46,7 +46,7 @@ class PurchaseRequest extends Model
                 /** @var PurchaseRequest|null $lockedPr */
                 $lockedPr = PurchaseRequest::query()->lockForUpdate()->find($pr->id);
 
-                if (!$lockedPr || filled($lockedPr->project_allocated_at) || $lockedPr->status !== 'received') {
+                if (! $lockedPr || filled($lockedPr->project_allocated_at) || $lockedPr->status !== 'received') {
                     return;
                 }
 
@@ -143,11 +143,12 @@ class PurchaseRequest extends Model
                     'status' => 'booked',
                     'booked_for_project_id' => $projectId,
                     'booked_at' => now(),
-                    'keterangan' => trim(($piece->keterangan ?? '') . ' | Auto allocate dari PR received.'),
+                    'keterangan' => trim(($piece->keterangan ?? '').' | Auto allocate dari PR received.'),
                 ]);
 
                 $remaining -= $pieceLength;
                 $booked += $pieceLength;
+
                 continue;
             }
 
@@ -157,7 +158,6 @@ class PurchaseRequest extends Model
 
             MaterialPiece::create([
                 'material_id' => $piece->material_id,
-                'piece_code' => $piece->piece_code,
                 'inbound_id' => $piece->inbound_id,
                 'booked_for_project_id' => $projectId,
                 'shelf_location_id' => $piece->shelf_location_id,

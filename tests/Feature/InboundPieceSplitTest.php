@@ -8,6 +8,7 @@ use App\Models\MaterialPiece;
 use App\Models\ShelfLocation;
 use App\Models\Supplier;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Artisan;
 use Tests\TestCase;
 
 class InboundPieceSplitTest extends TestCase
@@ -97,5 +98,39 @@ class InboundPieceSplitTest extends TestCase
             ->get();
 
         $this->assertSame([300.0, 300.0, 50.0], $pieces->pluck('panjang')->map(fn ($qty): float => (float) $qty)->all());
+    }
+
+    public function test_legacy_unit_piece_can_be_backfilled_into_individual_rows(): void
+    {
+        $material = Material::query()->create([
+            'kode_material' => 'MAT-BAT-002',
+            'nama_material' => 'Battery Backup Legacy',
+            'stok' => 2,
+            'satuan' => 'unit',
+            'min_stok' => 0,
+        ]);
+
+        $piece = MaterialPiece::query()->create([
+            'material_id' => $material->id,
+            'piece_code' => 'LEGACY-BAT-0001',
+            'panjang' => 2,
+            'status' => 'available',
+            'sumber' => 'inbound_baru',
+            'keterangan' => 'Legacy aggregated unit row',
+        ]);
+
+        Artisan::call('inventory:split-discrete-pieces', [
+            '--material' => 'MAT-BAT-002',
+        ]);
+
+        $pieces = MaterialPiece::query()
+            ->where('material_id', $material->id)
+            ->orderBy('id')
+            ->get();
+
+        $this->assertCount(2, $pieces);
+        $this->assertSame([1.0, 1.0], $pieces->pluck('panjang')->map(fn ($qty): float => (float) $qty)->all());
+        $this->assertSame((int) $piece->id, (int) $pieces->first()->id);
+        $this->assertCount(2, $pieces->pluck('piece_code')->filter()->unique());
     }
 }

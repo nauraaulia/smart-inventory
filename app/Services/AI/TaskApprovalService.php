@@ -3,12 +3,12 @@
 namespace App\Services\AI;
 
 use App\Jobs\ProsesKebutuhanProyekJob;
+use App\Models\Inbound;
 use App\Models\Material;
 use App\Models\MaterialPiece;
-use App\Models\Inbound;
+use App\Models\Outbound;
 use App\Models\Project;
 use App\Models\ProjectItem;
-use App\Models\Outbound;
 use App\Models\PurchaseRequest;
 use App\Models\Supplier;
 use App\Models\Task;
@@ -50,9 +50,9 @@ class TaskApprovalService
         );
 
         if ($task->type === 'ai_booking_suggestion' && $projectId > 0) {
-            $refreshKey = 'ai_post_approval_refresh_' . $projectId;
+            $refreshKey = 'ai_post_approval_refresh_'.$projectId;
             if (Cache::add($refreshKey, 1, now()->addSeconds(15))) {
-                Cache::forget('ai_booking_project_hash_' . $projectId);
+                Cache::forget('ai_booking_project_hash_'.$projectId);
                 ProsesKebutuhanProyekJob::dispatch($projectId)->delay(now()->addSeconds(2));
             }
         }
@@ -61,9 +61,9 @@ class TaskApprovalService
             $allocatedTotalQty = (float) data_get($payload, 'execution_result.allocated_total_qty', 0);
 
             if ($allocatedTotalQty > 0) {
-                $refreshKey = 'ai_post_operational_approval_refresh_' . $projectId;
+                $refreshKey = 'ai_post_operational_approval_refresh_'.$projectId;
                 if (Cache::add($refreshKey, 1, now()->addSeconds(15))) {
-                    Cache::forget('ai_booking_project_hash_' . $projectId);
+                    Cache::forget('ai_booking_project_hash_'.$projectId);
                     ProsesKebutuhanProyekJob::dispatch($projectId)->delay(now()->addSeconds(2));
                 }
             }
@@ -115,7 +115,7 @@ class TaskApprovalService
             ->values()
             ->all();
         $stockAtApprovalByMaterial = [];
-        if (!empty($materialIdsForSnapshot)) {
+        if (! empty($materialIdsForSnapshot)) {
             $stockAtApprovalByMaterial = MaterialPiece::query()
                 ->selectRaw('material_id, COALESCE(SUM(panjang), 0) as total_available')
                 ->whereIn('material_id', $materialIdsForSnapshot)
@@ -158,7 +158,7 @@ class TaskApprovalService
 
         if ($materialItems->isEmpty()) {
             $materialItems = collect($detail)->map(function (array $item): array {
-            return [
+                return [
                     'material_id' => (int) ($item['material_id'] ?? 0),
                     'material_name' => (string) ($item['nama_material'] ?? '-'),
                     'dibutuhkan' => (float) ($item['dibutuhkan'] ?? 0),
@@ -184,12 +184,12 @@ class TaskApprovalService
             $aiPrQtyRaw = (float) ($item['recommended_pr_qty'] ?? ($detailRow['recommended_pr_qty'] ?? ($detailRow['qty_pr'] ?? ($dibutuhkan - $aiBookingQty))));
             $aiBookingQty = min($dibutuhkan, $aiBookingQty);
             $aiPrQty = min(max(0, $dibutuhkan - $aiBookingQty), max(0, $aiPrQtyRaw));
-            $recommendedPieceIds = collect(!empty($item['recommended_piece_ids'] ?? []) ? ($item['recommended_piece_ids'] ?? []) : ($detailRow['recommended_piece_ids'] ?? []))
+            $recommendedPieceIds = collect(! empty($item['recommended_piece_ids'] ?? []) ? ($item['recommended_piece_ids'] ?? []) : ($detailRow['recommended_piece_ids'] ?? []))
                 ->map(fn ($id) => (int) $id)
                 ->filter()
                 ->values()
                 ->all();
-            $recommendedPieces = collect(!empty($item['recommended_pieces'] ?? null) ? ($item['recommended_pieces'] ?? []) : ($detailRow['recommended_pieces'] ?? []))
+            $recommendedPieces = collect(! empty($item['recommended_pieces'] ?? null) ? ($item['recommended_pieces'] ?? []) : ($detailRow['recommended_pieces'] ?? []))
                 ->filter(fn ($row): bool => is_array($row) && (int) ($row['id'] ?? 0) > 0 && (float) ($row['take_qty'] ?? 0) > 0)
                 ->values()
                 ->all();
@@ -200,7 +200,7 @@ class TaskApprovalService
                 targetQty: $aiBookingQty,
             );
 
-            if (!empty($normalizedSegments) && !empty($recommendedPieces)) {
+            if (! empty($normalizedSegments) && ! empty($recommendedPieces)) {
                 $recommendedTakeSorted = collect($recommendedPieces)
                     ->map(fn (array $row): float => round((float) ($row['take_qty'] ?? 0), 2))
                     ->filter(fn (float $value): bool => $value > 0)
@@ -238,7 +238,7 @@ class TaskApprovalService
                     projectId: $projectId,
                     qtyNeeded: $dibutuhkan,
                     projectCode: $projectCode,
-                    materialName: (string) ($item['material_name'] ?? ('Material #' . $materialId)),
+                    materialName: (string) ($item['material_name'] ?? ('Material #'.$materialId)),
                 );
 
                 if ($inboundTaskId) {
@@ -247,7 +247,7 @@ class TaskApprovalService
 
                 $materialResults[] = [
                     'material_id' => $materialId,
-                    'material_name' => (string) ($item['material_name'] ?? ('Material #' . $materialId)),
+                    'material_name' => (string) ($item['material_name'] ?? ('Material #'.$materialId)),
                     'status' => 'rejected',
                     'dibutuhkan' => $this->decimal($dibutuhkan),
                     'ai_booking_qty' => $this->decimal($aiBookingQty),
@@ -269,7 +269,7 @@ class TaskApprovalService
             ];
 
             if ($aiBookingQty > 0) {
-                if (!empty($recommendedPieces)) {
+                if (! empty($recommendedPieces)) {
                     $bookingResult = $this->bookFromRecommendedPieces(
                         materialId: $materialId,
                         projectId: $projectId,
@@ -317,7 +317,7 @@ class TaskApprovalService
                     projectId: $projectId,
                     qtyNeeded: $bookingShortage,
                     projectCode: $projectCode,
-                    materialName: (string) ($item['material_name'] ?? ('Material #' . $materialId)),
+                    materialName: (string) ($item['material_name'] ?? ('Material #'.$materialId)),
                     contextNote: 'belum terpenuhi dari booking AI (stok berubah saat approve)',
                 );
 
@@ -328,7 +328,7 @@ class TaskApprovalService
 
             $materialResults[] = [
                 'material_id' => $materialId,
-                'material_name' => (string) ($item['material_name'] ?? ('Material #' . $materialId)),
+                'material_name' => (string) ($item['material_name'] ?? ('Material #'.$materialId)),
                 'status' => 'approved',
                 'dibutuhkan' => $this->decimal($dibutuhkan),
                 'ai_booking_qty' => $this->decimal($aiBookingQty),
@@ -342,11 +342,12 @@ class TaskApprovalService
             ];
 
             if ($aiPrQty > 0) {
-                if (!$generatePr) {
+                if (! $generatePr) {
                     $pendingShortages[] = [
                         'material_id' => $materialId,
                         'shortage_qty' => $this->decimal($aiPrQty),
                     ];
+
                     continue;
                 }
 
@@ -448,6 +449,9 @@ class TaskApprovalService
             return null;
         }
 
+        $material = Material::query()->find($materialId, ['id', 'satuan', 'default_roll_length']);
+        $unit = (string) ($material?->resolveTrackingUnit() ?? 'unit');
+
         $availablePieces = MaterialPiece::query()
             ->with(['shelfLocation:id,kode_lokasi,nama_lokasi'])
             ->where('material_id', $materialId)
@@ -490,6 +494,7 @@ class TaskApprovalService
                 'project_code' => $projectCode,
                 'material_id' => $materialId,
                 'material_name' => $materialName,
+                'unit' => $unit,
                 'qty_dibutuhkan' => $this->decimal($qtyNeeded),
                 'total_available_qty' => round((float) $availablePieces->sum('panjang'), 2),
                 'piece_ids' => collect($piecesPayload)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(),
@@ -526,7 +531,7 @@ class TaskApprovalService
             $pieceIds = [$pieceId];
         }
 
-        if (!empty($selectedPieceIds)) {
+        if (! empty($selectedPieceIds)) {
             $pieceIds = $selectedPieceIds;
         }
 
@@ -542,7 +547,7 @@ class TaskApprovalService
         $selectedManualAlloc = $manualAlloc->isNotEmpty()
             ? $manualAlloc
                 ->filter(fn ($row) => (bool) ($row['selected'] ?? true))
-                ->map(fn($row) => [
+                ->map(fn ($row) => [
                     'project_id' => (int) ($row['project_id'] ?? $defaultProjectId),
                     'suggested_qty' => (float) ($row['qty'] ?? ($row['suggested_qty'] ?? 0)),
                 ])
@@ -688,8 +693,8 @@ class TaskApprovalService
             'handled_by' => $actor->id,
             'handled_at' => now(),
             'message' => empty($allocations)
-                ? 'Keterangan: Tidak ada alokasi baru. 0 unit dialokasikan, ' . $this->decimal($returnedToStockQty) . ' unit masuk ke stok available.'
-                : 'Keterangan: ' . $this->decimal($allocatedTotalQty) . ' unit dialokasikan, ' . $this->decimal($returnedToStockQty) . ' unit masuk ke stok available.',
+                ? 'Keterangan: Tidak ada alokasi baru. 0 unit dialokasikan, '.$this->decimal($returnedToStockQty).' unit masuk ke stok available.'
+                : 'Keterangan: '.$this->decimal($allocatedTotalQty).' unit dialokasikan, '.$this->decimal($returnedToStockQty).' unit masuk ke stok available.',
             'payload' => $payload,
         ]);
     }
@@ -737,8 +742,19 @@ class TaskApprovalService
             }
 
             $payload = $task->payload ?? [];
+            $existingRows = collect(data_get($payload, 'deadstock_items', []))
+                ->filter(fn ($row): bool => is_array($row) && (int) ($row['material_id'] ?? 0) > 0)
+                ->keyBy(fn (array $row): int => (int) $row['material_id']);
             $rows = collect($options['deadstock_decisions'] ?? [])
                 ->filter(fn ($row): bool => is_array($row) && (int) ($row['material_id'] ?? 0) > 0)
+                ->map(function (array $row) use ($existingRows): array {
+                    $materialId = (int) ($row['material_id'] ?? 0);
+                    $existing = (array) ($existingRows->get($materialId) ?? []);
+
+                    return array_merge($existing, $row, [
+                        'material_id' => $materialId,
+                    ]);
+                })
                 ->values();
 
             if ($rows->isEmpty()) {
@@ -757,7 +773,7 @@ class TaskApprovalService
 
                 if (abs($totalInput - $availableQty) > 0.01) {
                     throw ValidationException::withMessages([
-                        'deadstock_decisions' => 'Total qty status harus sama dengan stok untuk material ' . (string) ($row['material_name'] ?? ('#' . (int) ($row['material_id'] ?? 0))) . '.',
+                        'deadstock_decisions' => 'Total qty status harus sama dengan stok untuk material '.(string) ($row['material_name'] ?? ('#'.(int) ($row['material_id'] ?? 0))).'.',
                     ]);
                 }
 
@@ -810,7 +826,7 @@ class TaskApprovalService
 
                 return [
                     'material_id' => (int) ($row['material_id'] ?? 0),
-                    'material_name' => (string) ($row['material_name'] ?? ('Material #' . (int) ($row['material_id'] ?? 0))),
+                    'material_name' => (string) ($row['material_name'] ?? ('Material #'.(int) ($row['material_id'] ?? 0))),
                     'available_qty' => $availableQty,
                     'satuan' => (string) ($row['satuan'] ?? 'unit'),
                     'last_used_days' => (int) ($row['last_used_days'] ?? 0),
@@ -849,9 +865,9 @@ class TaskApprovalService
             $counts = collect(data_get($payload, 'execution_result.decision_counts', []));
             $summary = 'Keterangan: Aging material selesai diproses.';
             if ($counts->isNotEmpty()) {
-                $summary = 'Keterangan: Aging selesai. ' . $counts
-                    ->map(fn ($count, $key): string => $key . ' ' . $count . ' material')
-                    ->implode(', ') . '. Total buang/jual/return ' . $this->decimal((float) data_get($payload, 'execution_result.total_qty_disposed', 0)) . ' unit.';
+                $summary = 'Keterangan: Aging selesai. '.$counts
+                    ->map(fn ($count, $key): string => $key.' '.$count.' material')
+                    ->implode(', ').'. Total buang/jual/return '.$this->decimal((float) data_get($payload, 'execution_result.total_qty_disposed', 0)).' unit.';
             }
 
             $task->update([
@@ -890,7 +906,7 @@ class TaskApprovalService
                 ->lockForUpdate()
                 ->first();
 
-            if (!$piece) {
+            if (! $piece) {
                 break;
             }
 
@@ -900,22 +916,22 @@ class TaskApprovalService
                 $piece->update([
                     'status' => 'used',
                     'used_at' => now(),
-                    'keterangan' => trim((string) ($piece->keterangan ?? '') . ' | Aging: ' . $decision . ' oleh user #' . $actorId),
+                    'keterangan' => trim((string) ($piece->keterangan ?? '').' | Aging: '.$decision.' oleh user #'.$actorId),
                 ]);
 
                 $removed += $pieceLength;
                 $remaining = round(max(0, $remaining - $pieceLength), 2);
+
                 continue;
             }
 
             $piece->update([
                 'panjang' => $this->decimal($pieceLength - $remaining),
-                'keterangan' => trim((string) ($piece->keterangan ?? '') . ' | Sisa split dari aging (' . $decision . ').'),
+                'keterangan' => trim((string) ($piece->keterangan ?? '').' | Sisa split dari aging ('.$decision.').'),
             ]);
 
             MaterialPiece::create([
                 'material_id' => $piece->material_id,
-                'piece_code' => $piece->piece_code,
                 'inbound_id' => $piece->inbound_id,
                 'booked_for_project_id' => null,
                 'shelf_location_id' => $piece->shelf_location_id,
@@ -925,7 +941,7 @@ class TaskApprovalService
                 'status' => 'used',
                 'sumber' => 'aging_clearance',
                 'used_at' => now(),
-                'keterangan' => 'Pengurangan stok dari keputusan aging: ' . $decision . ' oleh user #' . $actorId,
+                'keterangan' => 'Pengurangan stok dari keputusan aging: '.$decision.' oleh user #'.$actorId,
             ]);
 
             $removed += $remaining;
@@ -954,7 +970,7 @@ class TaskApprovalService
                 $qty = min($remaining, $preferredOutstanding);
                 $suggestions[] = [
                     'project_id' => (int) $preferredProjectId,
-                    'project_code' => (string) ($projectCodes[(int) $preferredProjectId] ?? ('#' . (int) $preferredProjectId)),
+                    'project_code' => (string) ($projectCodes[(int) $preferredProjectId] ?? ('#'.(int) $preferredProjectId)),
                     'pr_status' => 'priority_project',
                     'suggested_qty' => round($qty, 2),
                 ];
@@ -992,7 +1008,7 @@ class TaskApprovalService
             $qty = min($remaining, $needed);
             $suggestions[] = [
                 'project_id' => (int) $projectId,
-                'project_code' => (string) ($projectCodes[(int) $projectId] ?? ('#' . (int) $projectId)),
+                'project_code' => (string) ($projectCodes[(int) $projectId] ?? ('#'.(int) $projectId)),
                 'pr_status' => 'project_need',
                 'suggested_qty' => round($qty, 2),
             ];
@@ -1012,7 +1028,7 @@ class TaskApprovalService
             $query->where('inbound_id', $inboundId);
         }
 
-        if (!empty($pieceIds)) {
+        if (! empty($pieceIds)) {
             $query->whereIn('id', $pieceIds);
         }
 
@@ -1035,14 +1051,14 @@ class TaskApprovalService
                 $query->where('inbound_id', $inboundId);
             }
 
-            if (!empty($pieceIds)) {
+            if (! empty($pieceIds)) {
                 $query->whereIn('id', $pieceIds);
             }
 
             /** @var MaterialPiece|null $piece */
             $piece = $query->first();
 
-            if (!$piece) {
+            if (! $piece) {
                 break;
             }
 
@@ -1067,7 +1083,7 @@ class TaskApprovalService
         array $pendingShortages,
         int $createdDraftPrCount,
     ): string {
-        if (!$generatePr && !empty($pendingShortages)) {
+        if (! $generatePr && ! empty($pendingShortages)) {
             return 'Booking diproses. Ada shortage yang belum dibuat PR (sesuai pilihan konfirmasi).';
         }
 
@@ -1085,7 +1101,7 @@ class TaskApprovalService
         $projectCode = $this->projectCodeFromPayload($payload, $projectId);
         $prIds = collect(data_get($payload, 'pr_ids', []))->filter()->values()->all();
 
-        if (!empty($prIds)) {
+        if (! empty($prIds)) {
             PurchaseRequest::whereIn('id', $prIds)
                 ->where('status', 'pending_manager')
                 ->update([
@@ -1132,7 +1148,7 @@ class TaskApprovalService
         $projectCode = $this->projectCodeFromPayload($payload, $projectId);
         $prIds = collect(data_get($payload, 'pr_ids', []))->filter()->values()->all();
 
-        if (!empty($prIds)) {
+        if (! empty($prIds)) {
             PurchaseRequest::whereIn('id', $prIds)
                 ->where('status', 'pending_finance')
                 ->update([
@@ -1167,7 +1183,7 @@ class TaskApprovalService
                     Action::make('open_po_review')
                         ->label('Buka Review PO')
                         ->button()
-                        ->url('/admin/purchase-orders/review?pr_ids=' . urlencode(implode(',', $prIds))),
+                        ->url('/admin/purchase-orders/review?pr_ids='.urlencode(implode(',', $prIds))),
                 ])
                 ->success();
 
@@ -1185,7 +1201,7 @@ class TaskApprovalService
         $projectCode = $this->projectCodeFromPayload($payload, $projectId);
         $prIds = collect(data_get($payload, 'pr_ids', []))->filter()->values()->all();
 
-        if (!empty($prIds)) {
+        if (! empty($prIds)) {
             PurchaseRequest::whereIn('id', $prIds)
                 ->where('status', 'rejected')
                 ->update([
@@ -1233,7 +1249,7 @@ class TaskApprovalService
         $projectCode = $this->projectCodeFromPayload($payload, $projectId);
         $prIds = collect(data_get($payload, 'pr_ids', []))->filter()->values()->all();
 
-        if (!empty($prIds)) {
+        if (! empty($prIds)) {
             PurchaseRequest::whereIn('id', $prIds)->update([
                 'status' => 'rejected',
                 'rejected_at' => now(),
@@ -1279,10 +1295,10 @@ class TaskApprovalService
         }
 
         $project = Project::query()
-            ->with(['items.material:id,satuan'])
+            ->with(['items.material:id,satuan,default_roll_length'])
             ->find($projectId);
 
-        if (!$project) {
+        if (! $project) {
             return;
         }
 
@@ -1293,7 +1309,7 @@ class TaskApprovalService
             ->first();
 
         // Create outbound queue entry once material is complete so staff gudang can process it.
-        if (!$outbound && $isMaterialReady) {
+        if (! $outbound && $isMaterialReady) {
             $outbound = Outbound::query()->create([
                 'project_id' => $projectId,
                 'status' => 'pending',
@@ -1302,7 +1318,7 @@ class TaskApprovalService
             ]);
         }
 
-        if (!$outbound) {
+        if (! $outbound) {
             return;
         }
 
@@ -1310,7 +1326,7 @@ class TaskApprovalService
             return;
         }
 
-        if (!$isMaterialReady && $outbound->status === 'ready') {
+        if (! $isMaterialReady && $outbound->status === 'ready') {
             $outbound->update([
                 'status' => 'pending',
                 'ready_at' => null,
@@ -1326,7 +1342,7 @@ class TaskApprovalService
                 return [
                     'material_id' => (int) ($first->material_id ?? 0),
                     'qty' => round((float) $rows->sum('jumlah_diminta'), 2),
-                    'unit' => (string) ($first?->material?->satuan ?: 'unit'),
+                    'unit' => (string) ($first?->material?->resolveTrackingUnit() ?? 'unit'),
                 ];
             })
             ->filter(fn (array $row): bool => (int) ($row['material_id'] ?? 0) > 0 && (float) ($row['qty'] ?? 0) > 0)
@@ -1401,7 +1417,7 @@ class TaskApprovalService
                 'status' => 'booked',
                 'booked_for_project_id' => $projectId,
                 'booked_at' => now(),
-                'keterangan' => trim(($piece->keterangan ?? '') . ' | Booking dari approval usulan alokasi inbound manual.'),
+                'keterangan' => trim(($piece->keterangan ?? '').' | Booking dari approval usulan alokasi inbound manual.'),
             ]);
 
             return;
@@ -1413,7 +1429,6 @@ class TaskApprovalService
 
         MaterialPiece::create([
             'material_id' => $piece->material_id,
-            'piece_code' => $piece->piece_code,
             'inbound_id' => $piece->inbound_id,
             'booked_for_project_id' => $projectId,
             'shelf_location_id' => $piece->shelf_location_id,
@@ -1458,7 +1473,7 @@ class TaskApprovalService
                 ->where('status', 'available')
                 ->first();
 
-            if (!$piece) {
+            if (! $piece) {
                 continue;
             }
 
@@ -1517,7 +1532,7 @@ class TaskApprovalService
                 ->lockForUpdate()
                 ->first();
 
-            if (!$piece) {
+            if (! $piece) {
                 return [
                     'booked_qty' => 0.0,
                     'allocations' => [],
@@ -1553,12 +1568,11 @@ class TaskApprovalService
             $piece->update([
                 'panjang' => $this->decimal($pieceLength - $qtyNeeded),
                 'sumber' => 'split_booking_residue',
-                'keterangan' => trim(($piece->keterangan ?? '') . ' | Sisa split dari booking tanpa potongan.'),
+                'keterangan' => trim(($piece->keterangan ?? '').' | Sisa split dari booking tanpa potongan.'),
             ]);
 
             MaterialPiece::create([
                 'material_id' => $piece->material_id,
-                'piece_code' => $piece->piece_code,
                 'inbound_id' => $piece->inbound_id,
                 'booked_for_project_id' => $projectId,
                 'shelf_location_id' => $piece->shelf_location_id,
@@ -1596,26 +1610,27 @@ class TaskApprovalService
                 ->with(['shelfLocation:id,kode_lokasi,nama_lokasi', 'inbound:id,entry_date'])
                 ->where('material_id', $materialId)
                 ->where('status', 'available')
-                ->when(!empty($preferredPieceIds), fn ($q) => $q->whereIn('id', $preferredPieceIds))
-                ->orderByRaw("CASE WHEN panjang >= ? THEN 0 ELSE 1 END ASC", [$remaining])
+                ->when(! empty($preferredPieceIds), fn ($q) => $q->whereIn('id', $preferredPieceIds))
+                ->orderByRaw('CASE WHEN panjang >= ? THEN 0 ELSE 1 END ASC', [$remaining])
                 ->orderByRaw("CASE
                     WHEN sumber IN ('split_auto_allocation', 'split_booking', 'split_booking_residue') THEN 1
                     WHEN sumber IN ('inbound_baru', 'opening_balance') THEN 2
                     ELSE 3
                 END ASC")
-                ->orderByRaw("CASE WHEN panjang >= ? THEN panjang ELSE -panjang END ASC", [$remaining])
-                ->orderByRaw("COALESCE((SELECT entry_date FROM inbounds WHERE inbounds.id = material_pieces.inbound_id), material_pieces.created_at) ASC")
+                ->orderByRaw('CASE WHEN panjang >= ? THEN panjang ELSE -panjang END ASC', [$remaining])
+                ->orderByRaw('COALESCE((SELECT entry_date FROM inbounds WHERE inbounds.id = material_pieces.inbound_id), material_pieces.created_at) ASC')
                 ->lockForUpdate();
 
             /** @var MaterialPiece|null $piece */
             $piece = $pieceQuery->first();
 
-            if (!$piece && !empty($preferredPieceIds)) {
+            if (! $piece && ! empty($preferredPieceIds)) {
                 $preferredPieceIds = [];
+
                 continue;
             }
 
-            if (!$piece) {
+            if (! $piece) {
                 break;
             }
 
@@ -1662,7 +1677,6 @@ class TaskApprovalService
 
             MaterialPiece::create([
                 'material_id' => $piece->material_id,
-                'piece_code' => $piece->piece_code,
                 'inbound_id' => $piece->inbound_id,
                 'booked_for_project_id' => $projectId,
                 'shelf_location_id' => $piece->shelf_location_id,
@@ -1692,7 +1706,7 @@ class TaskApprovalService
 
         if ($usedFirstPieceId !== null) {
             $leftover = max(0, round((float) ($usedFirstPieceLength ?? 0) - $qtyNeeded, 2));
-            $reason = "Disarankan potong dari piece #{$usedFirstPieceId} ({$this->formatQty((float) ($usedFirstPieceLength ?? 0))}, masuk " . (int) ($usedFirstPieceAge ?? 0) . " hari lalu) karena ukuran paling efisien untuk kebutuhan {$this->formatQty($qtyNeeded)} dengan sisa {$this->formatQty($leftover)} yang masih berguna.";
+            $reason = "Disarankan potong dari piece #{$usedFirstPieceId} ({$this->formatQty((float) ($usedFirstPieceLength ?? 0))}, masuk ".(int) ($usedFirstPieceAge ?? 0)." hari lalu) karena ukuran paling efisien untuk kebutuhan {$this->formatQty($qtyNeeded)} dengan sisa {$this->formatQty($leftover)} yang masih berguna.";
         }
 
         return [
@@ -1709,7 +1723,7 @@ class TaskApprovalService
 
     private function formatQty(float $value): string
     {
-        return rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.') . 'm';
+        return rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.').'m';
     }
 
     private function projectCodeFromPayload(array $payload, int $projectId): string
@@ -1725,7 +1739,7 @@ class TaskApprovalService
 
     private function tanggalPenggunaan(?Project $project): ?Carbon
     {
-        if (!$project || blank($project->tanggal_mulai)) {
+        if (! $project || blank($project->tanggal_mulai)) {
             return null;
         }
 
@@ -1767,7 +1781,7 @@ class TaskApprovalService
 
     private function leadTimeSupplierHari(?Material $material): int
     {
-        if (!$material) {
+        if (! $material) {
             return 7;
         }
 
@@ -1784,7 +1798,7 @@ class TaskApprovalService
             ->orderByDesc('id')
             ->value('supplier_id');
 
-        if (!$latestSupplierId) {
+        if (! $latestSupplierId) {
             return 7;
         }
 
@@ -1854,8 +1868,9 @@ class TaskApprovalService
                 $newPicked = $pickedIdx;
                 $newPicked[] = $idx;
 
-                if (!array_key_exists($newSum, $next)) {
+                if (! array_key_exists($newSum, $next)) {
                     $next[$newSum] = $newPicked;
+
                     continue;
                 }
 
@@ -1868,7 +1883,7 @@ class TaskApprovalService
             $dp = $next;
         }
 
-        if (!array_key_exists($targetInt, $dp)) {
+        if (! array_key_exists($targetInt, $dp)) {
             return [];
         }
 
