@@ -979,6 +979,25 @@ PROMPT;
         bool $requireNoJoint,
     ): string {
         $strategicReason = trim($rawReason);
+        $strategicReason = str_replace(
+                ['require_no_joint', 'requested_segments', 'tanpa_potongan'],
+                ['tidak boleh disambung', 'segmen yang diminta', 'tanpa potongan'],
+                $strategicReason
+            );
+
+            // Hapus catatan teknis dalam kurung seperti "(aturan require_no_joint)"
+            $strategicReason = preg_replace('/\(\s*aturan[^)]*\)/iu', '', $strategicReason);
+
+            // Kalau ada kurung gantung yang kepotong, buang ekornya
+            if (substr_count($strategicReason, '(') > substr_count($strategicReason, ')')) {
+                $strategicReason = preg_replace('/\([^\)]*$/u', '', $strategicReason);
+            }
+
+            // Rapikan spasi dan tanda baca
+            $strategicReason = preg_replace('/\s+/', ' ', $strategicReason);
+            $strategicReason = preg_replace('/\s+\./', '.', $strategicReason);
+            $strategicReason = preg_replace('/\.{2,}/', '.', $strategicReason);
+            $strategicReason = trim((string) $strategicReason);
         $strategicReason = trim((string) preg_replace('/\s+/', ' ', str_replace(['..', ' .', '. .'], '.', $strategicReason)));
         if ($strategicReason === '') {
             return $this->buildSystemReasonFromPieces(

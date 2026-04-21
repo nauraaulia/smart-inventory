@@ -23,13 +23,14 @@ class MigrateMaterialToPieces extends Command
         $isForce = $this->option('force');
 
         // Ambil semua material yang punya stok
-        $materials = Material::where(function($q) {
+        $materials = Material::where(function ($q) {
             $q->where('stok', '>', 0)
-              ->orWhere('stok_rusak', '>', 0);
+                ->orWhere('stok_rusak', '>', 0);
         })->get();
 
         if ($materials->isEmpty()) {
             $this->warn('⚠️  Tidak ada material dengan stok > 0');
+
             return 0;
         }
 
@@ -44,9 +45,10 @@ class MigrateMaterialToPieces extends Command
 
         foreach ($materials as $material) {
             // Skip kalau sudah punya pieces (kecuali pakai --force)
-            if (!$isForce && $material->pieces()->exists()) {
+            if (! $isForce && $material->pieces()->exists()) {
                 $skipped++;
                 $bar->advance();
+
                 continue;
             }
 
@@ -57,46 +59,43 @@ class MigrateMaterialToPieces extends Command
             $stokAvailable = $material->stok - $material->booked - $material->stok_rusak;
 
             if ($stokAvailable > 0) {
-                $piecesToCreate++;
-                
-                if (!$isDryRun) {
-                    MaterialPiece::create([
-                        'material_id' => $material->id,
-                        'panjang' => $stokAvailable,
-                        'status' => 'available',
-                        'sumber' => 'inbound_baru',
-                        'keterangan' => 'Migrasi dari stok lama',
-                    ]);
+                $piecesToCreate += self::calculateDiscretePiecesToCreate($material, (float) $stokAvailable);
+
+                if (! $isDryRun) {
+                    self::createMigratedPieces(
+                        material: $material,
+                        qty: (float) $stokAvailable,
+                        status: 'available',
+                        keterangan: 'Migrasi dari stok lama',
+                    );
                 }
             }
 
             // 2. Stok Booked
             if ($material->booked > 0) {
-                $piecesToCreate++;
-                
-                if (!$isDryRun) {
-                    MaterialPiece::create([
-                        'material_id' => $material->id,
-                        'panjang' => $material->booked,
-                        'status' => 'booked',
-                        'sumber' => 'inbound_baru',
-                        'keterangan' => 'Migrasi dari stok booked lama',
-                    ]);
+                $piecesToCreate += self::calculateDiscretePiecesToCreate($material, (float) $material->booked);
+
+                if (! $isDryRun) {
+                    self::createMigratedPieces(
+                        material: $material,
+                        qty: (float) $material->booked,
+                        status: 'booked',
+                        keterangan: 'Migrasi dari stok booked lama',
+                    );
                 }
             }
 
             // 3. Stok Rusak
             if ($material->stok_rusak > 0) {
-                $piecesToCreate++;
-                
-                if (!$isDryRun) {
-                    MaterialPiece::create([
-                        'material_id' => $material->id,
-                        'panjang' => $material->stok_rusak,
-                        'status' => 'damaged',
-                        'sumber' => 'inbound_baru',
-                        'keterangan' => 'Migrasi dari stok rusak lama',
-                    ]);
+                $piecesToCreate += self::calculateDiscretePiecesToCreate($material, (float) $material->stok_rusak);
+
+                if (! $isDryRun) {
+                    self::createMigratedPieces(
+                        material: $material,
+                        qty: (float) $material->stok_rusak,
+                        status: 'damaged',
+                        keterangan: 'Migrasi dari stok rusak lama',
+                    );
                 }
             }
 
@@ -109,7 +108,7 @@ class MigrateMaterialToPieces extends Command
 
         // Summary
         if ($isDryRun) {
-            $this->info("🔍 DRY RUN MODE");
+            $this->info('🔍 DRY RUN MODE');
             $this->info("   Akan membuat: {$totalPiecesCreated} pieces");
             $this->info("   Dari: {$materials->count()} materials");
             if ($skipped > 0) {
@@ -118,7 +117,7 @@ class MigrateMaterialToPieces extends Command
             $this->newLine();
             $this->comment('💡 Jalankan tanpa --dry-run untuk eksekusi');
         } else {
-            $this->info("✅ Migrasi selesai!");
+            $this->info('✅ Migrasi selesai!');
             $this->info("   Total pieces dibuat: {$totalPiecesCreated}");
             $this->info("   Dari: {$materials->count()} materials");
             if ($skipped > 0) {
@@ -129,21 +128,21 @@ class MigrateMaterialToPieces extends Command
         $this->newLine();
 
         // Verifikasi
-        if (!$isDryRun) {
+        if (! $isDryRun) {
             $this->info('🔍 Verifikasi data...');
-            
+
             foreach ($materials->take(3) as $material) {
                 $material->refresh();
-                
+
                 $sumPieces = $material->pieces()
                     ->whereIn('status', ['available', 'booked'])
                     ->sum('panjang');
-                
+
                 $match = ($sumPieces == $material->stok) ? '✅' : '❌';
-                
+
                 $this->line("   {$match} {$material->kode_material}: stok={$material->stok}, pieces={$sumPieces}");
             }
-            
+
             $this->newLine();
             $this->comment('💡 Cek detail pakai: php artisan tinker');
             $this->comment('   $material = Material::first();');
@@ -151,5 +150,66 @@ class MigrateMaterialToPieces extends Command
         }
 
         return 0;
+    }
+
+    private static function calculateDiscretePiecesToCreate(Material $material, float $qty): int
+    {
+        if ($qty <= 0) {
+            return 0;
+        }
+
+        if (! $material->usesDiscreteUnitTracking()) {
+            return 1;
+        }
+
+        $wholeUnits = (int) floor($qty);
+
+        return $wholeUnits + (round($qty - $wholeUnits, 2) > 0 ? 1 : 0);
+    }
+
+    private static function createMigratedPieces(Material $material, float $qty, string $status, string $keterangan): void
+    {
+        if ($qty <= 0) {
+            return;
+        }
+
+        if (! $material->usesDiscreteUnitTracking()) {
+            MaterialPiece::create([
+                'material_id' => $material->id,
+                'panjang' => $qty,
+                'status' => $status,
+                'sumber' => 'inbound_baru',
+                'keterangan' => $keterangan,
+            ]);
+
+            return;
+        }
+
+        $wholeUnits = (int) floor($qty);
+        $remainder = round($qty - $wholeUnits, 2);
+        $totalRows = $wholeUnits + ($remainder > 0 ? 1 : 0);
+        $sequence = 1;
+
+        for ($i = 0; $i < $wholeUnits; $i++) {
+            MaterialPiece::create([
+                'material_id' => $material->id,
+                'panjang' => number_format(1, 2, '.', ''),
+                'status' => $status,
+                'sumber' => 'inbound_baru',
+                'keterangan' => $keterangan." | Unit individual hasil migrasi ({$sequence}/{$totalRows}).",
+            ]);
+
+            $sequence++;
+        }
+
+        if ($remainder > 0) {
+            MaterialPiece::create([
+                'material_id' => $material->id,
+                'panjang' => number_format($remainder, 2, '.', ''),
+                'status' => $status,
+                'sumber' => 'inbound_baru',
+                'keterangan' => $keterangan." | Sisa qty non-bulat hasil migrasi ({$sequence}/{$totalRows}).",
+            ]);
+        }
     }
 }

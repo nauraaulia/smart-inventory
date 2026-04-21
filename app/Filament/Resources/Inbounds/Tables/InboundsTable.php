@@ -108,7 +108,7 @@ class InboundsTable
                     ->action(function ($record, array $data): void {
                         $pin = (string) ($data['manager_pin'] ?? '');
 
-                        if (!self::validateManagerPin($pin)) {
+                        if (! self::validateManagerPin($pin)) {
                             throw ValidationException::withMessages([
                                 'manager_pin' => 'PIN Manager salah. Penghapusan inbound dibatalkan.',
                             ]);
@@ -130,7 +130,8 @@ class InboundsTable
         $rows = MaterialPiece::query()
             ->where('inbound_id', (int) $record->id)
             ->orderByDesc('panjang')
-            ->get(['id', 'panjang', 'status', 'sumber']);
+            ->orderBy('piece_code')
+            ->get(['id', 'piece_code', 'panjang', 'status', 'sumber']);
 
         if ($rows->isEmpty()) {
             return new HtmlString('<div class="text-sm text-gray-600 dark:text-gray-300">Tidak ada material piece yang terhubung langsung dengan inbound ini.</div>');
@@ -141,7 +142,7 @@ class InboundsTable
         $html .= '<div class="overflow-x-auto rounded-lg border border-gray-200 dark:border-white/10">';
         $html .= '<table class="min-w-full text-xs">';
         $html .= '<thead class="bg-gray-50 dark:bg-white/5"><tr>';
-        $html .= '<th class="px-3 py-2 text-left">Piece ID</th>';
+        $html .= '<th class="px-3 py-2 text-left">Kode Item</th>';
         $html .= '<th class="px-3 py-2 text-left">Qty</th>';
         $html .= '<th class="px-3 py-2 text-left">Status</th>';
         $html .= '<th class="px-3 py-2 text-left">Sumber</th>';
@@ -149,10 +150,10 @@ class InboundsTable
 
         foreach ($rows as $piece) {
             $html .= '<tr class="border-t border-gray-200 dark:border-white/10">';
-            $html .= '<td class="px-3 py-2">#' . (int) $piece->id . '</td>';
-            $html .= '<td class="px-3 py-2">' . e(number_format((float) $piece->panjang, 2, '.', '')) . '</td>';
-            $html .= '<td class="px-3 py-2">' . e((string) $piece->status) . '</td>';
-            $html .= '<td class="px-3 py-2">' . e((string) $piece->sumber) . '</td>';
+            $html .= '<td class="px-3 py-2"><div>'.e((string) ($piece->piece_code ?: '-')).'</div><div class="text-[11px] text-gray-500">#'.(int) $piece->id.'</div></td>';
+            $html .= '<td class="px-3 py-2">'.e(number_format((float) $piece->panjang, 2, '.', '')).'</td>';
+            $html .= '<td class="px-3 py-2">'.e((string) $piece->status).'</td>';
+            $html .= '<td class="px-3 py-2">'.e((string) $piece->sumber).'</td>';
             $html .= '</tr>';
         }
 
@@ -163,7 +164,7 @@ class InboundsTable
 
     private static function validateManagerPin(string $pin): bool
     {
-        if (!preg_match('/^[0-9]{6}$/', $pin)) {
+        if (! preg_match('/^[0-9]{6}$/', $pin)) {
             return false;
         }
 

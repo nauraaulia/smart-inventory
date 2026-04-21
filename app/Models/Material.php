@@ -4,13 +4,15 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Material extends Model
 {
     use HasFactory, SoftDeletes;
+
+    private const DISCRETE_UNIT_SATUAN = ['unit', 'buah', 'pcs', 'pc', 'set', 'pasang'];
 
     protected $guarded = [];
 
@@ -30,13 +32,13 @@ class Material extends Model
     public function availablePieces(): HasMany
     {
         return $this->hasMany(MaterialPiece::class)
-                    ->where('status', 'available');
+            ->where('status', 'available');
     }
 
     public function bookedPieces(): HasMany
     {
         return $this->hasMany(MaterialPiece::class)
-                    ->where('status', 'booked');
+            ->where('status', 'booked');
     }
 
     public function defaultSupplier(): BelongsTo
@@ -58,11 +60,11 @@ class Material extends Model
             'stok' => (int) $this->pieces()
                 ->whereIn('status', ['available', 'booked'])
                 ->sum('panjang'),
-            
+
             'booked' => (int) $this->pieces()
                 ->where('status', 'booked')
                 ->sum('panjang'),
-            
+
             'stok_rusak' => (int) $this->pieces()
                 ->where('status', 'damaged')
                 ->sum('panjang'),
@@ -91,6 +93,27 @@ class Material extends Model
         return $this->stok_layak - $this->booked;
     }
 
+    public function usesDiscreteUnitTracking(): bool
+    {
+        return self::usesDiscreteUnitTrackingFor(
+            satuan: (string) $this->satuan,
+            defaultRollLength: $this->default_roll_length,
+        );
+    }
+
+    public static function usesDiscreteUnitTrackingFor(
+        ?string $satuan,
+        float|int|string|null $defaultRollLength = null,
+    ): bool {
+        if ((float) ($defaultRollLength ?? 0) > 0) {
+            return false;
+        }
+
+        $normalized = strtolower(trim((string) $satuan));
+
+        return in_array($normalized, self::DISCRETE_UNIT_SATUAN, true);
+    }
+
     // ============================================
     // USER LOG (CCTV)
     // ============================================
@@ -99,12 +122,12 @@ class Material extends Model
     {
         static::created(function ($item) {
             if (auth()->check()) {
-                \App\Models\UserLog::create([
-                    'user_id'     => auth()->id(),
-                    'action'      => 'Create',
-                    'module'      => 'Material',
-                    'description' => 'Menambahkan material baru: ' . $item->kode_material,
-                    'ip_address'  => request()->ip(),
+                UserLog::create([
+                    'user_id' => auth()->id(),
+                    'action' => 'Create',
+                    'module' => 'Material',
+                    'description' => 'Menambahkan material baru: '.$item->kode_material,
+                    'ip_address' => request()->ip(),
                 ]);
             }
         });
@@ -123,24 +146,24 @@ class Material extends Model
 
                 $teksPerubahan = implode(', ', $detailPerubahan);
 
-                \App\Models\UserLog::create([
-                    'user_id'     => auth()->id(),
-                    'action'      => 'Update',
-                    'module'      => 'Material',
-                    'description' => 'Mengubah data material ' . $item->kode_material . ' : ' . $teksPerubahan,
-                    'ip_address'  => request()->ip(),
+                UserLog::create([
+                    'user_id' => auth()->id(),
+                    'action' => 'Update',
+                    'module' => 'Material',
+                    'description' => 'Mengubah data material '.$item->kode_material.' : '.$teksPerubahan,
+                    'ip_address' => request()->ip(),
                 ]);
             }
         });
 
         static::deleted(function ($item) {
             if (auth()->check()) {
-                \App\Models\UserLog::create([
-                    'user_id'     => auth()->id(),
-                    'action'      => 'Delete',
-                    'module'      => 'Material',
-                    'description' => 'Menghapus material: ' . $item->kode_material,
-                    'ip_address'  => request()->ip(),
+                UserLog::create([
+                    'user_id' => auth()->id(),
+                    'action' => 'Delete',
+                    'module' => 'Material',
+                    'description' => 'Menghapus material: '.$item->kode_material,
+                    'ip_address' => request()->ip(),
                 ]);
             }
         });

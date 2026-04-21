@@ -66,8 +66,8 @@
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Lokasi Rak</th>
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Kode Material</th>
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Nama Material</th>
-                                    <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Piece ID</th>
-                                    <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Panjang Piece</th>
+                                    <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Kode Item</th>
+                                    <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Qty per Item</th>
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Status</th>
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Available</th>
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Booked</th>
@@ -81,8 +81,11 @@
                                         <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">{{ $row['shelf_label'] }}</td>
                                         <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">{{ $row['material_code'] }}</td>
                                         <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">{{ $row['material_name'] }}</td>
-                                        <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">#{{ $row['piece_id'] }}</td>
-                                        <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">{{ number_format((float) $row['piece_length'], 2, '.', '') }} {{ $row['unit'] }}</td>
+                                        <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">
+                                            <div class="font-medium">{{ $row['piece_code'] }}</div>
+                                            <div class="text-xs text-gray-500 dark:text-gray-400">#{{ $row['piece_id'] }} · {{ $row['piece_label'] }}</div>
+                                        </td>
+                                        <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">{{ number_format((float) $row['piece_qty'], 2, '.', '') }} {{ $row['unit'] }}</td>
                                         <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">
                                             <span class="inline-flex rounded-md px-2 py-1 text-xs font-medium {{ $row['piece_status'] === 'booked' ? 'bg-warning-50 text-warning-700 dark:bg-warning-900/30 dark:text-warning-300' : 'bg-success-50 text-success-700 dark:bg-success-900/30 dark:text-success-300' }}">
                                                 {{ ucfirst($row['piece_status']) }}
