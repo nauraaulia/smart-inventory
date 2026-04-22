@@ -37,7 +37,7 @@ class EditTask extends EditRecord
                 ->map(fn (array $row): array => [
                     'selected' => true,
                     'project_id' => (int) ($row['project_id'] ?? 0),
-                    'project_code' => (string) ($row['project_code'] ?? ('#' . (int) ($row['project_id'] ?? 0))),
+                    'project_code' => (string) ($row['project_code'] ?? ('#'.(int) ($row['project_id'] ?? 0))),
                     'pr_status' => (string) ($row['pr_status'] ?? '-'),
                     'qty' => (float) ($row['qty'] ?? $row['suggested_qty'] ?? 0),
                 ])
@@ -72,7 +72,7 @@ class EditTask extends EditRecord
     protected function handleRecordUpdate(Model $record, array $data): Model
     {
         /** @var Task $record */
-        $service = new TaskApprovalService();
+        $service = new TaskApprovalService;
 
         if ($record->type === 'ai_booking_suggestion') {
             $materialItems = collect(data_get($data, 'payload.items', []));
@@ -81,6 +81,10 @@ class EditTask extends EditRecord
             $reasonInput = trim((string) ($data['rejection_reason'] ?? ''));
             $hasMaterialDecision = $materialItems->contains(
                 fn ($item) => in_array((string) ($item['status'] ?? 'pending'), ['approved', 'rejected'], true)
+            );
+            $hasRejectedWithoutReason = $materialItems->contains(
+                fn ($item) => (string) ($item['status'] ?? 'pending') === 'rejected'
+                    && trim((string) ($item['rejection_reason'] ?? '')) === ''
             );
 
             if ($materialItems->isEmpty()) {
@@ -98,12 +102,20 @@ class EditTask extends EditRecord
                     ]);
                 }
 
+                if ($hasRejectedWithoutReason) {
+                    throw ValidationException::withMessages([
+                        'payload.items' => 'Isi alasan penolakan pada setiap material yang ditolak.',
+                    ]);
+                }
+
                 $service->approve($record, auth()->user(), [
+                    'rejection_reason' => $reasonInput,
                     'material_decisions' => $materialItems
                         ->map(function ($item): array {
                             return [
                                 'material_id' => (int) ($item['material_id'] ?? 0),
                                 'status' => (string) ($item['status'] ?? 'pending'),
+                                'rejection_reason' => trim((string) ($item['rejection_reason'] ?? '')),
                                 'recommended_piece_ids' => collect($item['recommended_piece_ids'] ?? [])->map(fn ($id) => (int) $id)->values()->all(),
                             ];
                         })
@@ -121,6 +133,7 @@ class EditTask extends EditRecord
 
             if ($newStatus === 'done') {
                 $service->approve($record, auth()->user());
+
                 return $record->refresh();
             }
 
@@ -132,6 +145,7 @@ class EditTask extends EditRecord
                 }
 
                 $service->reject($record, auth()->user(), $reasonInput);
+
                 return $record->refresh();
             }
 
@@ -178,7 +192,7 @@ class EditTask extends EditRecord
                     'quantity' => $shortageQty > 0 ? $shortageQty : ($qtyNeeded > 0 ? $qtyNeeded : null),
                     'priority' => 'medium',
                     'needed_date' => now()->addDays(7)->toDateString(),
-                    'reason' => 'PR manual dari edit task operasional alokasi #' . $record->id,
+                    'reason' => 'PR manual dari edit task operasional alokasi #'.$record->id,
                 ];
 
                 $manualPrData = collect($manualPrData)
@@ -205,6 +219,7 @@ class EditTask extends EditRecord
         }
         if ($newStatus === 'done') {
             $service->approve($record, auth()->user());
+
             return $record->refresh();
         }
 
@@ -217,6 +232,7 @@ class EditTask extends EditRecord
 
             $reason = $reasonInput;
             $service->reject($record, auth()->user(), $reason);
+
             return $record->refresh();
         }
 

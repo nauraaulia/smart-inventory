@@ -6,9 +6,10 @@ use App\Filament\Resources\Tasks\TaskResource;
 use App\Filament\Widgets\TaskStatsWidget;
 use App\Models\Task;
 use Filament\Notifications\Notification;
-use Filament\Schemas\Components\Tabs\Tab;
 use Filament\Resources\Pages\ListRecords;
+use Filament\Schemas\Components\Tabs\Tab;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Collection;
 
 class ListTasks extends ListRecords
 {
@@ -44,12 +45,12 @@ class ListTasks extends ListRecords
     {
         return [
             'ai' => Tab::make('Task AI')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('type', 'like', 'ai_%')->whereNotIn('type', ['ai_inbound_allocation_suggestion']))
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereKey($this->taskIdsByQueueType('ai')))
                 ->badge($this->countTasksByType('ai'))
                 ->badgeColor('info'),
 
             'operasional' => Tab::make('Task Operasional')
-                ->modifyQueryUsing(fn (Builder $query) => $query->whereIn('type', ['ai_inbound_allocation_suggestion']))
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereKey($this->taskIdsByQueueType('operasional')))
                 ->badge($this->countTasksByType('operasional'))
                 ->badgeColor('primary'),
 
@@ -57,33 +58,30 @@ class ListTasks extends ListRecords
                 ->badge($this->countVisibleTasks()),
 
             'pending' => Tab::make('Pending')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'pending'))
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereKey($this->taskIdsByVisualStatus('pending')))
                 ->badge($this->countVisibleTasks('pending'))
                 ->badgeColor('warning'),
 
             'done' => Tab::make('Done')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'done'))
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereKey($this->taskIdsByVisualStatus('done')))
                 ->badge($this->countVisibleTasks('done'))
                 ->badgeColor('success'),
 
-            'rejected' => Tab::make('Rejected')
-                ->modifyQueryUsing(fn (Builder $query) => $query->where('status', 'rejected'))
-                ->badge($this->countVisibleTasks('rejected'))
+            'approved_material' => Tab::make('Approved Items')
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereKey($this->taskIdsByDecisionState('approved')))
+                ->badge($this->countTasksByDecisionState('approved'))
+                ->badgeColor('success'),
+
+            'rejected_material' => Tab::make('Rejected Items')
+                ->modifyQueryUsing(fn (Builder $query) => $query->whereKey($this->taskIdsByDecisionState('rejected')))
+                ->badge($this->countTasksByDecisionState('rejected'))
                 ->badgeColor('danger'),
         ];
     }
 
     private function countTasksByType(string $type): int
     {
-        $query = TaskResource::getEloquentQuery();
-
-        if ($type === 'ai') {
-            $query->where('type', 'like', 'ai_%')->whereNotIn('type', ['ai_inbound_allocation_suggestion']);
-        } elseif ($type === 'operasional') {
-            $query->whereIn('type', ['ai_inbound_allocation_suggestion']);
-        }
-
-        return (int) $query->count();
+        return count($this->taskIdsByQueueType($type));
     }
 
     protected function getHeaderActions(): array
@@ -93,13 +91,76 @@ class ListTasks extends ListRecords
 
     private function countVisibleTasks(?string $status = null): int
     {
-        $query = TaskResource::getEloquentQuery();
-
         if ($status !== null) {
-            $query->where('status', $status);
+            return count($this->taskIdsByVisualStatus($status));
         }
 
-        return (int) $query->count();
+        return (int) TaskResource::getEloquentQuery()->count();
+    }
+
+    private function countTasksByDecisionState(string $decision): int
+    {
+        return count($this->taskIdsByDecisionState($decision));
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function taskIdsByVisualStatus(string $status): array
+    {
+        return TaskResource::getEloquentQuery()
+            ->get(['id', 'type', 'status', 'payload'])
+            ->filter(fn (Task $task): bool => $task->visualStatus() === $status)
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function taskIdsByQueueType(string $type): array
+    {
+        return TaskResource::getEloquentQuery()
+            ->get(['id', 'type', 'status', 'payload'])
+            ->filter(function (Task $task) use ($type): bool {
+                if ($task->visualStatus() !== 'pending') {
+                    return false;
+                }
+
+                return match ($type) {
+                    'ai' => str_starts_with((string) $task->type, 'ai_')
+                        && $task->type !== 'ai_inbound_allocation_suggestion',
+                    'operasional' => $task->type === 'ai_inbound_allocation_suggestion',
+                    default => true,
+                };
+            })
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function taskIdsByDecisionState(string $decision): array
+    {
+        return TaskResource::getEloquentQuery()
+            ->where('type', 'ai_booking_suggestion')
+            ->get(['id', 'type', 'status', 'payload'])
+            ->filter(function (Task $task) use ($decision): bool {
+                return match ($decision) {
+                    'approved' => $task->hasAiItemStatus('approved'),
+                    'rejected' => $task->hasAiItemStatus('rejected'),
+                    default => false,
+                };
+            })
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->values()
+            ->all();
     }
 
     private function syncAiBookingNotifications(bool $sendInfoNotification, bool $sendReadyNotification): void
@@ -108,7 +169,7 @@ class ListTasks extends ListRecords
         $currentReady = $this->currentAiBookingTaskIds(processingOnly: false);
 
         $newProcessing = array_values(array_diff($currentProcessing, $this->aiProcessingTaskIds));
-        if ($sendInfoNotification && !empty($newProcessing)) {
+        if ($sendInfoNotification && ! empty($newProcessing)) {
             Notification::make()
                 ->title('Gemini sedang memproses rekomendasi')
                 ->body('Mohon tunggu sebentar, rekomendasi booking/PR akan diperbarui otomatis.')
@@ -116,11 +177,11 @@ class ListTasks extends ListRecords
                 ->send();
         }
 
-        if ($sendReadyNotification && !empty($this->aiProcessingTaskIds)) {
+        if ($sendReadyNotification && ! empty($this->aiProcessingTaskIds)) {
             $becameReady = array_values(array_intersect($this->aiProcessingTaskIds, $currentReady));
             $becameReady = array_values(array_diff($becameReady, $this->aiReadyNotifiedTaskIds));
 
-            if (!empty($becameReady)) {
+            if (! empty($becameReady)) {
                 Notification::make()
                     ->title('Jawaban Gemini sudah siap')
                     ->body('Task AI untuk staff gudang sudah diperbarui otomatis. Silakan review sekarang.')
@@ -141,23 +202,26 @@ class ListTasks extends ListRecords
     {
         $query = TaskResource::getEloquentQuery()
             ->where('type', 'ai_booking_suggestion')
-            ->where('status', 'pending')
             ->orderByDesc('id');
 
-        /** @var \Illuminate\Support\Collection<int, Task> $tasks */
+        /** @var Collection<int, Task> $tasks */
         $tasks = $query->get(['id', 'payload']);
 
         return $tasks
             ->filter(function (Task $task) use ($processingOnly): bool {
+                if ($task->visualStatus() !== 'pending') {
+                    return false;
+                }
+
                 $triggerSource = (string) data_get($task->payload, 'ai_trigger_source', 'system_sync');
                 if ($triggerSource !== 'manager_project_submit') {
                     return false;
                 }
 
                 $items = data_get($task->payload, 'items', []);
-                $hasItems = is_array($items) && !empty($items);
+                $hasItems = is_array($items) && ! empty($items);
 
-                return $processingOnly ? !$hasItems : $hasItems;
+                return $processingOnly ? ! $hasItems : $hasItems;
             })
             ->pluck('id')
             ->map(fn ($id): int => (int) $id)

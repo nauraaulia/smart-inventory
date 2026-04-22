@@ -9,11 +9,11 @@ use App\Filament\Resources\Tasks\Schemas\TaskForm;
 use App\Filament\Resources\Tasks\Tables\TasksTable;
 use App\Models\Task;
 use BackedEnum;
-use Illuminate\Database\Eloquent\Builder;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
 use Filament\Support\Icons\Heroicon;
 use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
 
 class TaskResource extends Resource
 {
@@ -66,7 +66,7 @@ class TaskResource extends Resource
     {
         $user = auth()->user();
 
-        if (!$user || !$record instanceof Task) {
+        if (! $user || ! $record instanceof Task) {
             return false;
         }
 
@@ -74,11 +74,11 @@ class TaskResource extends Resource
             return false;
         }
 
-        if (!self::isManagerOperasional($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
+        if (! self::isManagerOperasional($user->role) && ! self::isStaffAdministrasiGudang($user->role)) {
             return false;
         }
 
-        return $record->status === 'pending'
+        return $record->visualStatus() === 'pending'
             && in_array($record->for_role, self::roleAliases($user->role), true);
     }
 
@@ -102,7 +102,7 @@ class TaskResource extends Resource
         $query = parent::getEloquentQuery();
         $user = auth()->user();
 
-        if (!$user) {
+        if (! $user) {
             return $query->whereRaw('1 = 0');
         }
 
@@ -110,7 +110,7 @@ class TaskResource extends Resource
             return $query;
         }
 
-        if (!self::isManagerOperasional($user->role) && !self::isStaffAdministrasiGudang($user->role)) {
+        if (! self::isManagerOperasional($user->role) && ! self::isStaffAdministrasiGudang($user->role)) {
             return $query->whereRaw('1 = 0');
         }
 
@@ -127,21 +127,24 @@ class TaskResource extends Resource
     {
         $user = auth()->user();
 
-        if (!$user) {
+        if (! $user) {
             return null;
         }
 
-        $query = Task::query()->where('status', 'pending');
+        $query = Task::query();
 
-        if (!self::isAdminIt($user->role)) {
-            if (!self::isStaffAdministrasiGudang($user->role)) {
+        if (! self::isAdminIt($user->role)) {
+            if (! self::isStaffAdministrasiGudang($user->role)) {
                 return null;
             }
 
             $query->whereIn('for_role', self::roleAliases($user->role));
         }
 
-        $count = $query->count();
+        $count = $query
+            ->get(['id', 'type', 'status', 'payload'])
+            ->filter(fn (Task $task): bool => $task->visualStatus() === 'pending')
+            ->count();
 
         return $count > 0 ? (string) $count : null;
     }

@@ -80,16 +80,16 @@ class TasksTable
 
                 BadgeColumn::make('status')
                     ->label('Status Task')
-                    ->formatStateUsing(fn (string $state): string => match ($state) {
+                    ->formatStateUsing(fn (string $state, Task $record): string => match ($record->visualStatus()) {
                         'pending' => 'Pending',
-                        'done' => 'Approved',
+                        'done' => 'Done',
                         'rejected' => 'Rejected',
-                        default => ucfirst($state),
+                        default => ucfirst($record->visualStatus()),
                     })
                     ->colors([
-                        'warning' => 'pending',
-                        'success' => 'done',
-                        'danger' => 'rejected',
+                        'warning' => fn (Task $record): bool => $record->visualStatus() === 'pending',
+                        'success' => fn (Task $record): bool => $record->visualStatus() === 'done',
+                        'danger' => fn (Task $record): bool => $record->visualStatus() === 'rejected',
                         'gray',
                     ]),
 
@@ -107,23 +107,10 @@ class TasksTable
                     ->hidden(fn ($livewire) => $livewire->activeTab === 'operasional'),
 
                 TextColumn::make('acc_staff')
-                    ->label('ACC')
-                    ->getStateUsing(function ($record) {
-                        if (! $record) {
-                            return '-';
-                        }
-                        if ($record->type === 'ai_deadstock_recommendation') {
-                            return (string) data_get($record->payload, 'approval_trail.manager_operasional.status', '-');
-                        }
-                        $status = data_get($record->payload, 'approval_trail.staff.status', '-');
-                        if ($record->type === 'ai_inbound_allocation_suggestion') {
-                            return $record->status !== 'pending' ? ($status === '-' ? 'approved' : $status) : '-';
-                        }
-
-                        return $status;
-                    })
+                    ->label('Decision')
+                    ->getStateUsing(fn (Task $record, $livewire): string => self::resolveDecisionLabel($record, $livewire->activeTab ?? null))
                     ->badge()
-                    ->color(fn (string $state): string => $state === 'approved' ? 'success' : 'gray'),
+                    ->color(fn (string $state): string => self::resolveDecisionColor($state)),
 
                 TextColumn::make('created_at')
                     ->label('Dibuat')
@@ -135,16 +122,16 @@ class TasksTable
                 ViewAction::make(),
 
                 EditAction::make()
-                    ->visible(fn (Task $record) => $record->status === 'pending'
+                    ->visible(fn (Task $record) => $record->visualStatus() === 'pending'
                         && self::canHandleTask($record)
                         && ! in_array($record->type, ['ai_booking_suggestion', 'ai_inbound_allocation_suggestion'], true)),
 
-                Action::make('approve')
-                    ->label('Approve')
-                    ->color('success')
-                    ->icon('heroicon-o-check-circle')
-                    ->modalSubmitActionLabel('Approve')
-                    ->visible(fn (Task $record) => $record->status === 'pending'
+                Action::make('updateStatus')
+                    ->label('Update Status')
+                    ->color('primary')
+                    ->icon('heroicon-o-pencil-square')
+                    ->modalSubmitActionLabel('Save Changes')
+                    ->visible(fn (Task $record) => $record->visualStatus() === 'pending'
                         && self::canHandleTask($record)
                         && ! ($record->type === 'ai_deadstock_recommendation'
                             && (string) data_get($record->payload, 'workflow_state', '') === 'approved_for_aging'))
@@ -244,8 +231,15 @@ class TasksTable
                                                 'approved' => 'Approve',
                                                 'rejected' => 'Tolak',
                                             ])
+                                            ->live()
                                             ->default('pending')
                                             ->required(),
+                                        Textarea::make('rejection_reason')
+                                            ->label('Alasan Penolakan')
+                                            ->rows(2)
+                                            ->visible(fn (Get $get): bool => (string) ($get('status') ?? 'pending') === 'rejected')
+                                            ->required(fn (Get $get): bool => (string) ($get('status') ?? 'pending') === 'rejected')
+                                            ->columnSpanFull(),
                                         Hidden::make('satuan')->dehydrated(false),
                                     ])
                                     ->columns(2)
@@ -305,20 +299,40 @@ class TasksTable
                                 ->all();
 
                             return [
+                                Select::make('new_status')
+                                    ->label('Decision')
+                                    ->options([
+                                        'approved' => 'Approve',
+                                        'rejected' => 'Reject',
+                                    ])
+                                    ->default('approved')
+                                    ->live()
+                                    ->required(),
+                                Textarea::make('reason')
+                                    ->label('Rejection Reason')
+                                    ->rows(3)
+                                    ->visible(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'rejected')
+                                    ->required(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'rejected'),
                                 Select::make('selected_piece_ids')
                                     ->label('Pilih Piece yang Boleh Dipakai')
                                     ->multiple()
                                     ->searchable()
                                     ->required()
+                                    ->visible(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved')
+                                    ->dehydrated(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved')
                                     ->options($pieceOptions)
                                     ->default([]),
                                 Toggle::make('add_purchase_request')
                                     ->label('Tambahkan Purchase Request')
                                     ->default(false)
-                                    ->inline(false),
+                                    ->inline(false)
+                                    ->visible(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved')
+                                    ->dehydrated(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved'),
                                 Repeater::make('manual_allocation')
                                     ->label('Checklist Alokasi Proyek')
                                     ->helperText('Kebutuhan proyek sudah dihitung sistem. Centang proyek yang ingin dialokasikan sekarang; sisanya tetap menjadi stok gudang available.')
+                                    ->visible(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved')
+                                    ->dehydrated(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved')
                                     ->schema([
                                         Hidden::make('project_id')
                                             ->required(),
@@ -356,15 +370,45 @@ class TasksTable
                         }
                         if ($record->type === 'ai_deadstock_recommendation') {
                             return [
+                                Select::make('new_status')
+                                    ->label('Decision')
+                                    ->options([
+                                        'approved' => 'Approve',
+                                        'rejected' => 'Reject',
+                                    ])
+                                    ->default('approved')
+                                    ->live()
+                                    ->required(),
                                 Textarea::make('deadstock_flow_note')
                                     ->label('Info Alur')
                                     ->default('Approve di sini hanya untuk ACC screening AI. Keputusan final per material (termasuk qty keep/dispose) dilakukan di menu Aging Material.')
+                                    ->visible(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved')
                                     ->disabled()
                                     ->dehydrated(false),
+                                Textarea::make('reason')
+                                    ->label('Rejection Reason')
+                                    ->rows(3)
+                                    ->visible(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'rejected')
+                                    ->required(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'rejected'),
                             ];
                         }
 
-                        return [];
+                        return [
+                            Select::make('new_status')
+                                ->label('Decision')
+                                ->options([
+                                    'approved' => 'Approve',
+                                    'rejected' => 'Reject',
+                                ])
+                                ->default('approved')
+                                ->live()
+                                ->required(),
+                            Textarea::make('reason')
+                                ->label('Rejection Reason')
+                                ->rows(3)
+                                ->visible(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'rejected')
+                                ->required(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'rejected'),
+                        ];
                     })
                     ->action(function (Task $record, array $data, $livewire) {
                         $service = new TaskApprovalService;
@@ -391,9 +435,11 @@ class TasksTable
 
                             $service->approve($record, auth()->user(), [
                                 'generate_pr' => (bool) ($data['generate_pr'] ?? true),
+                                'rejection_reason' => trim((string) ($data['rejection_reason'] ?? '')),
                                 'material_decisions' => $materialDecisions
                                     ->map(function (array $row): array {
                                         $row['recommended_piece_ids'] = json_decode((string) ($row['recommended_piece_ids'] ?? '[]'), true) ?: [];
+                                        $row['rejection_reason'] = trim((string) ($row['rejection_reason'] ?? ''));
 
                                         return $row;
                                     })
@@ -407,6 +453,20 @@ class TasksTable
                                 ->success()
                                 ->send();
                         } elseif ($record->type === 'ai_inbound_allocation_suggestion') {
+                            if ((string) ($data['new_status'] ?? 'approved') === 'rejected') {
+                                $service->reject($record, auth()->user(), (string) ($data['reason'] ?? 'Rejected'));
+
+                                Notification::make()
+                                    ->title('Task Rejected')
+                                    ->body('Task operasional berhasil ditolak.')
+                                    ->success()
+                                    ->send();
+
+                                $livewire->redirect($redirectUrl, navigate: true);
+
+                                return;
+                            }
+
                             Notification::make()
                                 ->title('Sedang Memproses Task Operasional')
                                 ->body('Alokasi inbound sedang diproses. Mohon tunggu sebentar.')
@@ -455,35 +515,64 @@ class TasksTable
                                 ]);
                             }
                         } elseif ($record->type === 'ai_deadstock_recommendation') {
-                            $service->approve($record, auth()->user());
+                            if ((string) ($data['new_status'] ?? 'approved') === 'rejected') {
+                                $service->reject($record, auth()->user(), (string) ($data['reason'] ?? 'Rejected'));
+                            } else {
+                                $service->approve($record, auth()->user());
+                            }
+                        } else {
+                            if ((string) ($data['new_status'] ?? 'approved') === 'rejected') {
+                                $service->reject($record, auth()->user(), (string) ($data['reason'] ?? 'Rejected'));
+                            } else {
+                                $service->approve($record, auth()->user());
+                            }
                         }
 
                         $livewire->redirect($redirectUrl, navigate: true);
                     }),
 
-                Action::make('reject')
-                    ->label('Reject')
-                    ->color('danger')
-                    ->icon('heroicon-o-x-circle')
-                    ->visible(fn (Task $record) => $record->status === 'pending'
-                        && self::canHandleTask($record)
-                        && ! ($record->type === 'ai_deadstock_recommendation'
-                            && (string) data_get($record->payload, 'workflow_state', '') === 'approved_for_aging'))
-                    ->form([
-                        Textarea::make('reason')
-                            ->label('Alasan Reject')
-                            ->required()
-                            ->rows(3),
-                    ])
-                    ->action(function (Task $record, array $data) {
-                        $service = new TaskApprovalService;
-                        $service->reject($record, auth()->user(), (string) ($data['reason'] ?? 'Ditolak'));
-                    })
-                    ->after(function ($livewire): void {
-                        $livewire->redirect(TaskResource::getUrl('index'), navigate: true);
-                    }),
-
             ]);
+    }
+
+    private static function resolveDecisionLabel(Task $record, ?string $activeTab = null): string
+    {
+        if ($record->type === 'ai_booking_suggestion') {
+            if ($activeTab === 'approved_material' && $record->hasAiItemStatus('approved')) {
+                return 'Approved';
+            }
+
+            if ($activeTab === 'rejected_material' && $record->hasAiItemStatus('rejected')) {
+                return 'Rejected';
+            }
+
+            return match ($record->aiDecisionState()) {
+                'approved' => 'Approved',
+                'rejected' => 'Rejected',
+                'hybrid' => 'Approved + Rejected',
+                default => '-',
+            };
+        }
+
+        if ($record->type === 'ai_deadstock_recommendation') {
+            return (string) data_get($record->payload, 'approval_trail.manager_operasional.status', '-');
+        }
+
+        $status = data_get($record->payload, 'approval_trail.staff.status', '-');
+        if ($record->type === 'ai_inbound_allocation_suggestion') {
+            return $record->status !== 'pending' ? ($status === '-' ? 'approved' : $status) : '-';
+        }
+
+        return (string) $status;
+    }
+
+    private static function resolveDecisionColor(string $state): string
+    {
+        return match (mb_strtolower($state)) {
+            'approved' => 'success',
+            'rejected' => 'danger',
+            'approved + rejected' => 'warning',
+            default => 'gray',
+        };
     }
 
     private static function canHandleTask(Task $record): bool

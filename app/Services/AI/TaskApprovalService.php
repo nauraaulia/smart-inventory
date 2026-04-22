@@ -49,14 +49,6 @@ class TaskApprovalService
             description: "Approve task {$task->type} (ID {$task->id}) untuk project {$projectCode}.",
         );
 
-        if ($task->type === 'ai_booking_suggestion' && $projectId > 0) {
-            $refreshKey = 'ai_post_approval_refresh_'.$projectId;
-            if (Cache::add($refreshKey, 1, now()->addSeconds(15))) {
-                Cache::forget('ai_booking_project_hash_'.$projectId);
-                ProsesKebutuhanProyekJob::dispatch($projectId)->delay(now()->addSeconds(2));
-            }
-        }
-
         if ($task->type === 'ai_inbound_allocation_suggestion' && $projectId > 0) {
             $allocatedTotalQty = (float) data_get($payload, 'execution_result.allocated_total_qty', 0);
 
@@ -104,6 +96,7 @@ class TaskApprovalService
             ->values()
             ->all();
         $generatePr = (bool) ($options['generate_pr'] ?? true);
+        $rejectionReason = trim((string) ($options['rejection_reason'] ?? ''));
         $decisionsInput = collect($options['material_decisions'] ?? []);
         $decisionsByMaterial = $decisionsInput
             ->mapWithKeys(fn ($row): array => [(int) ($row['material_id'] ?? 0) => $row]);
@@ -177,6 +170,7 @@ class TaskApprovalService
 
         foreach ($materialItems as $item) {
             $materialId = (int) ($item['material_id'] ?? 0);
+            $decisionRow = (array) ($decisionsByMaterial->get($materialId, []) ?? []);
             $detailRow = (array) ($detailByMaterial->get($materialId, []));
             $dibutuhkan = (float) ($item['dibutuhkan'] ?? 0);
             $tanpaPotongan = (bool) ($item['tanpa_potongan'] ?? ($detailRow['tanpa_potongan'] ?? false));
@@ -193,7 +187,8 @@ class TaskApprovalService
                 ->filter(fn ($row): bool => is_array($row) && (int) ($row['id'] ?? 0) > 0 && (float) ($row['take_qty'] ?? 0) > 0)
                 ->values()
                 ->all();
-            $decision = strtolower((string) data_get($decisionsByMaterial->get($materialId, []), 'status', 'approved'));
+            $decision = strtolower((string) data_get($decisionRow, 'status', 'approved'));
+            $materialRejectionReason = trim((string) (data_get($decisionRow, 'rejection_reason', '') ?: $rejectionReason));
 
             $normalizedSegments = $this->normalizeRequestedSegmentsForTarget(
                 requestedSegments: $instructionSegments,
@@ -233,12 +228,20 @@ class TaskApprovalService
             $touchedMaterialIds[] = $materialId;
 
             if ($decision === 'rejected') {
+                if ($materialRejectionReason === '') {
+                    throw ValidationException::withMessages([
+                        'rejection_reason' => 'Alasan penolakan wajib diisi jika ada material yang ditolak.',
+                    ]);
+                }
+
                 $inboundTaskId = $this->createInboundAllocationTaskFromRejectedBooking(
                     materialId: $materialId,
                     projectId: $projectId,
                     qtyNeeded: $dibutuhkan,
                     projectCode: $projectCode,
                     materialName: (string) ($item['material_name'] ?? ('Material #'.$materialId)),
+                    sourceTaskId: (int) $task->id,
+                    rejectionReason: $materialRejectionReason,
                 );
 
                 if ($inboundTaskId) {
@@ -256,6 +259,7 @@ class TaskApprovalService
                     'shortage_qty' => $this->decimal($dibutuhkan),
                     'allocations' => [],
                     'ai_reason' => (string) ($item['ai_reason'] ?? ''),
+                    'rejection_reason' => $materialRejectionReason,
                     'created_operational_task_id' => $inboundTaskId,
                 ];
 
@@ -411,12 +415,17 @@ class TaskApprovalService
         ]);
 
         $payload['items'] = collect($materialItems)
-            ->map(function (array $item) use ($decisionsByMaterial, $stockAtApprovalByMaterial): array {
+            ->map(function (array $item) use ($decisionsByMaterial, $stockAtApprovalByMaterial, $rejectionReason): array {
                 $materialId = (int) ($item['material_id'] ?? 0);
-                $status = strtolower((string) data_get($decisionsByMaterial->get($materialId, []), 'status', 'approved'));
+                $decisionRow = (array) ($decisionsByMaterial->get($materialId, []) ?? []);
+                $status = strtolower((string) data_get($decisionRow, 'status', 'approved'));
+                $materialRejectionReason = trim((string) (data_get($decisionRow, 'rejection_reason', '') ?: $rejectionReason));
 
                 $item['status'] = in_array($status, ['approved', 'rejected'], true) ? $status : 'approved';
                 $item['stock_at_approval'] = (float) ($stockAtApprovalByMaterial[$materialId] ?? ($item['available_qty'] ?? 0));
+                if ($item['status'] === 'rejected') {
+                    $item['rejection_reason'] = $materialRejectionReason;
+                }
 
                 return $item;
             })
@@ -435,6 +444,8 @@ class TaskApprovalService
             ),
             'payload' => $payload,
         ]);
+
+        $this->closeSiblingAiBookingSuggestionTasks($task, $actor->id);
     }
 
     private function createInboundAllocationTaskFromRejectedBooking(
@@ -444,6 +455,8 @@ class TaskApprovalService
         string $projectCode,
         string $materialName,
         string $contextNote = 'ditolak dari rekomendasi AI',
+        ?int $sourceTaskId = null,
+        string $rejectionReason = '',
     ): ?int {
         if ($materialId <= 0 || $projectId <= 0 || $qtyNeeded <= 0) {
             return null;
@@ -484,23 +497,75 @@ class TaskApprovalService
             preferredProjectId: $projectId,
         );
 
+        $basePayload = [
+            'project_id' => $projectId,
+            'project_code' => $projectCode,
+            'material_id' => $materialId,
+            'material_name' => $materialName,
+            'unit' => $unit,
+            'qty_dibutuhkan' => $this->decimal($qtyNeeded),
+            'total_available_qty' => round((float) $availablePieces->sum('panjang'), 2),
+            'piece_ids' => collect($piecesPayload)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(),
+            'available_pieces' => $piecesPayload,
+            'allocation_suggestions' => $allocationSuggestions,
+        ];
+
+        if ($sourceTaskId > 0) {
+            $basePayload['source_ai_task_id'] = $sourceTaskId;
+        }
+
+        if ($rejectionReason !== '') {
+            $basePayload['rejection'] = [
+                'reason' => $rejectionReason,
+                'at' => now()->toDateTimeString(),
+            ];
+        }
+
+        $existingPendingTasks = Task::query()
+            ->where('type', 'ai_inbound_allocation_suggestion')
+            ->where('related_type', 'project')
+            ->where('related_id', $projectId)
+            ->where('status', 'pending')
+            ->where('payload->material_id', $materialId)
+            ->orderByDesc('id')
+            ->get();
+
+        $task = $existingPendingTasks->first();
+
+        if ($existingPendingTasks->count() > 1) {
+            $existingPendingTasks->slice(1)->each(function (Task $existingTask): void {
+                $payload = is_array($existingTask->payload) ? $existingTask->payload : [];
+                data_set($payload, 'superseded', true);
+                data_set($payload, 'superseded_at', now()->toDateTimeString());
+
+                $existingTask->update([
+                    'status' => 'done',
+                    'handled_at' => now(),
+                    'message' => 'Task operasional ini digantikan oleh task operasional terbaru untuk material yang sama.',
+                    'payload' => $payload,
+                ]);
+            });
+        }
+
+        if ($task) {
+            $payload = is_array($task->payload) ? $task->payload : [];
+            $payload = array_merge($payload, $basePayload);
+
+            $task->update([
+                'title' => "Task Operasional Alokasi Inbound ({$materialName})",
+                'message' => "Material {$materialName} {$contextNote}. Pilih manual piece untuk pemenuhan kebutuhan proyek {$projectCode}.",
+                'payload' => $payload,
+            ]);
+
+            return (int) $task->id;
+        }
+
         $task = Task::create([
             'for_role' => 'Staff Administrasi Gudang',
             'type' => 'ai_inbound_allocation_suggestion',
             'title' => "Task Operasional Alokasi Inbound ({$materialName})",
             'message' => "Material {$materialName} {$contextNote}. Pilih manual piece untuk pemenuhan kebutuhan proyek {$projectCode}.",
-            'payload' => [
-                'project_id' => $projectId,
-                'project_code' => $projectCode,
-                'material_id' => $materialId,
-                'material_name' => $materialName,
-                'unit' => $unit,
-                'qty_dibutuhkan' => $this->decimal($qtyNeeded),
-                'total_available_qty' => round((float) $availablePieces->sum('panjang'), 2),
-                'piece_ids' => collect($piecesPayload)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(),
-                'available_pieces' => $piecesPayload,
-                'allocation_suggestions' => $allocationSuggestions,
-            ],
+            'payload' => $basePayload,
             'status' => 'pending',
             'related_id' => $projectId,
             'related_type' => 'project',
@@ -697,6 +762,8 @@ class TaskApprovalService
                 : 'Keterangan: '.$this->decimal($allocatedTotalQty).' unit dialokasikan, '.$this->decimal($returnedToStockQty).' unit masuk ke stok available.',
             'payload' => $payload,
         ]);
+
+        $this->closeSiblingInboundAllocationTasks($task);
     }
 
     private function approveDeadstockRecommendation(Task $task, User $actor, array $options = []): void
@@ -1378,6 +1445,75 @@ class TaskApprovalService
             'handled_at' => now(),
             'payload' => $payload,
         ]);
+    }
+
+    private function closeSiblingInboundAllocationTasks(Task $task): void
+    {
+        if ($task->type !== 'ai_inbound_allocation_suggestion') {
+            return;
+        }
+
+        $projectId = (int) $task->related_id;
+        $materialId = (int) data_get($task->payload, 'material_id');
+
+        if ($projectId <= 0 || $materialId <= 0) {
+            return;
+        }
+
+        Task::query()
+            ->where('type', 'ai_inbound_allocation_suggestion')
+            ->where('related_type', 'project')
+            ->where('related_id', $projectId)
+            ->where('status', 'pending')
+            ->where('payload->material_id', $materialId)
+            ->whereKeyNot($task->id)
+            ->get()
+            ->each(function (Task $sibling): void {
+                $payload = is_array($sibling->payload) ? $sibling->payload : [];
+                data_set($payload, 'superseded', true);
+                data_set($payload, 'superseded_at', now()->toDateTimeString());
+
+                $sibling->update([
+                    'status' => 'done',
+                    'handled_at' => now(),
+                    'message' => 'Task operasional ini digantikan oleh task operasional lain yang sudah diproses untuk material yang sama.',
+                    'payload' => $payload,
+                ]);
+            });
+    }
+
+    private function closeSiblingAiBookingSuggestionTasks(Task $task, int $actorId): void
+    {
+        if ($task->type !== 'ai_booking_suggestion') {
+            return;
+        }
+
+        $projectId = (int) $task->related_id;
+        if ($projectId <= 0) {
+            return;
+        }
+
+        Task::query()
+            ->where('type', 'ai_booking_suggestion')
+            ->where('related_type', 'project')
+            ->where('related_id', $projectId)
+            ->where('status', 'pending')
+            ->whereKeyNot($task->id)
+            ->get()
+            ->each(function (Task $sibling) use ($actorId): void {
+                $payload = is_array($sibling->payload) ? $sibling->payload : [];
+                data_set($payload, 'superseded', true);
+                data_set($payload, 'superseded_at', now()->toDateTimeString());
+                data_set($payload, 'resolved_via_material_decision', true);
+
+                $sibling->update([
+                    'status' => 'done',
+                    'handled_by' => $actorId > 0 ? $actorId : null,
+                    'handled_at' => now(),
+                    'message' => 'Task AI ini ditutup karena keputusan material sudah diproses dan dialihkan ke hasil akhir terbaru.',
+                    'payload' => $payload,
+                ]);
+            });
     }
 
     private function outstandingNeed(int $projectId, int $materialId): float

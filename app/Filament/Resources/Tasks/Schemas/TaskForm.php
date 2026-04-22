@@ -35,7 +35,7 @@ class TaskForm
                             ->disabled()
                             ->dehydrated(false),
                         Select::make('status')
-                            ->visible(fn (?Task $record): bool => $record?->type !== 'ai_inbound_allocation_suggestion')
+                            ->visible(fn (?Task $record): bool => ! in_array($record?->type, ['ai_booking_suggestion', 'ai_inbound_allocation_suggestion'], true))
                             ->options([
                                 'pending' => 'Pending (Menunggu Konfirmasi)',
                                 'done' => 'Done (Disetujui & Diproses)',
@@ -62,8 +62,10 @@ class TaskForm
                             ->required(),
                         Textarea::make('rejection_reason')
                             ->label('Alasan Reject')
-                            ->visible(fn (Get $get) => $get('status') === 'rejected')
-                            ->required(fn (Get $get) => $get('status') === 'rejected')
+                            ->visible(fn (?Task $record, Get $get): bool => $record?->type !== 'ai_booking_suggestion'
+                                && self::shouldShowGlobalRejectionReason($record, $get))
+                            ->required(fn (?Task $record, Get $get): bool => $record?->type !== 'ai_booking_suggestion'
+                                && self::shouldShowGlobalRejectionReason($record, $get))
                             ->rows(3),
                     ])->columns(1),
 
@@ -165,8 +167,15 @@ class TaskForm
                                         'approved' => 'Approve',
                                         'rejected' => 'Tolak',
                                     ])
+                                    ->live()
                                     ->default('pending')
                                     ->required(),
+                                Textarea::make('rejection_reason')
+                                    ->label('Alasan Penolakan')
+                                    ->rows(2)
+                                    ->visible(fn (Get $get): bool => (string) ($get('status') ?? 'pending') === 'rejected')
+                                    ->required(fn (Get $get): bool => (string) ($get('status') ?? 'pending') === 'rejected')
+                                    ->columnSpanFull(),
                             ])->columns(2),
 
                         TextInput::make('payload.material_name')
@@ -412,5 +421,14 @@ class TaskForm
         }
 
         return 'unit';
+    }
+
+    private static function shouldShowGlobalRejectionReason(?Task $record, Get $get): bool
+    {
+        if ($record?->type === 'ai_booking_suggestion') {
+            return (string) ($get('status') ?? '') === 'rejected';
+        }
+
+        return (string) ($get('status') ?? '') === 'rejected';
     }
 }

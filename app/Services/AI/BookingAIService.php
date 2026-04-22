@@ -1825,7 +1825,22 @@ PROMPT;
 
     private function hitungDeltaKebutuhan(int $projectId, array $kebutuhan): array
     {
-        return collect($kebutuhan)->map(function (array $item) use ($projectId) {
+        $pendingOperationalByMaterial = Task::query()
+            ->where('type', 'ai_inbound_allocation_suggestion')
+            ->where('related_type', 'project')
+            ->where('related_id', $projectId)
+            ->where('status', 'pending')
+            ->get(['id', 'payload'])
+            ->filter(function (Task $task): bool {
+                return (int) data_get($task->payload, 'material_id') > 0
+                    && (float) data_get($task->payload, 'qty_dibutuhkan', 0) > 0;
+            })
+            ->sortByDesc('id')
+            ->groupBy(fn (Task $task): int => (int) data_get($task->payload, 'material_id'))
+            ->map(fn ($tasks): float => round((float) data_get($tasks->first()?->payload, 'qty_dibutuhkan', 0), 2))
+            ->all();
+
+        return collect($kebutuhan)->map(function (array $item) use ($pendingOperationalByMaterial, $projectId) {
             $materialId = (int) ($item['material_id'] ?? 0);
             $qtyRequested = (float) ($item['qty'] ?? 0);
             if ($materialId <= 0 || $qtyRequested <= 0) {
@@ -1833,7 +1848,8 @@ PROMPT;
             }
             $qtyBooked = (float) MaterialPiece::query()->where('booked_for_project_id', $projectId)->where('material_id', $materialId)->whereIn('status', ['booked', 'used'])->sum('panjang');
             $qtyPr = (float) PurchaseRequest::query()->where('project_id', $projectId)->where('material_id', $materialId)->whereIn('status', ['draft', 'pending_manager', 'pending_finance', 'approved', 'ordered', 'received'])->sum('quantity');
-            $qtyDelta = max(0, $qtyRequested - ($qtyBooked + $qtyPr));
+            $qtyPendingOperational = (float) ($pendingOperationalByMaterial[$materialId] ?? 0);
+            $qtyDelta = max(0, $qtyRequested - ($qtyBooked + $qtyPr + $qtyPendingOperational));
             if ($qtyDelta <= 0) {
                 return null;
             }
@@ -1847,17 +1863,39 @@ PROMPT;
         $project = Project::query()->find($projectId, ['id', 'kode_proyek', 'catatan_teknis']);
         $projectCode = (string) ($project?->kode_proyek ?: "#{$projectId}");
         $projectSpecialInstruction = trim((string) ($project?->catatan_teknis ?? ''));
-        $taskPending = Task::query()->where('type', 'ai_booking_suggestion')->where('related_type', 'project')->where('related_id', $projectId)->where('status', 'pending')->latest('id')->first();
-        if (! $taskPending) {
+        $pendingTasks = Task::query()
+            ->where('type', 'ai_booking_suggestion')
+            ->where('related_type', 'project')
+            ->where('related_id', $projectId)
+            ->where('status', 'pending')
+            ->orderByDesc('id')
+            ->get();
+
+        if ($pendingTasks->isEmpty()) {
             return;
         }
-        $payload = $taskPending->payload ?? [];
-        data_set($payload, 'project_special_instruction', $projectSpecialInstruction);
-        data_set($payload, 'detail', []);
-        data_set($payload, 'ai_summary.rekomendasi', []);
-        data_set($payload, 'ai_summary.ringkasan', 'Tidak ada tambahan kebutuhan baru. Data kebutuhan sebelumnya sudah ter-cover booking/PR.');
-        data_set($payload, 'last_synced_at', now()->toDateTimeString());
-        $taskPending->update(['status' => 'done', 'handled_at' => now(), 'title' => "AI: Konfirmasi Kebutuhan Material Proyek {$projectCode}", 'message' => 'Tidak ada tambahan kebutuhan baru. Task ditutup otomatis.', 'payload' => $payload]);
+
+        $pendingTasks->each(function (Task $task, int $index) use ($projectCode, $projectSpecialInstruction): void {
+            $payload = $task->payload ?? [];
+            data_set($payload, 'project_special_instruction', $projectSpecialInstruction);
+            data_set($payload, 'detail', []);
+            data_set($payload, 'ai_summary.rekomendasi', []);
+            data_set($payload, 'ai_summary.ringkasan', 'Tidak ada tambahan kebutuhan baru. Data kebutuhan sebelumnya sudah ter-cover booking/PR.');
+            data_set($payload, 'last_synced_at', now()->toDateTimeString());
+
+            if ($index > 0) {
+                data_set($payload, 'superseded', true);
+                data_set($payload, 'superseded_at', now()->toDateTimeString());
+            }
+
+            $task->update([
+                'status' => 'done',
+                'handled_at' => now(),
+                'title' => "AI: Konfirmasi Kebutuhan Material Proyek {$projectCode}",
+                'message' => 'Tidak ada tambahan kebutuhan baru. Task ditutup otomatis.',
+                'payload' => $payload,
+            ]);
+        });
     }
 
     private function buildFallbackAnalysis(int $projectId, array $kebutuhanDelta, array $stockData, array $instruksiAi): array

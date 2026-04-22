@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Tasks\Schemas;
 
+use App\Models\Task;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Schemas\Schema;
 
@@ -16,7 +17,26 @@ class TaskInfolist
                 TextEntry::make('title'),
                 TextEntry::make('message')
                     ->columnSpanFull(),
-                TextEntry::make('status'),
+                TextEntry::make('visual_status')
+                    ->label('Status Task')
+                    ->getStateUsing(function (Task $record): string {
+                        return match ($record->visualStatus()) {
+                            'pending' => 'Pending',
+                            'done' => 'Done',
+                            'rejected' => 'Rejected',
+                            default => ucfirst($record->visualStatus()),
+                        };
+                    }),
+                TextEntry::make('decision_state')
+                    ->label('Decision')
+                    ->visible(fn (Task $record): bool => $record->type === 'ai_booking_suggestion')
+                    ->getStateUsing(function (Task $record): string {
+                        return match ($record->aiDecisionState()) {
+                            'approved' => 'Approved',
+                            'rejected' => 'Rejected',
+                            default => '-',
+                        };
+                    }),
                 TextEntry::make('related_id')
                     ->numeric()
                     ->placeholder('-'),
@@ -45,12 +65,12 @@ class TaskInfolist
                     ->label('Piece yang Dipakai')
                     ->visible(fn ($record) => (string) data_get($record, 'type', '') === 'ai_inbound_allocation_suggestion')
                     ->formatStateUsing(function ($state): string {
-                        if (!is_array($state) || empty($state)) {
+                        if (! is_array($state) || empty($state)) {
                             return '-';
                         }
 
                         return collect($state)
-                            ->map(fn ($id): string => 'Piece #' . (int) $id)
+                            ->map(fn ($id): string => 'Piece #'.(int) $id)
                             ->implode(', ');
                     })
                     ->placeholder('-')
@@ -59,7 +79,7 @@ class TaskInfolist
                     ->label('Rincian Alokasi per Proyek')
                     ->visible(fn ($record) => (string) data_get($record, 'type', '') === 'ai_inbound_allocation_suggestion')
                     ->formatStateUsing(function ($state): string {
-                        if (!is_array($state) || empty($state)) {
+                        if (! is_array($state) || empty($state)) {
                             return '-';
                         }
 
@@ -68,7 +88,7 @@ class TaskInfolist
                                 $code = (string) data_get($row, 'project_code', '#-');
                                 $qty = rtrim(rtrim(number_format((float) data_get($row, 'allocated_qty', 0), 2, '.', ''), '0'), '.');
 
-                                return $code . ': ' . $qty . ' unit';
+                                return $code.': '.$qty.' unit';
                             })
                             ->implode("\n");
                     })
