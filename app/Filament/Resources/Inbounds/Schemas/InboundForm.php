@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Inbounds\Schemas;
 
+use App\Models\Project;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Select; // Untuk dropdown
@@ -66,7 +67,7 @@ class InboundForm
 
                 Select::make('project_id')
                     ->label('Project Yang Diretur')
-                    ->relationship('project', 'kode_proyek')
+                    ->relationship('project', 'kode_proyek', modifyQueryUsing: fn ($query) => $query->active())
                     ->searchable()
                     ->preload()
                     ->visible(fn ($get) => $get('jenis_inbound') === 'Retur' || request('type') === 'Retur')

@@ -56,7 +56,6 @@ class MasterDataSeeder extends Seeder
                     'id_custom' => $user['id_custom'],
                     'role' => $user['role'],
                     'password' => Hash::make('123456'),
-                    'email_verified_at' => now(),
                 ]
             );
         }

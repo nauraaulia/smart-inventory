@@ -29,7 +29,10 @@ class ProjectForm
                             ->schema([
                                 Select::make('project_template_id')
                                     ->label('Pilih Template Proyek')
-                                    ->options(ProjectTemplate::pluck('nama_template', 'id'))
+                                    ->options(fn () => ProjectTemplate::query()
+                                        ->active()
+                                        ->orderBy('nama_template')
+                                        ->pluck('nama_template', 'id'))
                                     ->searchable()
                                     ->preload()
                                     ->required()

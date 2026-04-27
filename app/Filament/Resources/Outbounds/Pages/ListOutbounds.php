@@ -41,7 +41,7 @@ class ListOutbounds extends ListRecords
                 ->form([
                     Select::make('project_id')
                         ->label('Pilih Proyek')
-                        ->options(Project::query()->orderBy('kode_proyek')->pluck('kode_proyek', 'id'))
+                        ->options(Project::query()->active()->orderBy('kode_proyek')->pluck('kode_proyek', 'id'))
                         ->required()
                         ->searchable(),
                     Repeater::make('items')

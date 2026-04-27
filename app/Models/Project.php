@@ -268,6 +268,15 @@ class Project extends Model
             });
     }
 
+    public function scopeActive(Builder $query): Builder
+    {
+        return $query
+            ->where(function (Builder $q): void {
+                $q->whereNull('completed_at')
+                    ->where('status', '!=', 'Completed');
+            });
+    }
+
     public function getProjectCategoryAttribute(): string
     {
         if ($this->status === 'Completed' || !empty($this->completed_at)) {

@@ -22,14 +22,14 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
 
     /**
      * Jumlah kali job akan di-retry jika gagal.
-      * Total 10 attempt: 1x awal + 9x retry.
+     * Total 3 attempt: 1x awal + 2x retry.
      */
-     public int $tries = 10;
+    public int $tries = 3;
 
-     /**
-      * Jeda retry bertahap (detik) agar tidak menabrak high-demand window.
-      */
-     public array $backoff = [20, 45, 90, 150, 240, 360, 540, 780, 1080];
+    /**
+     * Jeda retry singkat agar tetap hemat waktu dan token.
+     */
+    public array $backoff = [10, 30];
 
     /**
      * Timeout job execution (detik).
@@ -50,19 +50,20 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
     {
         $project = Project::with('items.material')->find($this->projectId);
 
-        if (!$project) {
+        if (! $project) {
             Log::warning("Project #{$this->projectId} tidak ditemukan");
+
             return;
         }
 
         // Format kebutuhan material dari project items
-        $kebutuhan = $project->items->map(fn($item) => [
+        $kebutuhan = $project->items->map(fn ($item) => [
             'material_id' => $item->material_id,
-            'qty'         => $item->jumlah_diminta,
-                ])->filter(fn (array $item): bool => (int) ($item['material_id'] ?? 0) > 0 && (float) ($item['qty'] ?? 0) > 0)
-                    ->sortBy('material_id')
-                    ->values()
-                    ->toArray();
+            'qty' => $item->jumlah_diminta,
+        ])->filter(fn (array $item): bool => (int) ($item['material_id'] ?? 0) > 0 && (float) ($item['qty'] ?? 0) > 0)
+            ->sortBy('material_id')
+            ->values()
+            ->toArray();
 
         $triggerSource = $this->sendNotifications ? 'manager_project_submit' : 'system_sync';
 
@@ -70,15 +71,16 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
             if ($this->sendNotifications) {
                 $this->notifyGeminiProcessing($project);
             }
-            $aiService = new BookingAIService(new GeminiService());
+            $aiService = new BookingAIService(new GeminiService);
             $aiService->prosesKebutuhanProyek($this->projectId, [], false, $triggerSource);
             if ($this->sendNotifications) {
                 $this->notifyGeminiFinished($project, false);
             }
+
             return;
         }
 
-        $dedupeKey = 'ai_booking_project_hash_' . $this->projectId;
+        $dedupeKey = 'ai_booking_project_hash_'.$this->projectId;
         $kebutuhanHash = sha1((string) json_encode([
             'kebutuhan' => $kebutuhan,
             'catatan_teknis' => trim((string) ($project->catatan_teknis ?? '')),
@@ -97,15 +99,15 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
             if ($this->sendNotifications) {
                 $this->notifyGeminiFinished($project, true);
             }
+
             return;
         }
 
         try {
             // Jalankan AI
-            $aiService = new BookingAIService(new GeminiService());
-            // Keep job flow responsive: on transient Gemini issues, service falls back locally
-            // instead of bubbling exception to queue retries.
-            $aiService->prosesKebutuhanProyek($this->projectId, $kebutuhan, false, $triggerSource);
+            $aiService = new BookingAIService(new GeminiService);
+            // Untuk error Gemini yang sifatnya sementara, lempar ke queue agar retry dulu.
+            $aiService->prosesKebutuhanProyek($this->projectId, $kebutuhan, true, $triggerSource);
 
             // Simpan hash hanya jika proses AI sukses, agar retry tidak ke-skip saat gagal.
             $dedupeMinutes = max(1, (int) env('AI_BOOKING_DEDUPE_MINUTES', 180));
@@ -128,7 +130,7 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
         try {
             $project = Project::with('items.material')->find($this->projectId);
             if ($project) {
-                $kebutuhan = $project->items->map(fn($item) => [
+                $kebutuhan = $project->items->map(fn ($item) => [
                     'material_id' => $item->material_id,
                     'qty' => $item->jumlah_diminta,
                 ])->filter(fn (array $item): bool => (int) ($item['material_id'] ?? 0) > 0 && (float) ($item['qty'] ?? 0) > 0)
@@ -136,7 +138,7 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
                     ->values()
                     ->toArray();
 
-                $aiService = new BookingAIService(new GeminiService());
+                $aiService = new BookingAIService(new GeminiService);
                 // Setelah retry habis, pakai fallback lokal agar task tetap berisi rekomendasi.
                 $aiService->prosesKebutuhanProyek($this->projectId, $kebutuhan, false, 'system_sync');
 
@@ -150,7 +152,7 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
 
                 if ($latestTask) {
                     $detail = data_get($latestTask->payload, 'detail', []);
-                    $fallbackRecovered = is_array($detail) && !empty($detail);
+                    $fallbackRecovered = is_array($detail) && ! empty($detail);
                 }
             }
         } catch (Throwable $fallbackError) {
@@ -176,8 +178,8 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
             data_set($payload, 'last_synced_at', now()->toDateTimeString());
 
             $updateData = ['payload' => $payload];
-            if (!$fallbackRecovered) {
-                $updateData['message'] = 'AI gagal setelah ' . (int) $this->tries . ' percobaan: ' . trim((string) $e->getMessage());
+            if (! $fallbackRecovered) {
+                $updateData['message'] = 'AI gagal setelah '.(int) $this->tries.' percobaan: '.trim((string) $e->getMessage());
             }
 
             $task->update($updateData);
@@ -197,10 +199,10 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
 
     private function notifyGeminiProcessing(Project $project): void
     {
-        $projectCode = (string) ($project->kode_proyek ?: ('#' . $project->id));
-        $key = 'gemini_processing_notif_' . (int) $project->id;
+        $projectCode = (string) ($project->kode_proyek ?: ('#'.$project->id));
+        $key = 'gemini_processing_notif_'.(int) $project->id;
 
-        if (!Cache::add($key, 1, now()->addSeconds(15))) {
+        if (! Cache::add($key, 1, now()->addSeconds(15))) {
             return;
         }
 
@@ -214,7 +216,7 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
 
     private function notifyGeminiFinished(Project $project, bool $unchanged = false): void
     {
-        $projectCode = (string) ($project->kode_proyek ?: ('#' . $project->id));
+        $projectCode = (string) ($project->kode_proyek ?: ('#'.$project->id));
 
         $notification = Notification::make()
             ->title("Rekomendasi {$projectCode} sudah siap")
@@ -228,10 +230,10 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
 
     private function notifyGeminiFailed(Project $project, string $errorMessage): void
     {
-        $projectCode = (string) ($project->kode_proyek ?: ('#' . $project->id));
+        $projectCode = (string) ($project->kode_proyek ?: ('#'.$project->id));
         $body = 'Gemini gagal memproses rekomendasi. Sistem fallback tetap dijalankan.';
         if ($errorMessage !== '') {
-            $body .= ' Detail: ' . mb_substr($errorMessage, 0, 180);
+            $body .= ' Detail: '.mb_substr($errorMessage, 0, 180);
         }
 
         $notification = Notification::make()

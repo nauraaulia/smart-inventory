@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 
 class ProjectTemplate extends Model
@@ -17,6 +18,11 @@ class ProjectTemplate extends Model
                 return $this->hasMany(ProjectTemplateItem::class);
         }
     
+    public function scopeActive(Builder $query): Builder
+    {
+        return $query->where('is_active', true);
+    }
+
     protected static function booted()
     {
         parent::booted();

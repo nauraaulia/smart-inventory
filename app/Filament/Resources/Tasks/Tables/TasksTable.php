@@ -317,9 +317,12 @@ class TasksTable
                                     ->label('Pilih Piece yang Boleh Dipakai')
                                     ->multiple()
                                     ->searchable()
-                                    ->required()
-                                    ->visible(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved')
-                                    ->dehydrated(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved')
+                                    ->required(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved'
+                                        && self::requiresExplicitPieceSelection($record))
+                                    ->visible(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved'
+                                        && self::requiresExplicitPieceSelection($record))
+                                    ->dehydrated(fn (Get $get): bool => (string) ($get('new_status') ?? 'approved') === 'approved'
+                                        && self::requiresExplicitPieceSelection($record))
                                     ->options($pieceOptions)
                                     ->default([]),
                                 Toggle::make('add_purchase_request')
@@ -588,6 +591,16 @@ class TasksTable
         }
 
         return in_array($record->for_role, self::roleAliases($user->role), true);
+    }
+
+    private static function requiresExplicitPieceSelection(Task $record): bool
+    {
+        if ($record->type !== 'ai_inbound_allocation_suggestion') {
+            return false;
+        }
+
+        return $record->related_type === 'project'
+            || (int) data_get($record->payload, 'source_ai_task_id', 0) > 0;
     }
 
     private static function roleAliases(string $role): array

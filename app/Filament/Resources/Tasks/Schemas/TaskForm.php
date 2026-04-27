@@ -235,11 +235,11 @@ class TaskForm
                             ->columns(12),
 
                         Select::make('payload.selected_piece_ids')
-                            ->visible(fn (?Task $record): bool => $record?->type === 'ai_inbound_allocation_suggestion')
+                            ->visible(fn (?Task $record): bool => self::requiresExplicitPieceSelection($record))
                             ->label('Checklist Piece yang Dialokasikan')
                             ->multiple()
                             ->searchable()
-                            ->required()
+                            ->required(fn (?Task $record): bool => self::requiresExplicitPieceSelection($record))
                             ->options(function (Get $get): array {
                                 $materialId = (int) ($get('payload.material_id') ?? 0);
                                 $fallbackUnit = self::resolveTaskMaterialUnit($get);
@@ -421,6 +421,16 @@ class TaskForm
         }
 
         return 'unit';
+    }
+
+    private static function requiresExplicitPieceSelection(?Task $record): bool
+    {
+        if ($record?->type !== 'ai_inbound_allocation_suggestion') {
+            return false;
+        }
+
+        return $record->related_type === 'project'
+            || (int) data_get($record->payload, 'source_ai_task_id', 0) > 0;
     }
 
     private static function shouldShowGlobalRejectionReason(?Task $record, Get $get): bool

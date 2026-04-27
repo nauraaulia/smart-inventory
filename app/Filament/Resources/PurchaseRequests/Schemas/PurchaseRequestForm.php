@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\PurchaseRequests\Schemas;
 
+use App\Models\Project;
 use Filament\Forms\Components\DatePicker;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
@@ -27,7 +28,7 @@ class PurchaseRequestForm
                     ->required(),
                 Select::make('project_id')
                     ->label('Kode Proyek')
-                    ->relationship('project', 'kode_proyek')
+                    ->relationship('project', 'kode_proyek', modifyQueryUsing: fn ($query) => $query->active())
                     ->searchable()
                     ->preload()
                     ->visible(fn (Get $get): bool => ($get('request_target') ?? 'project') === 'project')
