@@ -50,10 +50,20 @@ class PurchaseRequest extends Model
                     return;
                 }
 
+                $outstandingNeed = self::outstandingNeedForProjectMaterial(
+                    projectId: (int) $lockedPr->project_id,
+                    materialId: (int) $lockedPr->material_id,
+                );
+
+                $qtyToAllocate = min(
+                    max(0, (float) $lockedPr->quantity),
+                    $outstandingNeed,
+                );
+
                 $allocated = self::bookToProjectFromAvailablePieces(
                     materialId: (int) $lockedPr->material_id,
                     projectId: (int) $lockedPr->project_id,
-                    qtyNeeded: (float) $lockedPr->quantity,
+                    qtyNeeded: $qtyToAllocate,
                 );
 
                 $lockedPr->forceFill([
@@ -113,6 +123,34 @@ class PurchaseRequest extends Model
         $leadTimeDays = max(0, (int) ($this->material?->defaultSupplier?->lead_time_hari ?? 7));
 
         return $today->diffInDays($usageDate, false) - $leadTimeDays - self::PRIORITY_BUFFER_DAYS;
+    }
+
+    private static function outstandingNeedForProjectMaterial(int $projectId, int $materialId): float
+    {
+        if ($projectId <= 0 || $materialId <= 0) {
+            return 0.0;
+        }
+
+        $requested = (float) ProjectItem::query()
+            ->where('project_id', $projectId)
+            ->where('material_id', $materialId)
+            ->sum('jumlah_diminta');
+
+        if ($requested <= 0) {
+            $requested = (float) self::query()
+                ->where('project_id', $projectId)
+                ->where('material_id', $materialId)
+                ->whereIn('status', ['pending_manager', 'pending_finance', 'approved', 'ordered', 'received'])
+                ->sum('quantity');
+        }
+
+        $booked = (float) MaterialPiece::query()
+            ->where('booked_for_project_id', $projectId)
+            ->where('material_id', $materialId)
+            ->whereIn('status', ['booked', 'used'])
+            ->sum('panjang');
+
+        return max(0, round($requested - $booked, 2));
     }
 
     private static function bookToProjectFromAvailablePieces(int $materialId, int $projectId, float $qtyNeeded): float
