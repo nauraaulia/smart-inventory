@@ -9,6 +9,7 @@ use App\Filament\Resources\PurchaseOrders\Pages\ViewPurchaseOrder;
 use App\Filament\Resources\PurchaseOrders\Schemas\PurchaseOrderInfolist;
 use App\Filament\Resources\PurchaseOrders\Tables\PurchaseOrdersTable;
 use App\Models\PurchaseOrder;
+use App\Models\User;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
@@ -32,7 +33,9 @@ class PurchaseOrderResource extends Resource
 
     public static function getNavigationGroup(): ?string
     {
-        return auth()->user()?->role === 'Administrator IT' ? 'Gudang' : null;
+        $role = auth()->user()?->role;
+
+        return $role === 'Administrator IT' || User::isGeneralManagerRole($role) ? 'Gudang' : null;
     }
 
     public static function canViewAny(): bool
@@ -117,6 +120,7 @@ class PurchaseOrderResource extends Resource
             'Staff Adm Gudang',
             'Staff Gudang',
             'Administrator IT',
+            User::ROLE_GENERAL_MANAGER,
         ], true);
     }
 }

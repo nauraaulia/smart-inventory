@@ -112,6 +112,13 @@ class TaskForm
                                     )))
                                     ->suffix(fn (Get $get): string => (string) ($get('satuan') ?: 'unit'))
                                     ->disabled(),
+                                Textarea::make('purchase_recommendation_text')
+                                    ->label('Rekomendasi Pembelian')
+                                    ->rows(4)
+                                    ->visible(fn (Get $get): bool => (float) ($get('recommended_pr_qty') ?? 0) > 0)
+                                    ->disabled()
+                                    ->dehydrated(false)
+                                    ->columnSpanFull(),
                                 Textarea::make('recommended_pieces')
                                     ->label('Detail Piece')
                                     ->rows(4)

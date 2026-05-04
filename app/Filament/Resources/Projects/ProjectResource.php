@@ -9,6 +9,7 @@ use App\Filament\Resources\Projects\Schemas\ProjectForm;
 use App\Filament\Resources\Projects\Tables\ProjectsTable;
 use App\Filament\Widgets\ProjectStatsWidget;
 use App\Models\Project;
+use App\Models\User;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
@@ -26,6 +27,11 @@ class ProjectResource extends Resource
 
     protected static ?string $recordTitleAttribute = 'Project';
 
+    public static function getNavigationGroup(): ?string
+    {
+        return User::isGeneralManagerRole(auth()->user()?->role) ? 'Gudang' : null;
+    }
+
     private static function canManageProject(?string $role): bool
     {
         return $role === 'Manager Teknik';
@@ -40,6 +46,7 @@ class ProjectResource extends Resource
             'Staff Administrasi Gudang',
             'Staff Adm Gudang',
             'Staff Gudang',
+            User::ROLE_GENERAL_MANAGER,
         ], true);
     }
 

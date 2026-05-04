@@ -7,6 +7,7 @@ use App\Filament\Resources\Tasks\Pages\ListTasks;
 use App\Filament\Resources\Tasks\Pages\ViewTask;
 use App\Filament\Resources\Tasks\Schemas\TaskForm;
 use App\Filament\Resources\Tasks\Tables\TasksTable;
+use App\Models\User;
 use App\Models\Task;
 use BackedEnum;
 use Filament\Resources\Resource;
@@ -31,7 +32,9 @@ class TaskResource extends Resource
 
     public static function getNavigationGroup(): ?string
     {
-        return auth()->user()?->role === 'Administrator IT' ? 'Gudang' : null;
+        $role = auth()->user()?->role;
+
+        return $role === 'Administrator IT' || User::isGeneralManagerRole($role) ? 'Gudang' : null;
     }
 
     public static function form(Schema $schema): Schema
@@ -49,6 +52,7 @@ class TaskResource extends Resource
         $role = auth()->user()?->role;
 
         return self::isAdminIt($role)
+            || User::isGeneralManagerRole($role)
             || self::isManagerOperasional($role)
             || self::isStaffAdministrasiGudang($role);
     }
@@ -58,6 +62,7 @@ class TaskResource extends Resource
         $role = auth()->user()?->role;
 
         return self::isAdminIt($role)
+            || User::isGeneralManagerRole($role)
             || self::isManagerOperasional($role)
             || self::isStaffAdministrasiGudang($role);
     }
@@ -106,7 +111,7 @@ class TaskResource extends Resource
             return $query->whereRaw('1 = 0');
         }
 
-        if (self::isAdminIt($user->role)) {
+        if (self::isAdminIt($user->role) || User::isGeneralManagerRole($user->role)) {
             return $query;
         }
 
@@ -133,7 +138,7 @@ class TaskResource extends Resource
 
         $query = Task::query();
 
-        if (! self::isAdminIt($user->role)) {
+        if (! self::isAdminIt($user->role) && ! User::isGeneralManagerRole($user->role)) {
             if (! self::isStaffAdministrasiGudang($user->role)) {
                 return null;
             }

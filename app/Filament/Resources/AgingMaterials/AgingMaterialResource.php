@@ -5,6 +5,7 @@ namespace App\Filament\Resources\AgingMaterials;
 use App\Filament\Resources\AgingMaterials\Pages\ListAgingMaterials;
 use App\Filament\Resources\AgingMaterials\Tables\AgingMaterialsTable;
 use App\Models\Task;
+use App\Models\User;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Support\Icons\Heroicon;
@@ -27,7 +28,9 @@ class AgingMaterialResource extends Resource
 
     public static function getNavigationGroup(): ?string
     {
-        return auth()->user()?->role === 'Administrator IT' ? 'Gudang' : null;
+        $role = auth()->user()?->role;
+
+        return $role === 'Administrator IT' || User::isGeneralManagerRole($role) ? 'Gudang' : null;
     }
 
     public static function table(Table $table): Table
@@ -46,6 +49,7 @@ class AgingMaterialResource extends Resource
             'Finance',
             'Keuangan',
             'Administrator IT',
+            User::ROLE_GENERAL_MANAGER,
         ], true);
     }
 

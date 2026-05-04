@@ -132,6 +132,7 @@ class StockByLocation extends Page
             'Manajer Operasional',
             'Manager Teknik',
             'Administrator IT',
+            \App\Models\User::ROLE_GENERAL_MANAGER,
         ], true);
     }
 

@@ -2,9 +2,10 @@
 
 namespace App\Filament\Resources\Users\Schemas;
 
+use App\Models\User;
+use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Schemas\Schema;
-use Filament\Forms\Components\Select;
 
 class UserForm
 {
@@ -29,13 +30,7 @@ class UserForm
                     ->required(),
                 Select::make('role')
                     ->label('Jabatan / Role')
-                    ->options([
-                        'Administrator IT' => 'Administrator IT',
-                        'Manager Teknik' => 'Manager Teknik',
-                        'Staff Administrasi Gudang' => 'Staff Administrasi Gudang',
-                        'Finance' => 'Finance',
-                        'Manager Operasional' => 'Manager Operasional',
-                    ])
+                    ->options(User::roleOptions())
                     ->required(),
             ]);
     }

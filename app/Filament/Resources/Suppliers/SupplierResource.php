@@ -8,6 +8,7 @@ use App\Filament\Resources\Suppliers\Pages\ListSuppliers;
 use App\Filament\Resources\Suppliers\Schemas\SupplierForm;
 use App\Filament\Resources\Suppliers\Tables\SuppliersTable;
 use App\Models\Supplier;
+use App\Models\User;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
@@ -23,6 +24,11 @@ class SupplierResource extends Resource
     protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-building-office';
 
     protected static ?string $recordTitleAttribute = 'Supplier';
+
+    public static function getNavigationGroup(): ?string
+    {
+        return User::isGeneralManagerRole(auth()->user()?->role) ? 'Gudang' : 'Data Master';
+    }
     
     public static function form(Schema $schema): Schema
         {

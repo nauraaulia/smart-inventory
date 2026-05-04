@@ -181,6 +181,7 @@ class TasksTable
                                         2
                                     )),
                                     'recommended_pieces_text' => $recommendedPieces !== '' ? $recommendedPieces : '-',
+                                    'purchase_recommendation_text' => (string) ($item['purchase_recommendation_text'] ?? '-'),
                                     'ai_reason' => (string) ($item['ai_reason'] ?? '-'),
                                     'status' => 'pending',
                                 ];
@@ -215,6 +216,13 @@ class TasksTable
                                             ->suffix(fn (Get $get): string => (string) ($get('satuan') ?: 'unit'))
                                             ->disabled()
                                             ->dehydrated(false),
+                                        Textarea::make('purchase_recommendation_text')
+                                            ->label('Rekomendasi Pembelian')
+                                            ->rows(4)
+                                            ->visible(fn (Get $get): bool => (float) ($get('qty_pr') ?? 0) > 0)
+                                            ->disabled()
+                                            ->dehydrated(false)
+                                            ->columnSpanFull(),
                                         TextInput::make('recommended_pieces_text')
                                             ->label('Detail Piece')
                                             ->disabled()

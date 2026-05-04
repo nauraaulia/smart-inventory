@@ -8,6 +8,7 @@ use App\Filament\Resources\ProjectTemplates\Pages\ListProjectTemplates;
 use App\Filament\Resources\ProjectTemplates\Schemas\ProjectTemplateForm; // ✅ Import form baru
 use App\Filament\Resources\ProjectTemplates\Tables\ProjectTemplatesTable;
 use App\Models\ProjectTemplate;
+use App\Models\User;
 use Filament\Resources\Resource;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Model;
@@ -19,6 +20,11 @@ class ProjectTemplateResource extends Resource
 
     protected static string|\BackedEnum|null $navigationIcon = 'heroicon-o-document-duplicate';
     protected static string|\UnitEnum|null $navigationGroup = 'Data Master';
+
+    public static function getNavigationGroup(): ?string
+    {
+        return User::isGeneralManagerRole(auth()->user()?->role) ? 'Gudang' : 'Data Master';
+    }
 
     // ✅ Pakai form baru dari ProjectTemplateForm
     public static function form(Schema $schema): Schema

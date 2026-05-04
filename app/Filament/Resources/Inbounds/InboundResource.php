@@ -8,6 +8,7 @@ use App\Filament\Resources\Inbounds\Pages\ListInbounds;
 use App\Filament\Resources\Inbounds\Schemas\InboundForm;
 use App\Filament\Resources\Inbounds\Tables\InboundsTable;
 use App\Models\Inbound;
+use App\Models\User;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
@@ -24,6 +25,11 @@ class InboundResource extends Resource
     protected static ?int $navigationSort = 5;
 
     protected static ?string $recordTitleAttribute = 'Barang Masuk';
+
+    public static function getNavigationGroup(): ?string
+    {
+        return User::isGeneralManagerRole(auth()->user()?->role) ? 'Gudang' : null;
+    }
 
     public static function form(Schema $schema): Schema
     {
@@ -42,7 +48,7 @@ class InboundResource extends Resource
 
     public static function canViewAny(): bool
     {
-        return self::canManageInbound();
+        return self::canManageInbound() || User::isGeneralManagerRole(auth()->user()?->role);
     }
 
     public static function canCreate(): bool

@@ -9,6 +9,7 @@ use App\Filament\Resources\Materials\Pages\StockByLocation;
 use App\Filament\Resources\Materials\Schemas\MaterialForm;
 use App\Filament\Resources\Materials\Tables\MaterialsTable;
 use App\Models\Material;
+use App\Models\User;
 use Illuminate\Database\Eloquent\Model;
 use BackedEnum;
 use Filament\Resources\Resource;
@@ -24,6 +25,11 @@ class MaterialResource extends Resource
     protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-cube';
 
     protected static ?string $recordTitleAttribute = 'Material';
+
+    public static function getNavigationGroup(): ?string
+    {
+        return User::isGeneralManagerRole(auth()->user()?->role) ? 'Gudang' : 'Data Master';
+    }
 
     public static function form(Schema $schema): Schema
     {

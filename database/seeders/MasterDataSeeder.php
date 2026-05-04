@@ -46,6 +46,12 @@ class MasterDataSeeder extends Seeder
                 'id_custom' => 'JAU-005',
                 'role' => 'Staff Administrasi Gudang',
             ],
+            [
+                'name' => 'General Manager',
+                'email' => 'general.manager@smartinventory.test',
+                'id_custom' => 'JAU-006',
+                'role' => User::ROLE_GENERAL_MANAGER,
+            ],
         ];
 
         foreach ($users as $user) {

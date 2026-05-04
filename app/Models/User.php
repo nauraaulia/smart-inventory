@@ -11,6 +11,41 @@ class User extends Authenticatable
 {
     use HasFactory, Notifiable, SoftDeletes;
 
+    public const ROLE_GENERAL_MANAGER = 'General Manager';
+
+    public static function roleOptions(): array
+    {
+        return [
+            'Administrator IT' => 'Administrator IT',
+            self::ROLE_GENERAL_MANAGER => self::ROLE_GENERAL_MANAGER,
+            'Manager Teknik' => 'Manager Teknik',
+            'Staff Administrasi Gudang' => 'Staff Administrasi Gudang',
+            'Finance' => 'Finance',
+            'Manager Operasional' => 'Manager Operasional',
+        ];
+    }
+
+    public static function isGeneralManagerRole(?string $role): bool
+    {
+        return mb_strtolower(trim((string) $role)) === mb_strtolower(self::ROLE_GENERAL_MANAGER);
+    }
+
+    public static function nextCustomId(): string
+    {
+        $lastNumber = self::withTrashed()
+            ->pluck('id_custom')
+            ->map(function (?string $idCustom): int {
+                if (! preg_match('/^JAU-(\d+)$/', (string) $idCustom, $matches)) {
+                    return 0;
+                }
+
+                return (int) $matches[1];
+            })
+            ->max() ?? 0;
+
+        return 'JAU-'.str_pad((string) ($lastNumber + 1), 3, '0', STR_PAD_LEFT);
+    }
+
     /**
      * The attributes that are mass assignable.
      *
@@ -54,7 +89,7 @@ class User extends Authenticatable
         static::created(function (User $user): void {
             if (blank($user->id_custom)) {
                 $user->updateQuietly([
-                    'id_custom' => 'JAU-'.str_pad((string) $user->id, 3, '0', STR_PAD_LEFT),
+                    'id_custom' => self::nextCustomId(),
                 ]);
             }
 

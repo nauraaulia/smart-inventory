@@ -10,6 +10,7 @@ use App\Filament\Resources\PurchaseRequests\Schemas\PurchaseRequestForm;
 use App\Filament\Resources\PurchaseRequests\Schemas\PurchaseRequestInfolist;
 use App\Filament\Resources\PurchaseRequests\Tables\PurchaseRequestsTable;
 use App\Models\PurchaseRequest;
+use App\Models\User;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
@@ -33,7 +34,9 @@ class PurchaseRequestResource extends Resource
 
     public static function getNavigationGroup(): ?string
     {
-        return auth()->user()?->role === 'Administrator IT' ? 'Gudang' : null;
+        $role = auth()->user()?->role;
+
+        return $role === 'Administrator IT' || User::isGeneralManagerRole($role) ? 'Gudang' : null;
     }
 
     public static function form(Schema $schema): Schema
@@ -71,11 +74,20 @@ class PurchaseRequestResource extends Resource
         return $role === 'Administrator IT';
     }
 
+    private static function isGeneralManager(?string $role): bool
+    {
+        return User::isGeneralManagerRole($role);
+    }
+
     public static function canViewAny(): bool
     {
         $role = auth()->user()?->role;
 
-        return self::isGudangStaff($role) || self::isManager($role) || self::isFinance($role) || self::isAdminIt($role);
+        return self::isGudangStaff($role)
+            || self::isManager($role)
+            || self::isFinance($role)
+            || self::isAdminIt($role)
+            || self::isGeneralManager($role);
     }
 
     public static function canCreate(): bool
@@ -149,7 +161,7 @@ class PurchaseRequestResource extends Resource
             return $query;
         }
 
-        if (self::isAdminIt($user->role)) {
+        if (self::isAdminIt($user->role) || self::isGeneralManager($user->role)) {
             return $query;
         }
 
@@ -182,6 +194,8 @@ class PurchaseRequestResource extends Resource
         } elseif (self::isFinance($user->role)) {
             $query->where('status', 'pending_finance');
         } elseif (self::isAdminIt($user->role)) {
+            $query->whereIn('status', ['draft', 'rejected', 'pending_manager', 'pending_finance']);
+        } elseif (self::isGeneralManager($user->role)) {
             $query->whereIn('status', ['draft', 'rejected', 'pending_manager', 'pending_finance']);
         } else {
             return null;

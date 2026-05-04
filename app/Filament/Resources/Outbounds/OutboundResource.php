@@ -6,6 +6,7 @@ use App\Filament\Resources\Outbounds\Pages\ListOutbounds;
 use App\Filament\Resources\Outbounds\Pages\ViewOutbound;
 use App\Filament\Resources\Outbounds\Tables\OutboundsTable;
 use App\Models\Outbound;
+use App\Models\User;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Support\Icons\Heroicon;
@@ -28,7 +29,9 @@ class OutboundResource extends Resource
 
     public static function getNavigationGroup(): ?string
     {
-        return auth()->user()?->role === 'Administrator IT' ? 'Gudang' : null;
+        $role = auth()->user()?->role;
+
+        return $role === 'Administrator IT' || User::isGeneralManagerRole($role) ? 'Gudang' : null;
     }
 
     public static function canViewAny(): bool
@@ -88,6 +91,7 @@ class OutboundResource extends Resource
             'Staff Adm Gudang',
             'Staff Gudang',
             'Administrator IT',
+            User::ROLE_GENERAL_MANAGER,
         ], true);
     }
 }

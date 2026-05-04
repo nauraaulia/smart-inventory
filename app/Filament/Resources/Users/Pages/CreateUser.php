@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Users\Pages;
 
 use App\Filament\Resources\Users\UserResource;
+use App\Models\User;
 use Filament\Resources\Pages\CreateRecord;
 
 class CreateUser extends CreateRecord
@@ -16,11 +17,7 @@ class CreateUser extends CreateRecord
 
     protected function mutateFormDataBeforeCreate(array $data): array
     {
-        $lastId = \App\Models\User::withTrashed()->max('id') ?? 0;
-        
-        $nextId = $lastId + 1;
-        
-        $data['id_custom'] = 'JAU-' . str_pad($nextId, 3, '0', STR_PAD_LEFT);
+        $data['id_custom'] = User::nextCustomId();
 
         return $data;
     }

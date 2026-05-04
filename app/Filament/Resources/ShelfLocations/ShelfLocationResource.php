@@ -8,6 +8,7 @@ use App\Filament\Resources\ShelfLocations\Pages\ListShelfLocations;
 use App\Filament\Resources\ShelfLocations\Schemas\ShelfLocationForm;
 use App\Filament\Resources\ShelfLocations\Tables\ShelfLocationsTable;
 use App\Models\ShelfLocation;
+use App\Models\User;
 use BackedEnum;
 use Filament\Resources\Resource;
 use Filament\Schemas\Schema;
@@ -23,6 +24,11 @@ class ShelfLocationResource extends Resource
     protected static string|BackedEnum|null $navigationIcon = 'heroicon-o-map-pin';
 
     protected static ?string $recordTitleAttribute = 'Shelf Location';
+
+    public static function getNavigationGroup(): ?string
+    {
+        return User::isGeneralManagerRole(auth()->user()?->role) ? 'Gudang' : 'Data Master';
+    }
 
     public static function form(Schema $schema): Schema
     {

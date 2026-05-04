@@ -455,6 +455,7 @@ class ViewOutbound extends Page
             'Staff Adm Gudang',
             'Staff Gudang',
             'Administrator IT',
+            \App\Models\User::ROLE_GENERAL_MANAGER,
         ], true);
     }
 
