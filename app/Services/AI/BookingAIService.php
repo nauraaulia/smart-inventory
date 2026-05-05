@@ -464,7 +464,8 @@ class BookingAIService
                         $purchaseRecommendation,
                     );
 
-                    $hasilAnalisis[] = ['material_id' => $materialId, 'nama_material' => (string) $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => round($available, 2), 'aksi' => $aksi, 'qty_booking' => round($qtyBooking, 2), 'qty_pr' => round($qtyPr, 2), 'tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false), 'recommended_piece_ids' => collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(), 'recommended_qty' => round($qtyBooking - max(0, $remaining), 2), 'recommended_pieces' => $chosen, 'alasan_ai' => $displayReason, 'alasan_ai_gemini' => $geminiReason, 'ai_reason_source' => 'gemini', 'purchase_recommendation' => $purchaseRecommendation, 'kebutuhan_asli' => (float) ($item['qty_original'] ?? $dibutuhkan), 'kebutuhan_setelah_buffer' => $dibutuhkan, 'kebutuhan_belum_tercover' => round($qtyPr, 2)];
+                    $stockCondition = (array) data_get($stockData, (string) $materialId.'.stock_condition', []);
+                    $hasilAnalisis[] = ['material_id' => $materialId, 'nama_material' => (string) $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => round($available, 2), 'stock_condition' => $stockCondition, 'stock_condition_text' => $this->formatStockConditionForDisplay($stockCondition, $material->resolveTrackingUnit()), 'aksi' => $aksi, 'qty_booking' => round($qtyBooking, 2), 'qty_pr' => round($qtyPr, 2), 'tanpa_potongan' => (bool) ($instruksiAi['tanpa_potongan'] ?? false), 'recommended_piece_ids' => collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all(), 'recommended_qty' => round($qtyBooking - max(0, $remaining), 2), 'recommended_pieces' => $chosen, 'alasan_ai' => $displayReason, 'alasan_ai_gemini' => $geminiReason, 'ai_reason_source' => 'gemini', 'purchase_recommendation' => $purchaseRecommendation, 'kebutuhan_asli' => (float) ($item['qty_original'] ?? $dibutuhkan), 'kebutuhan_setelah_buffer' => $dibutuhkan, 'kebutuhan_belum_tercover' => round($qtyPr, 2)];
                     $rekomendasiGemini[] = ['material' => (string) $material->nama_material, 'aksi' => match ($aksi) {
                         'full_booking' => 'booking', 'partial' => 'booking sebagian + PR', 'full_pr' => 'buat PR', default => 'review manual'
                     }, 'detail' => $displayReason];
@@ -840,7 +841,7 @@ class BookingAIService
      * Keep Gemini input small while preserving enough choices for good allocation.
      *
      * @param  array<int, array<string, mixed>>  $pieces
-     * @return array<int, array{id:int,p:float,age:int,r:string}>
+     * @return array<int, array<string, mixed>>
      */
     private function compactPiecesForGemini(array $pieces, float $dibutuhkan): array
     {
@@ -884,9 +885,88 @@ class BookingAIService
                 'p' => round((float) ($piece['panjang'] ?? 0), 2),
                 'age' => (int) ($piece['umur_hari'] ?? 0),
                 'r' => (string) ($piece['rack_label'] ?? '-'),
+                'src' => (string) ($piece['inbound_type'] ?? $piece['sumber'] ?? '-'),
+                'cond' => (string) ($piece['condition'] ?? 'Bagus'),
+                'note' => mb_substr((string) ($piece['condition_note'] ?? ''), 0, 90),
             ])
             ->values()
             ->all();
+    }
+
+    private function buildStockConditionSummary(array $pieces): array
+    {
+        $summary = [
+            'total_piece' => count($pieces),
+            'retur_piece' => 0,
+            'retur_qty' => 0.0,
+            'kondisi' => [],
+            'catatan_retur' => [],
+        ];
+
+        foreach ($pieces as $piece) {
+            $condition = trim((string) ($piece['condition'] ?? 'Bagus')) ?: 'Bagus';
+            $qty = round((float) ($piece['panjang'] ?? 0), 2);
+
+            $summary['kondisi'][$condition] = round((float) ($summary['kondisi'][$condition] ?? 0) + $qty, 2);
+
+            if ((bool) ($piece['is_retur'] ?? false)) {
+                $summary['retur_piece']++;
+                $summary['retur_qty'] = round((float) $summary['retur_qty'] + $qty, 2);
+
+                $note = trim((string) ($piece['condition_note'] ?? ''));
+                if ($note !== '') {
+                    $summary['catatan_retur'][] = 'Piece #'.(int) ($piece['id'] ?? 0).': '.mb_substr($note, 0, 120);
+                }
+            }
+        }
+
+        $summary['catatan_retur'] = array_values(array_unique(array_slice($summary['catatan_retur'], 0, 5)));
+
+        return $summary;
+    }
+
+    private function formatStockConditionForDisplay(array $summary, string $satuan = 'unit'): string
+    {
+        if (empty($summary)) {
+            return '-';
+        }
+
+        $conditions = collect((array) ($summary['kondisi'] ?? []))
+            ->map(function ($qty, string $condition) use ($satuan): string {
+                $qtyText = rtrim(rtrim(number_format((float) $qty, 2, '.', ''), '0'), '.');
+
+                return "{$condition}: {$qtyText} {$satuan}";
+            })
+            ->values()
+            ->all();
+
+        $returQty = rtrim(rtrim(number_format((float) ($summary['retur_qty'] ?? 0), 2, '.', ''), '0'), '.');
+        $parts = [];
+
+        if (! empty($conditions)) {
+            $parts[] = 'Kondisi stok: '.implode(', ', $conditions);
+        }
+
+        if ((int) ($summary['retur_piece'] ?? 0) > 0) {
+            $parts[] = 'Retur available: '.(int) $summary['retur_piece'].' piece / '.$returQty.' '.$satuan;
+        }
+
+        $notes = (array) ($summary['catatan_retur'] ?? []);
+        if (! empty($notes)) {
+            $parts[] = 'Catatan retur: '.implode('; ', $notes);
+        }
+
+        return empty($parts) ? '-' : implode("\n", $parts);
+    }
+
+    private function pieceConditionFields(array $piece): array
+    {
+        return [
+            'inbound_type' => (string) ($piece['inbound_type'] ?? ''),
+            'condition' => (string) ($piece['condition'] ?? 'Bagus'),
+            'condition_note' => (string) ($piece['condition_note'] ?? ''),
+            'is_retur' => (bool) ($piece['is_retur'] ?? false),
+        ];
     }
 
     private function prepareStockDataForGemini(array $kebutuhanDelta, ?Project $project = null): array
@@ -903,15 +983,19 @@ class BookingAIService
             if (! $material) {
                 continue;
             }
-            $pieces = MaterialPiece::query()->with('inbound:id,entry_date')->where('material_id', $materialId)->where('status', 'available')->orderByRaw("CASE WHEN sumber LIKE 'split_%' THEN 0 ELSE 1 END ASC")->orderBy('panjang')->orderByRaw('COALESCE((SELECT entry_date FROM inbounds WHERE inbounds.id = material_pieces.inbound_id), material_pieces.created_at) ASC')->get(['id', 'material_id', 'inbound_id', 'panjang', 'sumber', 'shelf_location_id', 'created_at'])->map(function (MaterialPiece $piece) use ($rackMap): array {
+            $pieces = MaterialPiece::query()->with('inbound:id,entry_date,jenis_inbound,kondisi,keterangan')->where('material_id', $materialId)->where('status', 'available')->orderByRaw("CASE WHEN sumber LIKE 'split_%' THEN 0 ELSE 1 END ASC")->orderBy('panjang')->orderByRaw('COALESCE((SELECT entry_date FROM inbounds WHERE inbounds.id = material_pieces.inbound_id), material_pieces.created_at) ASC')->get(['id', 'material_id', 'inbound_id', 'panjang', 'sumber', 'shelf_location_id', 'created_at', 'keterangan'])->map(function (MaterialPiece $piece) use ($rackMap): array {
                 $ageDays = (int) now()->diffInDays($piece->inbound?->entry_date ? Carbon::parse($piece->inbound->entry_date) : $piece->created_at, false) * -1;
+                $inboundType = (string) ($piece->inbound?->jenis_inbound ?? ($piece->sumber === 'retur' ? 'Retur' : 'Baru'));
+                $condition = (string) ($piece->inbound?->kondisi ?? 'Bagus');
+                $conditionNote = trim((string) ($piece->keterangan ?: $piece->inbound?->keterangan ?: ''));
 
-                return ['id' => (int) $piece->id, 'panjang' => round((float) $piece->panjang, 2), 'sumber' => (string) $piece->sumber, 'rack_label' => (string) ($rackMap[(int) ($piece->shelf_location_id ?? 0)] ?? '-'), 'umur_hari' => max(0, $ageDays), 'shelf_location_id' => (int) ($piece->shelf_location_id ?? 0), 'status' => 'available'];
+                return ['id' => (int) $piece->id, 'panjang' => round((float) $piece->panjang, 2), 'sumber' => (string) $piece->sumber, 'inbound_type' => $inboundType, 'condition' => $condition, 'condition_note' => $conditionNote, 'is_retur' => mb_strtolower($inboundType) === 'retur' || str_contains(mb_strtolower((string) $piece->sumber), 'retur'), 'rack_label' => (string) ($rackMap[(int) ($piece->shelf_location_id ?? 0)] ?? '-'), 'umur_hari' => max(0, $ageDays), 'shelf_location_id' => (int) ($piece->shelf_location_id ?? 0), 'status' => 'available'];
             })->values()->all();
             $supplier = $material->defaultSupplier;
             $leadTimeDays = $this->resolveLeadTimeDays($material);
             $available = $this->actualAvailableQty($material);
-            $result[$materialId] = ['material_id' => $materialId, 'material_name' => (string) $material->nama_material, 'dibutuhkan' => round($dibutuhkan, 2), 'satuan' => $material->resolveTrackingUnit(), 'available' => round($available, 2), 'supplier' => ['id' => (int) ($supplier?->id ?? 0), 'name' => (string) ($supplier?->nama_supplier ?? 'Supplier belum diset'), 'lead_time_hari' => $leadTimeDays], 'purchase_context' => $this->buildPurchaseDecisionContext($project, $material, max(0, $dibutuhkan - $available)), 'pieces' => $pieces];
+            $stockCondition = $this->buildStockConditionSummary($pieces);
+            $result[$materialId] = ['material_id' => $materialId, 'material_name' => (string) $material->nama_material, 'dibutuhkan' => round($dibutuhkan, 2), 'satuan' => $material->resolveTrackingUnit(), 'available' => round($available, 2), 'stock_condition' => $stockCondition, 'stock_condition_text' => $this->formatStockConditionForDisplay($stockCondition, $material->resolveTrackingUnit()), 'supplier' => ['id' => (int) ($supplier?->id ?? 0), 'name' => (string) ($supplier?->nama_supplier ?? 'Supplier belum diset'), 'lead_time_hari' => $leadTimeDays], 'purchase_context' => $this->buildPurchaseDecisionContext($project, $material, max(0, $dibutuhkan - $available)), 'pieces' => $pieces];
         }
 
         return $result;
@@ -967,6 +1051,7 @@ class BookingAIService
                 'dibutuhkan' => $dibutuhkan,
                 'satuan' => (string) ($item['satuan'] ?? 'unit'),
                 'available' => round((float) ($stock['available'] ?? 0), 2),
+                'stock_condition' => (array) ($stock['stock_condition'] ?? []),
                 'supplier' => [
                     'name' => (string) ($supplier['name'] ?? 'Supplier belum diset'),
                     'lead_time_hari' => max(0, (int) ($supplier['lead_time_hari'] ?? 7)),
@@ -1013,7 +1098,8 @@ Proyek: {$projectCode} (ID {$projectId})
 Instruksi manager: {$catatanPrompt}
 Data material: {$dataJson}
     Aturan: gunakan piece id dari data, ambil_panjang <= panjang piece, jika instruksi berisi segmen angka maka require_no_joint=true dan alokasi per segmen.
-    Field piece: id=id, p=panjang/qty, age=umur hari, r=rak.
+    Field piece: id=id, p=panjang/qty, age=umur hari, r=rak, src=asal inbound, cond=kondisi, note=catatan kondisi/retur.
+    Pertimbangkan kondisi stok. Retur/cacat ringan boleh dipilih kalau masih layak dan cocok, tapi jelaskan catatannya. Hindari cond Cacat Berat kecuali tidak ada opsi lain dan beri alasan jelas untuk staff gudang.
     Untuk setiap alokasi_kabel.alasan dan alasan_per_piece: jelaskan kenapa piece itu dipakai untuk orang gudang. Wajib sebut dasar pilihnya: FIFO/stok lebih lama, panjang paling mendekati kebutuhan, minim sisa/potongan, instruksi manager, atau rak/piece preferensi. Sertakan ambil berapa dari panjang total dan sisa berapa. Jangan terlalu pendek seperti "stok cukup", tapi jangan bertele-tele.
 
 Output schema:
@@ -1386,6 +1472,7 @@ PROMPT;
             }
 
             $purchaseRecommendation = (array) ($row['purchase_recommendation'] ?? []);
+            $stockCondition = (array) ($row['stock_condition'] ?? []);
 
             return [
                 'material_id' => $materialId,
@@ -1393,6 +1480,10 @@ PROMPT;
                 'dibutuhkan' => round($dibutuhkan, 2),
                 'satuan' => $satuan,
                 'available_qty' => round((float) ($row['available'] ?? $row['available_qty'] ?? 0), 2),
+                'stock_condition' => $stockCondition,
+                'stock_condition_text' => trim((string) ($row['stock_condition_text'] ?? '')) !== ''
+                    ? (string) $row['stock_condition_text']
+                    : $this->formatStockConditionForDisplay($stockCondition, $satuan),
                 'recommended_booking_qty' => round((float) ($row['qty_booking'] ?? 0), 2),
                 'recommended_pr_qty' => round((float) ($row['qty_pr'] ?? 0), 2),
                 'recommended_piece_ids' => collect($row['recommended_piece_ids'] ?? [])->map(fn ($id): int => (int) $id)->filter(fn (int $id): bool => $id > 0)->values()->all(),
@@ -1661,7 +1752,7 @@ PROMPT;
                 'age_days' => (int) ($piece['umur_hari'] ?? 0),
                 'shelf_location_id' => (int) ($piece['shelf_location_id'] ?? 0),
                 'rack_label' => (string) ($piece['rack_label'] ?? '-'),
-            ];
+            ] + $this->pieceConditionFields($piece);
         }
 
         return ['chosen' => $chosen, 'remaining' => max(0, round($qtyBooking - $allocTotal, 2))];
@@ -1684,7 +1775,7 @@ PROMPT;
                 continue;
             }
             $takeQty = min($pieceLength, $remaining);
-            $chosen[] = ['id' => (int) $pieceId, 'panjang' => round($pieceLength, 2), 'take_qty' => round($takeQty, 2), 'sumber' => (string) ($piece['sumber'] ?? '-'), 'age_days' => (int) ($piece['umur_hari'] ?? 0), 'shelf_location_id' => (int) ($piece['shelf_location_id'] ?? 0), 'rack_label' => (string) ($piece['rack_label'] ?? '-')];
+            $chosen[] = ['id' => (int) $pieceId, 'panjang' => round($pieceLength, 2), 'take_qty' => round($takeQty, 2), 'sumber' => (string) ($piece['sumber'] ?? '-'), 'age_days' => (int) ($piece['umur_hari'] ?? 0), 'shelf_location_id' => (int) ($piece['shelf_location_id'] ?? 0), 'rack_label' => (string) ($piece['rack_label'] ?? '-')] + $this->pieceConditionFields($piece);
             $remaining -= $takeQty;
         }
 
@@ -2065,7 +2156,7 @@ PROMPT;
                 'rack_label' => (string) ($piece['rack_label'] ?? '-'),
                 'sumber' => (string) ($piece['sumber'] ?? '-'),
                 'shelf_location_id' => (int) ($piece['shelf_location_id'] ?? 0),
-            ])
+            ] + $this->pieceConditionFields($piece))
             ->filter(fn (array $piece): bool => $piece['id'] > 0 && $piece['panjang'] > 0)
             ->values();
 
@@ -2095,7 +2186,7 @@ PROMPT;
                 'age_days' => (int) ($candidate['umur_hari'] ?? 0),
                 'shelf_location_id' => (int) ($candidate['shelf_location_id'] ?? 0),
                 'rack_label' => (string) ($candidate['rack_label'] ?? '-'),
-            ];
+            ] + $this->pieceConditionFields($candidate);
         }
 
         return ['chosen' => $chosen, 'remaining' => 0.0];
@@ -2384,6 +2475,9 @@ PROMPT;
             $fallbackAnalisa['recommended_piece_ids'] = collect($chosen)->pluck('id')->map(fn ($id): int => (int) $id)->values()->all();
             $fallbackAnalisa['recommended_qty'] = round((float) ($fallbackAnalisa['qty_booking'] ?? 0) - max(0, $remaining), 2);
             $fallbackAnalisa['recommended_pieces'] = $chosen;
+            $stockCondition = (array) data_get($stockData, (string) $material->id.'.stock_condition', []);
+            $fallbackAnalisa['stock_condition'] = $stockCondition;
+            $fallbackAnalisa['stock_condition_text'] = $this->formatStockConditionForDisplay($stockCondition, $material->resolveTrackingUnit());
             $fallbackAnalisa['alasan_ai_gemini'] = '';
             $fallbackAnalisa['purchase_recommendation'] = $this->buildPurchaseRecommendation(
                 project: Project::query()->find($projectId),

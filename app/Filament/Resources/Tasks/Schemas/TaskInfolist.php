@@ -73,13 +73,24 @@ class TaskInfolist
                                         $length = rtrim(rtrim(number_format((float) ($piece['panjang'] ?? 0), 2, '.', ''), '0'), '.');
                                         $rack = (string) ($piece['rack_label'] ?? '-');
                                         $pieceReason = trim((string) ($piece['reason'] ?? ''));
+                                        $condition = trim((string) ($piece['condition'] ?? 'Bagus')) ?: 'Bagus';
+                                        $inboundType = trim((string) ($piece['inbound_type'] ?? ''));
+                                        $conditionNote = trim((string) ($piece['condition_note'] ?? ''));
                                         $line = "Piece #{$id}: ambil {$take} dari {$length} {$unit}, Rak {$rack}";
+                                        if ((bool) ($piece['is_retur'] ?? false) || $condition !== 'Bagus' || $conditionNote !== '') {
+                                            $line .= ' | Kondisi: '.trim($condition.($inboundType !== '' ? " ({$inboundType})" : ''));
+                                            if ($conditionNote !== '') {
+                                                $line .= " | Catatan: {$conditionNote}";
+                                            }
+                                        }
 
                                         return $pieceReason !== '' ? "{$line} | Alasan: {$pieceReason}" : $line;
                                     })
                                     ->implode("\n");
+                                $stockCondition = trim((string) ($item['stock_condition_text'] ?? ''));
+                                $stockConditionLine = $stockCondition !== '' && $stockCondition !== '-' ? "\n{$stockCondition}" : '';
 
-                                return trim("{$material}\nBooking: {$booking} {$unit}; PR: {$pr} {$unit}\n{$pieces}\nAnalisis: {$reason}");
+                                return trim("{$material}\nBooking: {$booking} {$unit}; PR: {$pr} {$unit}{$stockConditionLine}\n{$pieces}\nAnalisis: {$reason}");
                             })
                             ->implode("\n\n");
                     })

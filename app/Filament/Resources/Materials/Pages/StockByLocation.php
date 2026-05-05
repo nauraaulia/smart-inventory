@@ -190,11 +190,17 @@ class StockByLocation extends Page
         $query = MaterialPiece::query()
             ->leftJoin('materials', 'materials.id', '=', 'material_pieces.material_id')
             ->leftJoin('shelf_locations', 'shelf_locations.id', '=', 'material_pieces.shelf_location_id')
+            ->leftJoin('inbounds', 'inbounds.id', '=', 'material_pieces.inbound_id')
             ->whereIn('status', ['available', 'booked'])
             ->selectRaw('material_pieces.id as piece_id')
             ->selectRaw('material_pieces.piece_code as piece_code')
             ->selectRaw('material_pieces.panjang as piece_qty')
             ->selectRaw('material_pieces.status as piece_status')
+            ->selectRaw('material_pieces.sumber as piece_source')
+            ->selectRaw('material_pieces.keterangan as piece_note')
+            ->selectRaw("COALESCE(inbounds.jenis_inbound, '') as inbound_type")
+            ->selectRaw("COALESCE(inbounds.kondisi, 'Bagus') as inbound_condition")
+            ->selectRaw("COALESCE(inbounds.keterangan, '') as inbound_note")
             ->selectRaw("COALESCE(shelf_locations.kode_lokasi, 'TANPA RAK') as shelf_code")
             ->selectRaw("COALESCE(shelf_locations.nama_lokasi, 'Tanpa lokasi rak') as shelf_name")
             ->selectRaw('materials.kode_material as material_code')
@@ -236,6 +242,10 @@ class StockByLocation extends Page
                 $availableQty = $pieceStatus === 'available' ? $pieceQty : 0.0;
                 $bookedQty = $pieceStatus === 'booked' ? $pieceQty : 0.0;
                 $unit = (string) ($row->unit ?: 'unit');
+                $inboundType = (string) ($row->inbound_type ?: '');
+                $condition = (string) ($row->inbound_condition ?: 'Bagus');
+                $conditionNote = trim((string) ($row->piece_note ?: $row->inbound_note ?: ''));
+                $isRetur = mb_strtolower($inboundType) === 'retur' || str_contains(mb_strtolower((string) $row->piece_source), 'retur');
                 $isDiscreteUnit = Material::usesDiscreteUnitTrackingFor(
                     satuan: $unit,
                     defaultRollLength: $row->default_roll_length,
@@ -251,6 +261,10 @@ class StockByLocation extends Page
                     'piece_qty' => round($pieceQty, 2),
                     'piece_label' => $isDiscreteUnit ? 'Unit' : 'Piece',
                     'piece_status' => $pieceStatus,
+                    'condition' => $condition,
+                    'condition_note' => $conditionNote,
+                    'inbound_type' => $inboundType,
+                    'is_retur' => $isRetur,
                     'available_qty' => round($availableQty, 2),
                     'booked_qty' => round($bookedQty, 2),
                     'total_qty' => round($pieceQty, 2),

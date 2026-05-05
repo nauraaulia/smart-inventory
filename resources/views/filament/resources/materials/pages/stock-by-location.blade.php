@@ -69,6 +69,7 @@
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Kode Item</th>
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Qty per Item</th>
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Status</th>
+                                    <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Kondisi</th>
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Available</th>
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Booked</th>
                                     <th class="border-b border-gray-200 p-3 text-left font-semibold dark:border-white/10">Total</th>
@@ -90,6 +91,14 @@
                                             <span class="inline-flex rounded-md px-2 py-1 text-xs font-medium {{ $row['piece_status'] === 'booked' ? 'bg-warning-50 text-warning-700 dark:bg-warning-900/30 dark:text-warning-300' : 'bg-success-50 text-success-700 dark:bg-success-900/30 dark:text-success-300' }}">
                                                 {{ ucfirst($row['piece_status']) }}
                                             </span>
+                                        </td>
+                                        <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">
+                                            <div class="font-medium {{ $row['condition'] !== 'Bagus' ? 'text-danger-700 dark:text-danger-300' : 'text-gray-900 dark:text-white' }}">
+                                                {{ $row['condition'] }}{{ $row['is_retur'] ? ' (Retur)' : '' }}
+                                            </div>
+                                            @if ($row['condition_note'] !== '')
+                                                <div class="mt-1 max-w-xs text-xs text-gray-500 dark:text-gray-400">{{ $row['condition_note'] }}</div>
+                                            @endif
                                         </td>
                                         <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">{{ number_format((float) $row['available_qty'], 2, '.', '') }} {{ $row['unit'] }}</td>
                                         <td class="border-b border-gray-200 p-3 align-top dark:border-white/10">{{ number_format((float) $row['booked_qty'], 2, '.', '') }} {{ $row['unit'] }}</td>

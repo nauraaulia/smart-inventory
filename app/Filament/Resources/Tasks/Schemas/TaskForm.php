@@ -140,6 +140,10 @@ class TaskForm
                                             $age = (int) data_get($piece, 'age_days', 0);
                                             $rack = (string) data_get($piece, 'rack_label', '-');
                                             $reason = trim((string) data_get($piece, 'reason', ''));
+                                            $condition = trim((string) data_get($piece, 'condition', 'Bagus')) ?: 'Bagus';
+                                            $inboundType = trim((string) data_get($piece, 'inbound_type', ''));
+                                            $conditionNote = trim((string) data_get($piece, 'condition_note', ''));
+                                            $isRetur = (bool) data_get($piece, 'is_retur', false);
                                             $totalText = rtrim(rtrim(number_format($len, 2, '.', ''), '0'), '.');
                                             $takeText = rtrim(rtrim(number_format($take, 2, '.', ''), '0'), '.');
                                             $sisaText = rtrim(rtrim(number_format(max(0, $len - $take), 2, '.', ''), '0'), '.');
@@ -154,6 +158,13 @@ class TaskForm
                                             } else {
                                                 $text .= ' | Ambil utuh';
                                             }
+                                            if ($isRetur || $condition !== 'Bagus' || $conditionNote !== '') {
+                                                $label = trim($condition.($inboundType !== '' ? " ({$inboundType})" : ''));
+                                                $text .= "\n  Kondisi: {$label}";
+                                                if ($conditionNote !== '') {
+                                                    $text .= " | Catatan: {$conditionNote}";
+                                                }
+                                            }
                                             if ($reason !== '') {
                                                 $text .= "\n  Alasan: {$reason}";
                                             }
@@ -165,6 +176,12 @@ class TaskForm
                                     })
                                     ->disabled()
                                     ->dehydrated(false),
+                                Textarea::make('stock_condition_text')
+                                    ->label('Kondisi Stok Material')
+                                    ->rows(3)
+                                    ->disabled()
+                                    ->dehydrated(false)
+                                    ->columnSpanFull(),
                                 Textarea::make('ai_reason')
                                     ->label('Analisis AI')
                                     ->rows(5)

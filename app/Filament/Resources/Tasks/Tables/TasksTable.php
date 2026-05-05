@@ -154,6 +154,10 @@ class TasksTable
                                         $rack = (string) ($piece['rack_label'] ?? '-');
                                         $age = (int) ($piece['age_days'] ?? 0);
                                         $reason = trim((string) ($piece['reason'] ?? ''));
+                                        $condition = trim((string) ($piece['condition'] ?? 'Bagus')) ?: 'Bagus';
+                                        $inboundType = trim((string) ($piece['inbound_type'] ?? ''));
+                                        $conditionNote = trim((string) ($piece['condition_note'] ?? ''));
+                                        $isRetur = (bool) ($piece['is_retur'] ?? false);
 
                                         $text = "{$itemLabel} #{$id} | {$total} {$satuan} | Rak {$rack} | Masuk {$age} hari lalu";
                                         if ((float) ($piece['take_qty'] ?? 0) < (float) ($piece['panjang'] ?? 0)) {
@@ -164,6 +168,13 @@ class TasksTable
                                             }
                                         } else {
                                             $text .= ' | Ambil utuh';
+                                        }
+                                        if ($isRetur || $condition !== 'Bagus' || $conditionNote !== '') {
+                                            $label = trim($condition.($inboundType !== '' ? " ({$inboundType})" : ''));
+                                            $text .= "\n  Kondisi: {$label}";
+                                            if ($conditionNote !== '') {
+                                                $text .= " | Catatan: {$conditionNote}";
+                                            }
                                         }
                                         if ($reason !== '') {
                                             $text .= "\n  Alasan: {$reason}";
@@ -185,6 +196,7 @@ class TasksTable
                                         2
                                     )),
                                     'recommended_pieces_text' => $recommendedPieces !== '' ? $recommendedPieces : '-',
+                                    'stock_condition_text' => (string) ($item['stock_condition_text'] ?? '-'),
                                     'purchase_recommendation_text' => (string) ($item['purchase_recommendation_text'] ?? '-'),
                                     'ai_reason' => (string) ($item['ai_reason'] ?? '-'),
                                     'status' => 'pending',
@@ -230,6 +242,11 @@ class TasksTable
                                         Textarea::make('recommended_pieces_text')
                                             ->label('Detail Piece')
                                             ->rows(5)
+                                            ->disabled()
+                                            ->dehydrated(false),
+                                        Textarea::make('stock_condition_text')
+                                            ->label('Kondisi Stok Material')
+                                            ->rows(3)
                                             ->disabled()
                                             ->dehydrated(false),
                                         Textarea::make('ai_reason')
