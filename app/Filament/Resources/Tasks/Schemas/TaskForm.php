@@ -114,7 +114,7 @@ class TaskForm
                                     ->disabled(),
                                 Textarea::make('purchase_recommendation_text')
                                     ->label('Rekomendasi Pembelian')
-                                    ->rows(4)
+                                    ->rows(6)
                                     ->visible(fn (Get $get): bool => (float) ($get('recommended_pr_qty') ?? 0) > 0)
                                     ->disabled()
                                     ->dehydrated(false)
@@ -139,6 +139,7 @@ class TaskForm
                                             $len = (float) data_get($piece, 'panjang', 0);
                                             $age = (int) data_get($piece, 'age_days', 0);
                                             $rack = (string) data_get($piece, 'rack_label', '-');
+                                            $reason = trim((string) data_get($piece, 'reason', ''));
                                             $totalText = rtrim(rtrim(number_format($len, 2, '.', ''), '0'), '.');
                                             $takeText = rtrim(rtrim(number_format($take, 2, '.', ''), '0'), '.');
                                             $sisaText = rtrim(rtrim(number_format(max(0, $len - $take), 2, '.', ''), '0'), '.');
@@ -153,6 +154,9 @@ class TaskForm
                                             } else {
                                                 $text .= ' | Ambil utuh';
                                             }
+                                            if ($reason !== '') {
+                                                $text .= "\n  Alasan: {$reason}";
+                                            }
 
                                             return $text;
                                         })->values()->all();
@@ -163,7 +167,7 @@ class TaskForm
                                     ->dehydrated(false),
                                 Textarea::make('ai_reason')
                                     ->label('Analisis AI')
-                                    ->rows(2)
+                                    ->rows(5)
                                     ->disabled()
                                     ->dehydrated(false)
                                     ->columnSpanFull(),

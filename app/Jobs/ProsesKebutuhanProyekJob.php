@@ -126,10 +126,12 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
     public function failed(Throwable $e): void
     {
         $fallbackRecovered = false;
+        $errorMessage = trim((string) $e->getMessage());
+        $isGeminiQuotaOrCooldown = $this->isGeminiQuotaOrCooldown($errorMessage);
 
         try {
             $project = Project::with('items.material')->find($this->projectId);
-            if ($project) {
+            if ($project && ! $isGeminiQuotaOrCooldown) {
                 $kebutuhan = $project->items->map(fn ($item) => [
                     'material_id' => $item->material_id,
                     'qty' => $item->jumlah_diminta,
@@ -172,14 +174,16 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
 
         if ($task) {
             $payload = is_array($task->payload) ? $task->payload : [];
-            data_set($payload, 'ai_error.message', trim((string) $e->getMessage()));
+            data_set($payload, 'ai_error.message', $errorMessage);
             data_set($payload, 'ai_error.failed_at', now()->toDateTimeString());
             data_set($payload, 'ai_error.retries', (int) $this->tries);
             data_set($payload, 'last_synced_at', now()->toDateTimeString());
 
             $updateData = ['payload' => $payload];
             if (! $fallbackRecovered) {
-                $updateData['message'] = 'AI gagal setelah '.(int) $this->tries.' percobaan: '.trim((string) $e->getMessage());
+                $updateData['message'] = $isGeminiQuotaOrCooldown
+                    ? 'Gemini terkena quota/rate limit setelah '.(int) $this->tries.' percobaan. Rekomendasi fallback PHP tidak dijalankan agar hasil tetap menunggu Gemini.'
+                    : 'AI gagal setelah '.(int) $this->tries.' percobaan: '.$errorMessage;
             }
 
             $task->update($updateData);
@@ -188,13 +192,25 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
         Log::error('AI job gagal setelah retry maksimal', [
             'project_id' => $this->projectId,
             'tries' => $this->tries,
-            'error' => $e->getMessage(),
+            'error' => $errorMessage,
+            'fallback_skipped' => $isGeminiQuotaOrCooldown,
         ]);
 
         $project = Project::query()->find($this->projectId, ['id', 'kode_proyek']);
         if ($project && $this->sendNotifications) {
-            $this->notifyGeminiFailed($project, trim((string) $e->getMessage()));
+            $this->notifyGeminiFailed($project, $errorMessage, $isGeminiQuotaOrCooldown);
         }
+    }
+
+    private function isGeminiQuotaOrCooldown(string $message): bool
+    {
+        $text = mb_strtolower($message);
+
+        return str_contains($text, 'quota')
+            || str_contains($text, 'rate limit')
+            || str_contains($text, 'rate limited')
+            || str_contains($text, 'cooldown aktif')
+            || str_contains($text, 'resource_exhausted');
     }
 
     private function notifyGeminiProcessing(Project $project): void
@@ -228,10 +244,12 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
         $this->sendToRelevantUsers($notification);
     }
 
-    private function notifyGeminiFailed(Project $project, string $errorMessage): void
+    private function notifyGeminiFailed(Project $project, string $errorMessage, bool $fallbackSkipped = false): void
     {
         $projectCode = (string) ($project->kode_proyek ?: ('#'.$project->id));
-        $body = 'Gemini gagal memproses rekomendasi. Sistem fallback tetap dijalankan.';
+        $body = $fallbackSkipped
+            ? 'Gemini terkena quota/rate limit. Fallback PHP tidak dijalankan agar rekomendasi menunggu Gemini.'
+            : 'Gemini gagal memproses rekomendasi. Sistem fallback hanya dijalankan untuk error non-quota.';
         if ($errorMessage !== '') {
             $body .= ' Detail: '.mb_substr($errorMessage, 0, 180);
         }

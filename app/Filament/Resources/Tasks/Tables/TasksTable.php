@@ -153,6 +153,7 @@ class TasksTable
                                         $sisa = rtrim(rtrim(number_format((float) ($piece['panjang'] ?? 0) - (float) ($piece['take_qty'] ?? 0), 2, '.', ''), '0'), '.');
                                         $rack = (string) ($piece['rack_label'] ?? '-');
                                         $age = (int) ($piece['age_days'] ?? 0);
+                                        $reason = trim((string) ($piece['reason'] ?? ''));
 
                                         $text = "{$itemLabel} #{$id} | {$total} {$satuan} | Rak {$rack} | Masuk {$age} hari lalu";
                                         if ((float) ($piece['take_qty'] ?? 0) < (float) ($piece['panjang'] ?? 0)) {
@@ -163,6 +164,9 @@ class TasksTable
                                             }
                                         } else {
                                             $text .= ' | Ambil utuh';
+                                        }
+                                        if ($reason !== '') {
+                                            $text .= "\n  Alasan: {$reason}";
                                         }
 
                                         return $text;
@@ -218,18 +222,19 @@ class TasksTable
                                             ->dehydrated(false),
                                         Textarea::make('purchase_recommendation_text')
                                             ->label('Rekomendasi Pembelian')
-                                            ->rows(4)
+                                            ->rows(6)
                                             ->visible(fn (Get $get): bool => (float) ($get('qty_pr') ?? 0) > 0)
                                             ->disabled()
                                             ->dehydrated(false)
                                             ->columnSpanFull(),
-                                        TextInput::make('recommended_pieces_text')
+                                        Textarea::make('recommended_pieces_text')
                                             ->label('Detail Piece')
+                                            ->rows(5)
                                             ->disabled()
                                             ->dehydrated(false),
                                         Textarea::make('ai_reason')
                                             ->label('Analisis AI')
-                                            ->rows(2)
+                                            ->rows(5)
                                             ->disabled()
                                             ->dehydrated(false),
                                         Select::make('status')

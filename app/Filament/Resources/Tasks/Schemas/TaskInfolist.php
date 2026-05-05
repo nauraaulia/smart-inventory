@@ -51,6 +51,40 @@ class TaskInfolist
                 TextEntry::make('payload.approval_trail.staff.status')
                     ->label('ACC Staff')
                     ->placeholder('-'),
+                TextEntry::make('payload.items')
+                    ->label('Rekomendasi Booking/PR')
+                    ->visible(fn ($record) => (string) data_get($record, 'type', '') === 'ai_booking_suggestion')
+                    ->formatStateUsing(function ($state): string {
+                        if (! is_array($state) || empty($state)) {
+                            return '-';
+                        }
+
+                        return collect($state)
+                            ->map(function (array $item): string {
+                                $material = (string) ($item['material_name'] ?? '-');
+                                $unit = (string) ($item['satuan'] ?? 'unit');
+                                $booking = rtrim(rtrim(number_format((float) ($item['recommended_booking_qty'] ?? $item['recommended_qty'] ?? 0), 2, '.', ''), '0'), '.');
+                                $pr = rtrim(rtrim(number_format((float) ($item['recommended_pr_qty'] ?? 0), 2, '.', ''), '0'), '.');
+                                $reason = trim((string) ($item['ai_reason'] ?? ''));
+                                $pieces = collect($item['recommended_pieces'] ?? [])
+                                    ->map(function (array $piece) use ($unit): string {
+                                        $id = (int) ($piece['id'] ?? 0);
+                                        $take = rtrim(rtrim(number_format((float) ($piece['take_qty'] ?? 0), 2, '.', ''), '0'), '.');
+                                        $length = rtrim(rtrim(number_format((float) ($piece['panjang'] ?? 0), 2, '.', ''), '0'), '.');
+                                        $rack = (string) ($piece['rack_label'] ?? '-');
+                                        $pieceReason = trim((string) ($piece['reason'] ?? ''));
+                                        $line = "Piece #{$id}: ambil {$take} dari {$length} {$unit}, Rak {$rack}";
+
+                                        return $pieceReason !== '' ? "{$line} | Alasan: {$pieceReason}" : $line;
+                                    })
+                                    ->implode("\n");
+
+                                return trim("{$material}\nBooking: {$booking} {$unit}; PR: {$pr} {$unit}\n{$pieces}\nAnalisis: {$reason}");
+                            })
+                            ->implode("\n\n");
+                    })
+                    ->placeholder('-')
+                    ->columnSpanFull(),
                 TextEntry::make('payload.execution_result.allocated_total_qty')
                     ->label('Qty Berhasil Dialokasikan')
                     ->visible(fn ($record) => (string) data_get($record, 'type', '') === 'ai_inbound_allocation_suggestion')

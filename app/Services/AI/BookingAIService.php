@@ -7,6 +7,7 @@ use App\Models\MaterialPiece;
 use App\Models\Project;
 use App\Models\PurchaseRequest;
 use App\Models\ShelfLocation;
+use App\Models\Supplier;
 use App\Models\Task;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
@@ -49,7 +50,7 @@ class BookingAIService
 
             $this->sinkronTaskSedangDiproses($projectId, $projectCode, $catatanTeknis, null, $triggerSource);
 
-            $stockData = $this->prepareStockDataForGemini($kebutuhanDelta);
+            $stockData = $this->prepareStockDataForGemini($kebutuhanDelta, $project);
             $kebutuhanItems = collect($kebutuhanDelta)->map(function (array $item): array {
                 $material = Material::query()->find((int) $item['material_id']);
 
@@ -96,10 +97,27 @@ class BookingAIService
                 $errorMessage = trim((string) $e->getMessage());
 
                 if ($this->isQuotaGeminiException($errorMessage)) {
+                    if ($allowRetryOnTransient) {
+                        $this->sinkronTaskSedangDiproses(
+                            $projectId,
+                            $projectCode,
+                            $catatanTeknis,
+                            'Gemini sedang terkena quota/rate limit. Rekomendasi AI belum diganti fallback PHP; sistem akan retry sesuai queue.',
+                            $triggerSource,
+                        );
+
+                        Log::warning('Gemini quota/rate limit, fallback lokal ditahan agar tidak menimpa rekomendasi AI.', [
+                            'project_id' => $projectId,
+                            'error' => $errorMessage,
+                        ]);
+
+                        throw $e;
+                    }
+
                     $geminiFailedTotal = true;
                     $geminiFailureReason = 'API Quota Limit Terlampaui';
 
-                    Log::warning('Gemini quota habis, langsung pindah ke fallback lokal.', [
+                    Log::warning('Gemini quota habis, fallback lokal dipakai karena caller mengizinkan fallback.', [
                         'project_id' => $projectId,
                         'error' => $errorMessage,
                     ]);
@@ -119,7 +137,7 @@ class BookingAIService
                 if (! $allowRetryOnTransient) {
                     $geminiFailedTotal = true;
                     $geminiFailureReason = $errorMessage;
-                    Log::warning('Gemini gagal, fallback darurat lokal dipakai.', [
+                    Log::warning('Gemini gagal setelah mekanisme retry/repair, fallback lokal dipakai sebagai last resort.', [
                         'project_id' => $projectId,
                         'error' => $errorMessage,
                     ]);
@@ -325,6 +343,8 @@ class BookingAIService
                             $alasanPerPiece = array_merge($alasanPerPiece, $allocReasonByPiece);
                         }
                     }
+
+                    $chosen = $this->attachReasonsToChosenPieces($chosen, $alasanPerPiece);
 
                     if ((bool) ($instruksiAi['require_no_joint'] ?? false) && ! empty($normalizedSegments) && empty($chosen)) {
                         $shouldUsePureFallback = true;
@@ -542,13 +562,93 @@ class BookingAIService
         return $leadTime > 0 ? $leadTime : 7;
     }
 
-    private function buildPurchaseRecommendation(?Project $project, Material $material, float $qtyPr, array $geminiNode = []): array
+    private function buildPurchaseDecisionContext(?Project $project, Material $material, float $qtyShortage): array
     {
         $supplier = $material->relationLoaded('defaultSupplier')
             ? $material->defaultSupplier
             : $material->defaultSupplier()->first(['id', 'nama_supplier', 'lead_time_hari']);
-        $leadTimeDays = $this->resolveLeadTimeDays($material->setRelation('defaultSupplier', $supplier));
+        $material->setRelation('defaultSupplier', $supplier);
+
+        $leadTimeDays = $this->resolveLeadTimeDays($material);
         $targetReadyDate = $this->targetReadyDate($project);
+        $today = now()->startOfDay();
+        $readyDate = $targetReadyDate ?? $today->copy()->addDays($leadTimeDays + 7);
+        $latestOrderDate = $readyDate->copy()->subDays($leadTimeDays)->startOfDay();
+        $daysUntilLatestOrder = (int) $today->diffInDays($latestOrderDate, false);
+        $fastestSupplier = $this->fastestSupplierContext($material, $supplier);
+        $supplierHistory = $this->supplierHistoryContext($material, $supplier);
+
+        return [
+            'today' => $today->toDateString(),
+            'tanggal_mulai' => blank($project?->tanggal_mulai) ? null : Carbon::parse($project->tanggal_mulai)->toDateString(),
+            'h_minus_persiapan' => max(0, (int) ($project?->h_minus_persiapan ?? 0)),
+            'target_ready_date' => $readyDate->toDateString(),
+            'qty_shortage' => round(max(0, $qtyShortage), 2),
+            'supplier_name' => (string) ($supplier?->nama_supplier ?? 'Supplier belum diset'),
+            'lead_time_hari' => $leadTimeDays,
+            'latest_normal_order_date' => $latestOrderDate->toDateString(),
+            'days_until_latest_order' => $daysUntilLatestOrder,
+            'fastest_supplier' => $fastestSupplier,
+            'supplier_history' => $supplierHistory,
+            'express_required_by_data' => max(0, $qtyShortage) > 0.00001 && $daysUntilLatestOrder < 0,
+        ];
+    }
+
+    private function fastestSupplierContext(Material $material, $defaultSupplier): array
+    {
+        $supplierIds = MaterialPiece::query()
+            ->where('material_id', $material->id)
+            ->whereNotNull('supplier_id')
+            ->distinct()
+            ->pluck('supplier_id')
+            ->map(fn ($id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->values();
+
+        if ((int) ($defaultSupplier?->id ?? 0) > 0) {
+            $supplierIds->push((int) $defaultSupplier->id);
+        }
+
+        $supplier = Supplier::query()
+            ->when($supplierIds->isNotEmpty(), fn ($query) => $query->whereIn('id', $supplierIds->unique()->values()->all()))
+            ->when($supplierIds->isEmpty(), fn ($query) => $query->whereHas('materials', fn ($materialQuery) => $materialQuery->whereKey($material->id)))
+            ->orderBy('lead_time_hari')
+            ->first(['id', 'nama_supplier', 'lead_time_hari']);
+
+        $supplier ??= $defaultSupplier;
+
+        return [
+            'name' => (string) ($supplier?->nama_supplier ?? 'Supplier belum diset'),
+            'lead_time_hari' => max(0, (int) ($supplier?->lead_time_hari ?? $this->resolveLeadTimeDays($material))),
+        ];
+    }
+
+    private function supplierHistoryContext(Material $material, $supplier): array
+    {
+        $supplierId = (int) ($supplier?->id ?? 0);
+        $query = MaterialPiece::query()
+            ->where('material_id', $material->id)
+            ->whereNotNull('supplier_id');
+
+        if ($supplierId > 0) {
+            $query->where('supplier_id', $supplierId);
+        }
+
+        $totalInboundPieces = (int) (clone $query)->count();
+        $lastInboundAt = (clone $query)
+            ->whereNotNull('created_at')
+            ->latest('created_at')
+            ->value('created_at');
+
+        return [
+            'total_pieces_from_supplier' => $totalInboundPieces,
+            'last_inbound_at' => $lastInboundAt ? Carbon::parse($lastInboundAt)->toDateString() : null,
+        ];
+    }
+
+    private function buildPurchaseRecommendation(?Project $project, Material $material, float $qtyPr, array $geminiNode = []): array
+    {
+        $context = $this->buildPurchaseDecisionContext($project, $material, $qtyPr);
 
         if ($qtyPr <= 0.00001) {
             return [
@@ -556,36 +656,66 @@ class BookingAIService
                 'urgency_label' => 'Tidak perlu beli',
                 'recommended_purchase_date' => null,
                 'latest_order_date' => null,
-                'target_ready_date' => $targetReadyDate?->toDateString(),
-                'lead_time_hari' => $leadTimeDays,
-                'supplier_name' => (string) ($supplier?->nama_supplier ?? 'Supplier belum diset'),
+                'target_ready_date' => (string) ($context['target_ready_date'] ?? ''),
+                'lead_time_hari' => (int) ($context['lead_time_hari'] ?? 0),
+                'supplier_name' => (string) ($context['supplier_name'] ?? 'Supplier belum diset'),
+                'purchase_mode' => 'none',
+                'express_required_by_data' => false,
+                'risk_if_delayed' => '',
+                'priority_reason' => '',
                 'reason' => 'Stok yang bisa dibooking sudah menutup kebutuhan, jadi belum perlu pembelian tambahan untuk material ini.',
+                'decision_context' => $context,
             ];
         }
 
-        $today = now()->startOfDay();
-        $readyDate = $targetReadyDate ?? $today->copy()->addDays($leadTimeDays + 7);
-        $latestOrderDate = $readyDate->copy()->subDays($leadTimeDays)->startOfDay();
-        $daysUntilLatestOrder = (int) $today->diffInDays($latestOrderDate, false);
-        $urgency = $this->purchaseUrgencyFromDays($daysUntilLatestOrder);
-        $recommendedPurchaseDate = $latestOrderDate->lessThanOrEqualTo($today) ? $today : $latestOrderDate;
-        $supplierName = (string) ($supplier?->nama_supplier ?? 'Supplier belum diset');
+        $daysUntilLatestOrder = (int) ($context['days_until_latest_order'] ?? 0);
+        $latestOrderDate = Carbon::parse((string) ($context['latest_normal_order_date'] ?? now()->toDateString()))->startOfDay();
+        $recommendedPurchaseDate = $latestOrderDate->lessThanOrEqualTo(now()->startOfDay()) ? now()->startOfDay() : $latestOrderDate;
+        $urgency = $this->normalizePurchaseUrgency((string) ($geminiNode['urgency'] ?? ''));
+        if ($urgency === '') {
+            $urgency = $this->purchaseUrgencyFromDays($daysUntilLatestOrder);
+        }
+        $purchaseMode = $this->normalizePurchaseMode((string) ($geminiNode['purchase_mode'] ?? ''));
+        if ($purchaseMode === '') {
+            $purchaseMode = (bool) ($context['express_required_by_data'] ?? false) ? 'express' : 'normal';
+        }
+        $riskIfDelayed = trim((string) ($geminiNode['risk_if_delayed'] ?? ''));
+        $priorityReason = trim((string) ($geminiNode['priority_reason'] ?? ''));
         $aiReason = trim((string) ($geminiNode['reason'] ?? ''));
         $reason = $aiReason !== ''
             ? $aiReason
-            : 'Ada kekurangan stok yang masuk PR. Dengan lead time supplier '.$leadTimeDays.' hari, order paling lambat '.$latestOrderDate->toDateString().' agar barang siap pada '.$readyDate->toDateString().'.';
+            : 'Ada kekurangan stok yang masuk PR. Dengan lead time supplier '.(int) ($context['lead_time_hari'] ?? 0).' hari, order paling lambat '.(string) ($context['latest_normal_order_date'] ?? '-').' agar barang siap pada '.(string) ($context['target_ready_date'] ?? '-').'.';
 
         return [
             'urgency' => $urgency,
             'urgency_label' => $this->purchaseUrgencyLabel($urgency),
             'recommended_purchase_date' => $recommendedPurchaseDate->toDateString(),
-            'latest_order_date' => $latestOrderDate->toDateString(),
-            'target_ready_date' => $readyDate->toDateString(),
-            'lead_time_hari' => $leadTimeDays,
-            'supplier_name' => $supplierName,
+            'latest_order_date' => (string) ($context['latest_normal_order_date'] ?? $latestOrderDate->toDateString()),
+            'target_ready_date' => (string) ($context['target_ready_date'] ?? ''),
+            'lead_time_hari' => (int) ($context['lead_time_hari'] ?? 0),
+            'supplier_name' => (string) ($context['supplier_name'] ?? 'Supplier belum diset'),
             'days_until_latest_order' => $daysUntilLatestOrder,
+            'purchase_mode' => $purchaseMode,
+            'express_required_by_data' => (bool) ($context['express_required_by_data'] ?? false),
+            'risk_if_delayed' => $riskIfDelayed,
+            'priority_reason' => $priorityReason,
             'reason' => $reason,
+            'decision_context' => $context,
         ];
+    }
+
+    private function normalizePurchaseUrgency(string $urgency): string
+    {
+        $value = strtolower(trim($urgency));
+
+        return in_array($value, ['urgent', 'high', 'medium', 'low'], true) ? $value : '';
+    }
+
+    private function normalizePurchaseMode(string $mode): string
+    {
+        $value = strtolower(trim($mode));
+
+        return in_array($value, ['normal', 'express', 'none'], true) ? $value : '';
     }
 
     private function targetReadyDate(?Project $project): ?Carbon
@@ -640,16 +770,29 @@ class BookingAIService
         $urgencyLabel = (string) ($purchaseRecommendation['urgency_label'] ?? 'Review manual');
         $supplierName = (string) ($purchaseRecommendation['supplier_name'] ?? 'Supplier belum diset');
         $leadTime = (int) ($purchaseRecommendation['lead_time_hari'] ?? 0);
+        $purchaseMode = (string) ($purchaseRecommendation['purchase_mode'] ?? 'normal');
+        $purchaseReason = trim((string) ($purchaseRecommendation['reason'] ?? ''));
+        $riskIfDelayed = trim((string) ($purchaseRecommendation['risk_if_delayed'] ?? ''));
+        $priorityReason = trim((string) ($purchaseRecommendation['priority_reason'] ?? ''));
 
         if ($latestOrderDate === '' || $readyDate === '') {
             return $reason;
         }
 
-        $purchaseText = "Rekomendasi beli: {$urgencyLabel}, order ke {$supplierName} paling lambat {$latestOrderDate}";
+        $purchaseText = "Rekomendasi beli: {$urgencyLabel}, purchase_mode=".($purchaseMode === 'express' ? 'express' : 'normal').", order ke {$supplierName} paling lambat {$latestOrderDate}";
         if ($recommendedPurchaseDate !== '' && $recommendedPurchaseDate !== $latestOrderDate) {
             $purchaseText .= " (disarankan beli {$recommendedPurchaseDate})";
         }
         $purchaseText .= " karena lead time {$leadTime} hari dan barang harus siap {$readyDate}.";
+        if ($purchaseReason !== '') {
+            $purchaseText .= " Alasan urgency: {$purchaseReason}.";
+        }
+        if ($riskIfDelayed !== '') {
+            $purchaseText .= " Risiko jika ditunda: {$riskIfDelayed}.";
+        }
+        if ($priorityReason !== '') {
+            $purchaseText .= " Alasan prioritas material: {$priorityReason}.";
+        }
 
         return trim(rtrim($reason, '. ').'. '.$purchaseText);
     }
@@ -670,17 +813,83 @@ class BookingAIService
         $recommendedPurchaseDate = (string) ($purchaseRecommendation['recommended_purchase_date'] ?? $latestOrderDate);
         $readyDate = (string) ($purchaseRecommendation['target_ready_date'] ?? '-');
         $leadTime = (int) ($purchaseRecommendation['lead_time_hari'] ?? 0);
+        $purchaseMode = (string) ($purchaseRecommendation['purchase_mode'] ?? 'normal');
+        $purchaseReason = trim((string) ($purchaseRecommendation['reason'] ?? ''));
+        $riskIfDelayed = trim((string) ($purchaseRecommendation['risk_if_delayed'] ?? ''));
+        $priorityReason = trim((string) ($purchaseRecommendation['priority_reason'] ?? ''));
 
         $line = "Urgensi: {$urgencyLabel}\nSupplier: {$supplierName}\nBeli paling lambat: {$latestOrderDate}";
         if ($recommendedPurchaseDate !== '' && $recommendedPurchaseDate !== $latestOrderDate) {
             $line .= "\nDisarankan beli: {$recommendedPurchaseDate}";
         }
-        $line .= "\nLead time: {$leadTime} hari\nBarang harus siap: {$readyDate}";
+        $line .= "\npurchase_mode: ".($purchaseMode === 'express' ? 'express' : 'normal')."\nLead time: {$leadTime} hari\nBarang harus siap: {$readyDate}";
+        if ($purchaseReason !== '') {
+            $line .= "\nAlasan urgency: {$purchaseReason}";
+        }
+        if ($riskIfDelayed !== '') {
+            $line .= "\nRisiko jika ditunda: {$riskIfDelayed}";
+        }
+        if ($priorityReason !== '') {
+            $line .= "\nAlasan prioritas material: {$priorityReason}";
+        }
 
         return $line;
     }
 
-    private function prepareStockDataForGemini(array $kebutuhanDelta): array
+    /**
+     * Keep Gemini input small while preserving enough choices for good allocation.
+     *
+     * @param  array<int, array<string, mixed>>  $pieces
+     * @return array<int, array{id:int,p:float,age:int,r:string}>
+     */
+    private function compactPiecesForGemini(array $pieces, float $dibutuhkan): array
+    {
+        $rows = collect($pieces)
+            ->filter(fn (array $piece): bool => (int) ($piece['id'] ?? 0) > 0 && (float) ($piece['panjang'] ?? 0) > 0)
+            ->values();
+
+        if ($rows->isEmpty()) {
+            return [];
+        }
+
+        $need = max(0.01, round($dibutuhkan, 2));
+        $exactOrLarger = $rows
+            ->filter(fn (array $piece): bool => (float) ($piece['panjang'] ?? 0) + 0.00001 >= $need)
+            ->sort(function (array $a, array $b): int {
+                $lengthCompare = ((float) ($a['panjang'] ?? 0)) <=> ((float) ($b['panjang'] ?? 0));
+                if ($lengthCompare !== 0) {
+                    return $lengthCompare;
+                }
+
+                return ((int) ($b['umur_hari'] ?? 0)) <=> ((int) ($a['umur_hari'] ?? 0));
+            })
+            ->take(8);
+
+        $largestBelow = $rows
+            ->filter(fn (array $piece): bool => (float) ($piece['panjang'] ?? 0) + 0.00001 < $need)
+            ->sortByDesc(fn (array $piece): float => (float) ($piece['panjang'] ?? 0))
+            ->take(14);
+
+        $oldest = $rows
+            ->sortByDesc(fn (array $piece): int => (int) ($piece['umur_hari'] ?? 0))
+            ->take(8);
+
+        return $exactOrLarger
+            ->concat($largestBelow)
+            ->concat($oldest)
+            ->unique(fn (array $piece): int => (int) ($piece['id'] ?? 0))
+            ->take(30)
+            ->map(fn (array $piece): array => [
+                'id' => (int) ($piece['id'] ?? 0),
+                'p' => round((float) ($piece['panjang'] ?? 0), 2),
+                'age' => (int) ($piece['umur_hari'] ?? 0),
+                'r' => (string) ($piece['rack_label'] ?? '-'),
+            ])
+            ->values()
+            ->all();
+    }
+
+    private function prepareStockDataForGemini(array $kebutuhanDelta, ?Project $project = null): array
     {
         $rackMap = ShelfLocation::query()->get(['id', 'kode_lokasi', 'nama_lokasi'])->mapWithKeys(fn ($row): array => [(int) $row->id => (string) ($row->kode_lokasi ?: ($row->nama_lokasi ?: ('#'.(int) $row->id)))])->toArray();
         $result = [];
@@ -701,10 +910,19 @@ class BookingAIService
             })->values()->all();
             $supplier = $material->defaultSupplier;
             $leadTimeDays = $this->resolveLeadTimeDays($material);
-            $result[$materialId] = ['material_id' => $materialId, 'material_name' => (string) $material->nama_material, 'dibutuhkan' => round($dibutuhkan, 2), 'satuan' => $material->resolveTrackingUnit(), 'available' => round((float) $material->available, 2), 'supplier' => ['id' => (int) ($supplier?->id ?? 0), 'name' => (string) ($supplier?->nama_supplier ?? 'Supplier belum diset'), 'lead_time_hari' => $leadTimeDays], 'pieces' => $pieces];
+            $available = $this->actualAvailableQty($material);
+            $result[$materialId] = ['material_id' => $materialId, 'material_name' => (string) $material->nama_material, 'dibutuhkan' => round($dibutuhkan, 2), 'satuan' => $material->resolveTrackingUnit(), 'available' => round($available, 2), 'supplier' => ['id' => (int) ($supplier?->id ?? 0), 'name' => (string) ($supplier?->nama_supplier ?? 'Supplier belum diset'), 'lead_time_hari' => $leadTimeDays], 'purchase_context' => $this->buildPurchaseDecisionContext($project, $material, max(0, $dibutuhkan - $available)), 'pieces' => $pieces];
         }
 
         return $result;
+    }
+
+    private function actualAvailableQty(Material $material): float
+    {
+        return (float) MaterialPiece::query()
+            ->where('material_id', $material->id)
+            ->where('status', 'available')
+            ->sum('panjang');
     }
 
     private function prepareHistoricalContext(array $kebutuhanDelta): array
@@ -738,33 +956,22 @@ class BookingAIService
         $dataset = collect($kebutuhanItems)->map(function (array $item) use ($materialsStock): array {
             $materialId = (int) ($item['material_id'] ?? 0);
             $stock = (array) ($materialsStock[$materialId] ?? []);
-            $pieces = collect((array) ($stock['pieces'] ?? []))
-                ->sortBy(fn (array $piece): int => (int) ($piece['umur_hari'] ?? 0))
-                ->values()
-                ->map(function (array $piece): array {
-                    return [
-                        'id' => (int) ($piece['id'] ?? 0),
-                        'panjang' => round((float) ($piece['panjang'] ?? 0), 2),
-                        'umur_hari' => (int) ($piece['umur_hari'] ?? 0),
-                        'sumber' => (string) ($piece['sumber'] ?? '-'),
-                        'rack_label' => (string) ($piece['rack_label'] ?? '-'),
-                        'status' => (string) ($piece['status'] ?? 'available'),
-                    ];
-                })
-                ->all();
+            $dibutuhkan = round((float) ($item['qty'] ?? 0), 2);
+            $pieces = $this->compactPiecesForGemini((array) ($stock['pieces'] ?? []), $dibutuhkan);
 
             $supplier = (array) ($stock['supplier'] ?? []);
 
             return [
                 'material_id' => $materialId,
                 'material_name' => (string) ($item['material_name'] ?? ('Material #'.$materialId)),
-                'dibutuhkan' => round((float) ($item['qty'] ?? 0), 2),
+                'dibutuhkan' => $dibutuhkan,
                 'satuan' => (string) ($item['satuan'] ?? 'unit'),
                 'available' => round((float) ($stock['available'] ?? 0), 2),
                 'supplier' => [
                     'name' => (string) ($supplier['name'] ?? 'Supplier belum diset'),
                     'lead_time_hari' => max(0, (int) ($supplier['lead_time_hari'] ?? 7)),
                 ],
+                'purchase_context' => (array) ($stock['purchase_context'] ?? []),
                 'pieces' => $pieces,
             ];
         })->filter(fn (array $row): bool => (int) ($row['material_id'] ?? 0) > 0 && (float) ($row['dibutuhkan'] ?? 0) > 0)->values()->all();
@@ -784,13 +991,12 @@ class BookingAIService
             $timelineJson = '{}';
         }
         $historyCompact = collect($historicalContext)
+            ->take(10)
             ->mapWithKeys(function (array $row, $materialId): array {
                 return [
                     (string) ((int) $materialId) => [
                         'avg_booking_per_project' => round((float) ($row['avg_booking_per_project'] ?? 0), 2),
                         'dead_stock_pieces' => (int) ($row['dead_stock_pieces'] ?? 0),
-                        'usage_by_source' => (array) ($row['usage_by_source'] ?? []),
-                        'wasted_small_cuts' => (int) ($row['wasted_small_cuts'] ?? 0),
                         'projects_using_3months' => (int) ($row['projects_using_3months'] ?? 0),
                     ],
                 ];
@@ -801,38 +1007,24 @@ class BookingAIService
             $historyJson = '{}';
         }
 
-        $systemInstruction = 'Kamu adalah Inventory Math Expert. Balas hanya JSON valid tunggal. Aksi yang diizinkan: full_booking|partial|full_pr. ATURAN KETAT: (1) Jika manager meminta segmen tertentu (contoh 100,100,105), kamu WAJIB membagi alokasi_kabel per segmen sebagai entry terpisah, termasuk bila 2 segmen diambil dari piece yang sama. (2) ambil_panjang adalah panjang POTONGAN yang diambil, bukan total panjang piece. (3) Hitung sisa secara akurat, jangan halusinasi angka. (4) Gunakan FIFO sebagai prioritas saat memungkinkan. (5) Untuk full_booking/partial WAJIB isi alokasi_kabel berisi piece_id + ambil_panjang numerik. selected_piece_ids boleh tetap dikirim sebagai ringkasan. 
-        
-        (6) Jika manager menyebut ukuran-ukuran spesifik (contoh "100 100 100" atau "bikin 3 potongan 100m"), OTOMATIS set require_no_joint = true dan requested_segments diisi dengan ukuran-ukuran tersebut. Manager tidak perlu tulis "jangan sambung" secara eksplisit — kalau ada angka-angka ukuran, itu sudah berarti minta potongan terpisah.';
+        $systemInstruction = 'JSON only. Aksi: full_booking|partial|full_pr. Booking/partial wajib alokasi_kabel. Partial/full_pr wajib purchase_recommendation lengkap. Alasan alokasi 1-2 kalimat, spesifik tapi ringkas.';
         $prompt = <<<PROMPT
 Proyek: {$projectCode} (ID {$projectId})
 Instruksi manager: {$catatanPrompt}
-Timeline proyek: {$timelineJson}
 Data material: {$dataJson}
-Histori ringkas: {$historyJson}
-
-Prioritas pemilihan piece: kepatuhan instruksi -> ambil piece SESEDIKIT MUNGKIN (hindari potong kalau bisa ambil utuh) -> FIFO (umur lebih lama) -> minimalkan sisa tidak terpakai.
-
-ATURAN PENTING kalau tidak ada instruksi segmen:
-- Cari kombinasi piece yang TEPAT atau LEBIH BESAR dari kebutuhan dengan JUMLAH PIECE PALING SEDIKIT
-- Kalau ada 1 piece yang cukup → ambil 1 piece saja
-- Kalau ada 2 piece yang totalnya pas → ambil 2 piece, jangan 3
-- Jangan potong piece kalau bisa kombinasi piece lain yang hasilnya sama
-- Sisa potongan kecil itu lebih buruk dari mengambil 1 piece besar
-- Jangan pakai piece ID yang tidak ada pada Data material.
-- Jika instruksi segmen adalah 100,100,105 maka alokasi_kabel wajib memiliki 3 baris take: 100, 100, 105 (tidak boleh digabung jadi 200 + 105).
-- Untuk material dengan qty PR > 0, gunakan supplier.lead_time_hari dan Timeline proyek untuk memberi purchase_recommendation: tanggal beli paling lambat = target_ready_date dikurangi lead_time_hari; urgency = urgent kalau tanggal beli sudah lewat/hari ini, high kalau sisa <= 7 hari, medium kalau sisa <= 14 hari, low kalau lebih lama.
-- Jelaskan rekomendasi beli di overall_reason/sisa_analysis: kapan harus beli, lead time supplier berapa hari, dan tingkat urgensinya. Kalau qty PR = 0, purchase_recommendation boleh berstatus "tidak_perlu".
-
+    Aturan: gunakan piece id dari data, ambil_panjang <= panjang piece, jika instruksi berisi segmen angka maka require_no_joint=true dan alokasi per segmen.
+    Field piece: id=id, p=panjang/qty, age=umur hari, r=rak.
+    Untuk setiap alokasi_kabel.alasan dan alasan_per_piece: jelaskan kenapa piece itu dipakai untuk orang gudang. Wajib sebut dasar pilihnya: FIFO/stok lebih lama, panjang paling mendekati kebutuhan, minim sisa/potongan, instruksi manager, atau rak/piece preferensi. Sertakan ambil berapa dari panjang total dan sisa berapa. Jangan terlalu pendek seperti "stok cukup", tapi jangan bertele-tele.
 
 Output schema:
-    {"instruksi_manager":{"tanpa_potongan":false,"require_no_joint":false,"requested_segments":[100,100,100],"ringkas":"...","alasan":"..."},"ringkasan":"...","materials":{"<material_id>":{"aksi":"full_booking|partial|full_pr","selected_piece_ids":[1],"alokasi_kabel":[{"piece_id":1,"ambil_panjang":100,"alasan":"..."}],"alasan_per_piece":{"1":"..."},"overall_reason":"...","sisa_analysis":"...","purchase_recommendation":{"urgency":"urgent|high|medium|low|tidak_perlu","recommended_purchase_date":"YYYY-MM-DD|null","latest_order_date":"YYYY-MM-DD|null","lead_time_hari":7,"reason":"..."}}}}
+{"instruksi_manager":{"tanpa_potongan":false,"require_no_joint":false,"requested_segments":[],"ringkas":"","alasan":""},"ringkasan":"","materials":{"<material_id>":{"aksi":"full_booking|partial|full_pr","selected_piece_ids":[],"alokasi_kabel":[{"piece_id":1,"ambil_panjang":10,"alasan":"dasar pemilihan piece"}],"alasan_per_piece":{"1":"alasan untuk orang gudang"},"overall_reason":"","sisa_analysis":"","purchase_recommendation":{"urgency":"urgent|high|medium|low","purchase_mode":"normal|express","reason":"","risk_if_delayed":"","priority_reason":""}}}}
 PROMPT;
 
         Log::info('Gemini full analysis - prompt dikirim', [
             'project_id' => $projectId,
             'materials_count' => count($dataset),
             'materials_ids' => $requiredMaterialIds,
+            'prompt_length' => strlen($prompt) + strlen($systemInstruction),
         ]);
 
         $responseRaw = (string) $this->gemini->ask($prompt, $systemInstruction);
@@ -977,7 +1169,7 @@ PROMPT;
         if ($applyNoCut) {
             $rollStandar = (float) ($material->default_roll_length ?? 0);
             $minimumUtuh = $rollStandar > 0 ? $rollStandar : $dibutuhkan;
-            $stokTersediaFaktual = (float) $material->available;
+            $stokTersediaFaktual = $this->actualAvailableQty($material);
             $stokSisaPotonganPieces = MaterialPiece::query()->where('material_id', $material->id)->where('status', 'available')->where('panjang', '<', $minimumUtuh)->orderByDesc('panjang')->pluck('panjang')->map(fn ($value) => (float) $value)->values()->all();
             $stokSisaPotongan = array_sum($stokSisaPotonganPieces);
             $stokSisaPotonganList = collect($stokSisaPotonganPieces)->take(6)->map(fn (float $value) => $this->formatQty($value))->values()->all();
@@ -986,7 +1178,7 @@ PROMPT;
 
             return ['material_id' => $material->id, 'nama_material' => $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => round($stokTersediaFaktual, 2), 'aksi' => $stokUtuhCukup ? 'full_booking' : 'full_pr', 'qty_booking' => $stokUtuhCukup ? $dibutuhkan : 0, 'qty_pr' => $stokUtuhCukup ? 0 : $dibutuhkan, 'tanpa_potongan' => true, 'stok_sisa_potongan' => $stokSisaPotongan, 'stok_sisa_potongan_list' => $stokSisaPotonganList, 'alasan_ai' => $stokUtuhCukup ? ('instruksi tidak boleh potongan, jadi sistem hanya memakai roll utuh. '.trim($alasanInstruksi)) : ('instruksi tidak boleh potongan dan stok roll utuh tidak mencukupi'.($stokSisaPotongan > 0 ? ', stok sisa '.$this->formatQty($stokSisaPotongan).' tidak bisa dipakai' : '').($potonganBreakdown !== '' ? ', '.$potonganBreakdown.' tidak bisa dipakai' : '').', sehingga kebutuhan dialihkan ke PR. '.trim($alasanInstruksi))];
         }
-        $available = $material->available;
+        $available = $this->actualAvailableQty($material);
         if ($available >= $dibutuhkan) {
             return ['material_id' => $material->id, 'nama_material' => $material->nama_material, 'dibutuhkan' => $dibutuhkan, 'available' => $available, 'aksi' => 'full_booking', 'qty_booking' => $dibutuhkan, 'qty_pr' => 0, 'tanpa_potongan' => false, 'alasan_ai' => 'Karena stok tersedia mencukupi, kebutuhan dipenuhi dengan booking penuh tanpa PR.'];
         }
@@ -1258,16 +1450,19 @@ PROMPT;
                 $take = (float) ($piece['take_qty'] ?? 0);
                 $left = max(0, $length - $take);
                 $rack = (string) ($piece['rack_label'] ?? '-');
+                $reason = trim((string) ($piece['reason'] ?? ''));
 
                 if ($take + 0.00001 < $length) {
                     if ($isDiscreteUnit) {
-                        return $itemLabelTitle.' #'.$pieceId.' ambil '.$this->formatQty($take).' '.$satuan.' dari total '.$this->formatQty($length).' '.$satuan.' di Rak '.$rack;
+                        $line = $itemLabelTitle.' #'.$pieceId.' ambil '.$this->formatQty($take).' '.$satuan.' dari total '.$this->formatQty($length).' '.$satuan.' di Rak '.$rack;
+                    } else {
+                        $line = $itemLabelTitle.' #'.$pieceId.' potong '.$this->formatQty($take).' '.$satuan.' dari '.$this->formatQty($length).' '.$satuan.' (sisa '.$this->formatQty($left).' '.$satuan.') di Rak '.$rack;
                     }
-
-                    return $itemLabelTitle.' #'.$pieceId.' potong '.$this->formatQty($take).' '.$satuan.' dari '.$this->formatQty($length).' '.$satuan.' (sisa '.$this->formatQty($left).' '.$satuan.') di Rak '.$rack;
+                } else {
+                    $line = $itemLabelTitle.' #'.$pieceId.' ambil utuh '.$this->formatQty($length).' '.$satuan.' di Rak '.$rack;
                 }
 
-                return $itemLabelTitle.' #'.$pieceId.' ambil utuh '.$this->formatQty($length).' '.$satuan.' di Rak '.$rack;
+                return $reason !== '' ? ($line.' karena '.$reason) : $line;
             })
             ->filter(fn (string $line): bool => trim($line) !== '')
             ->values()
@@ -1343,6 +1538,28 @@ PROMPT;
         }
 
         return 'Analisis AI: '.rtrim($strategicReason, '. ').'.';
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $chosen
+     * @param  array<string, string>  $alasanPerPiece
+     * @return array<int, array<string, mixed>>
+     */
+    private function attachReasonsToChosenPieces(array $chosen, array $alasanPerPiece): array
+    {
+        return collect($chosen)
+            ->map(function (array $piece) use ($alasanPerPiece): array {
+                $pieceId = (int) ($piece['id'] ?? 0);
+                $reason = trim((string) ($piece['reason'] ?? $alasanPerPiece[(string) $pieceId] ?? ''));
+
+                if ($reason !== '') {
+                    $piece['reason'] = $reason;
+                }
+
+                return $piece;
+            })
+            ->values()
+            ->all();
     }
 
     /**
@@ -1439,6 +1656,7 @@ PROMPT;
                 'id' => $pieceId,
                 'panjang' => round($before, 2),
                 'take_qty' => $takeQty,
+                'reason' => trim((string) ($alloc['reason'] ?? '')),
                 'sumber' => (string) ($piece['sumber'] ?? '-'),
                 'age_days' => (int) ($piece['umur_hari'] ?? 0),
                 'shelf_location_id' => (int) ($piece['shelf_location_id'] ?? 0),
@@ -2044,7 +2262,7 @@ PROMPT;
             $sisaFull = 'Seluruh kebutuhan unit terpenuhi dari stok gudang.';
             $sisaPartial = 'Stok unit yang tersedia belum mencukupi, sisanya perlu dibuatkan PR.';
         } else {
-            $overallReason = $preferReason.(count($selectedIds) <= 1 ? 'Mengambil piece sesuai prioritas instruksi manager untuk meminimalkan mismatch kebutuhan.' : 'Mengkombinasikan '.count($selectedIds).' piece sesuai prioritas instruksi manager.');
+            $overallReason = $preferReason.(count($selectedIds) <= 1 ? 'Mengambil piece yang paling mendekati kebutuhan agar jumlah potongan tidak berlebihan dan sisa material tetap bernilai pakai.' : 'Mengkombinasikan '.count($selectedIds).' piece sesuai prioritas stok agar kebutuhan terpenuhi dengan jumlah potongan yang tetap terkendali.');
             $sisaFull = 'Kebutuhan terpenuhi, sisa potongan dikembalikan ke gudang dan masih bisa dipakai proyek lain.';
             $sisaPartial = 'Stok piece yang tersedia belum mencukupi seluruh kebutuhan, sisanya perlu dibuatkan PR.';
         }
