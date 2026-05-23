@@ -96,7 +96,7 @@
                                             <div class="font-medium {{ $row['condition'] !== 'Bagus' ? 'text-danger-700 dark:text-danger-300' : 'text-gray-900 dark:text-white' }}">
                                                 {{ $row['condition'] }}{{ $row['is_retur'] ? ' (Retur)' : '' }}
                                             </div>
-                                            @if ($row['condition_note'] !== '')
+                                            @if ($row['condition'] !== 'Bagus' && $row['condition_note'] !== '')
                                                 <div class="mt-1 max-w-xs text-xs text-gray-500 dark:text-gray-400">{{ $row['condition_note'] }}</div>
                                             @endif
                                         </td>

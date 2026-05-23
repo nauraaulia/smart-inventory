@@ -11,6 +11,7 @@ class OutboundItem extends Model
 
     protected $casts = [
         'qty' => 'decimal:2',
+        'selected_piece_ids' => 'array',
     ];
 
     public function outbound(): BelongsTo

@@ -65,7 +65,7 @@ class ProjectTemplateResource extends Resource
 
     public static function canDelete(Model $record): bool
     {
-        return false;
+        return auth()->user()?->role === 'Manager Teknik';
     }
 
     public static function getPages(): array

@@ -76,6 +76,18 @@
             color: rgb(167 243 208);
         }
 
+        .outbound-badge-mapped {
+            border: 1px solid rgb(125 211 252);
+            background-color: rgb(224 242 254);
+            color: rgb(3 105 161);
+        }
+
+        .dark .outbound-badge-mapped {
+            border-color: rgb(56 189 248 / 0.45);
+            background-color: rgb(14 165 233 / 0.15);
+            color: rgb(186 230 253);
+        }
+
         .outbound-badge-kurang {
             border: 1px solid rgb(252 165 165);
             background-color: rgb(254 242 242);
@@ -246,9 +258,9 @@
                                             </ul>
                                         @endif
 
-                                        @if ($item['is_potongan'])
-                                            <div class="mb-2 inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold outbound-badge-potongan">
-                                                Potongan
+                                        @if (!empty($item['piece_details']))
+                                            <div class="mb-2 inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold {{ $item['is_potongan'] ? 'outbound-badge-potongan' : 'outbound-badge-mapped' }}">
+                                                {{ $item['piece_badge'] ?? ($item['is_potongan'] ? 'Potongan' : 'Pieces Dipilih') }}
                                             </div>
                                             <ul class="outbound-potongan-list text-xs">
                                                 @foreach ($item['piece_details'] as $detail)

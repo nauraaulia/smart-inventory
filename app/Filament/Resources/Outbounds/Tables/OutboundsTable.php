@@ -132,7 +132,7 @@ class OutboundsTable
     public static function requirementsModalContent(Project $record): HtmlString
     {
         $record->loadMissing([
-            'items.material:id,nama_material,satuan',
+            'items.material:id,nama_material,satuan,default_roll_length',
             'bookedPieces:id,booked_for_project_id,material_id,panjang,status,sumber',
         ]);
 
@@ -142,7 +142,7 @@ class OutboundsTable
                 $first = $items->first();
                 return [
                     'name' => (string) ($first?->material?->nama_material ?? 'Material tidak diketahui'),
-                    'unit' => (string) ($first?->material?->satuan ?? 'unit'),
+                    'unit' => (string) ($first?->material?->resolveTrackingUnit() ?? 'unit'),
                     'required' => (float) $items->sum('jumlah_diminta'),
                 ];
             });
@@ -168,6 +168,10 @@ class OutboundsTable
             $bookedText = self::formatQty($booked, $unit);
             $shortageText = self::formatQty($shortage, $unit);
             $shortageClass = $shortage > 0 ? 'text-rose-600 font-semibold' : 'text-emerald-600 font-semibold';
+            $detailQtyColumn = self::isLengthUnit($unit) ? 'Panjang' : 'Jumlah';
+            $detailTitle = self::isLengthUnit($unit)
+                ? 'Booked Pieces (Kelompok per Segmen):'
+                : 'Booked Items:';
 
             $rowsHtml .= '<tr class="border-b border-gray-200 dark:border-white/10">'
                 . '<td class="px-3 py-2 text-sm text-gray-900 dark:text-white">' . e((string) $data['name']) . '</td>'
@@ -179,11 +183,11 @@ class OutboundsTable
             // Tampilkan detail booked per segmen
             if ($bookedPieces->isNotEmpty()) {
                 $rowsHtml .= '<tr><td colspan="4" class="p-0"><div class="pl-6 pb-2">'
-                    . '<div class="text-xs font-semibold text-gray-500 dark:text-gray-300 mb-1">Booked Pieces (Kelompok per Segmen):</div>'
+                    . '<div class="text-xs font-semibold text-gray-500 dark:text-gray-300 mb-1">' . e($detailTitle) . '</div>'
                     . '<table class="min-w-full border border-gray-100 dark:border-white/10 mb-2">'
                     . '<thead class="bg-gray-50 dark:bg-white/5">'
                     . '<tr>'
-                    . '<th class="px-2 py-1 text-left text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">Panjang</th>'
+                    . '<th class="px-2 py-1 text-left text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">' . e($detailQtyColumn) . '</th>'
                     . '<th class="px-2 py-1 text-left text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">Sumber</th>'
                     . '</tr>'
                     . '</thead>'
@@ -223,6 +227,13 @@ class OutboundsTable
         $number = rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.');
 
         return trim($number . ' ' . $unit);
+    }
+
+    private static function isLengthUnit(string $unit): bool
+    {
+        $normalized = strtolower(trim($unit));
+
+        return in_array($normalized, ['m', 'meter', 'meters', 'metre', 'meteran', 'mtr'], true);
     }
 
     private static function materialCountForOutbound(Outbound $record): int

@@ -200,7 +200,7 @@ class PurchaseRequestsTable
                             ->send();
                     }),
                 Action::make('approve_finance_only')
-                    ->label('Setujui (Finance)')
+                    ->label('Setuju')
                     ->icon('heroicon-o-check-circle')
                     ->color('gray')
                     ->requiresConfirmation()

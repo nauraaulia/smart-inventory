@@ -2,8 +2,10 @@
 
 namespace App\Filament\Resources\Outbounds\Pages;
 
+use App\Filament\Resources\Outbounds\Concerns\HandlesManualOutboundPieces;
 use App\Filament\Resources\Outbounds\OutboundResource;
 use App\Filament\Widgets\OutboundStatsWidget;
+use App\Models\Material;
 use App\Models\Outbound;
 use App\Models\Project;
 use Filament\Actions\Action;
@@ -13,12 +15,16 @@ use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ListRecords;
+use Filament\Schemas\Components\Utilities\Get;
+use Filament\Schemas\Components\Utilities\Set;
 use Filament\Schemas\Components\Tabs\Tab;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 
 class ListOutbounds extends ListRecords
 {
+    use HandlesManualOutboundPieces;
+
     protected static string $resource = OutboundResource::class;
 
     protected ?string $pollingInterval = '2s';
@@ -45,20 +51,41 @@ class ListOutbounds extends ListRecords
                         ->required()
                         ->searchable(),
                     Repeater::make('items')
-                        ->label('Material + Qty')
+                        ->label('Material + Pieces')
                         ->schema([
                             Select::make('material_id')
                                 ->label('Material')
-                                ->options(\App\Models\Material::query()->orderBy('nama_material')->pluck('nama_material', 'id'))
+                                ->options(Material::query()->orderBy('nama_material')->pluck('nama_material', 'id'))
                                 ->searchable()
-                                ->required(),
+                                ->required()
+                                ->live()
+                                ->afterStateUpdated(function (Set $set): void {
+                                    $set('selected_piece_ids', []);
+                                    $set('qty', null);
+                                }),
+                            Select::make('selected_piece_ids')
+                                ->label('Pilih Piece / Item')
+                                ->multiple()
+                                ->searchable()
+                                ->required()
+                                ->visible(fn (Get $get): bool => (int) ($get('material_id') ?? 0) > 0)
+                                ->options(fn (Get $get): array => $this->manualOutboundPieceOptions(
+                                    (int) ($get('material_id') ?? 0),
+                                    $this->manualOutboundPieceIds($get('selected_piece_ids') ?? []),
+                                ))
+                                ->live()
+                                ->afterStateUpdated(function (Set $set, $state): void {
+                                    $set('qty', $this->manualOutboundSelectedQty($state));
+                                }),
                             TextInput::make('qty')
-                                ->label('Qty')
+                                ->label('Qty Total Piece')
                                 ->numeric()
+                                ->disabled()
+                                ->dehydrated()
                                 ->required()
                                 ->minValue(0.01),
                         ])
-                        ->columns(2)
+                        ->columns(3)
                         ->minItems(1)
                         ->required(),
                     Textarea::make('alasan_manual')
@@ -67,7 +94,13 @@ class ListOutbounds extends ListRecords
                         ->rows(3),
                 ])
                 ->action(function (array $data): void {
-                    DB::transaction(function () use ($data): void {
+                    $items = $this->normalizeManualOutboundItemRows($data['items'] ?? []);
+
+                    if ($items === null) {
+                        return;
+                    }
+
+                    DB::transaction(function () use ($data, $items): void {
                         $outbound = Outbound::create([
                             'project_id' => (int) $data['project_id'],
                             'status' => 'pending',
@@ -76,20 +109,12 @@ class ListOutbounds extends ListRecords
                             'created_by' => auth()->id(),
                         ]);
 
-                        foreach (($data['items'] ?? []) as $row) {
-                            $materialId = (int) ($row['material_id'] ?? 0);
-                            $qty = (float) ($row['qty'] ?? 0);
-
-                            if ($materialId <= 0 || $qty <= 0) {
-                                continue;
-                            }
-
-                            $material = \App\Models\Material::query()->find($materialId);
-
+                        foreach ($items as $row) {
                             $outbound->items()->create([
-                                'material_id' => $materialId,
-                                'qty' => number_format($qty, 2, '.', ''),
-                                'unit' => (string) ($material?->satuan ?: 'unit'),
+                                'material_id' => (int) $row['material_id'],
+                                'qty' => (string) $row['qty'],
+                                'unit' => (string) $row['unit'],
+                                'selected_piece_ids' => $row['selected_piece_ids'],
                             ]);
                         }
                     });

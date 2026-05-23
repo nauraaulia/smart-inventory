@@ -68,7 +68,7 @@ class OutboundResource extends Resource
         return parent::getEloquentQuery()
             ->with([
                 'project:id,kode_proyek,nama_proyek,tanggal_mulai,status',
-                'items:id,outbound_id,material_id,qty,unit',
+                'items:id,outbound_id,material_id,qty,unit,selected_piece_ids',
                 'items.material:id,nama_material,satuan',
             ])
             ->withCount('items');

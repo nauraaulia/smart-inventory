@@ -14,7 +14,17 @@ class EditProjectTemplate extends EditRecord
     protected function getHeaderActions(): array
     {
         return [
-            
+            Actions\DeleteAction::make()
+                ->label('Delete')
+                ->icon('heroicon-o-trash')
+                ->color('danger')
+                ->requiresConfirmation()
+                ->modalIcon('heroicon-o-trash')
+                ->modalIconColor('danger')
+                ->modalHeading('Delete project template')
+                ->modalDescription('Are you sure you would like to do this?')
+                ->modalCancelActionLabel('Cancel')
+                ->modalSubmitActionLabel('Delete'),
         ];
     }
 

@@ -2,8 +2,10 @@
 
 namespace App\Filament\Resources\Outbounds\Pages;
 
+use App\Filament\Resources\Outbounds\Concerns\HandlesManualOutboundPieces;
 use App\Filament\Resources\Outbounds\OutboundResource;
 use App\Jobs\AnalyzeDeadstockAfterOutboundJob;
+use App\Models\Material;
 use App\Models\MaterialPiece;
 use App\Models\Outbound;
 use App\Models\Project;
@@ -15,16 +17,22 @@ use Filament\Actions\Action;
 use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\Hidden;
+use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
 use Filament\Forms\Components\TextInput;
 use Filament\Notifications\Notification;
 use Filament\Resources\Pages\Page;
+use Filament\Schemas\Components\Utilities\Get;
+use Filament\Schemas\Components\Utilities\Set;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class ViewOutbound extends Page
 {
+    use HandlesManualOutboundPieces;
+
     protected static string $resource = OutboundResource::class;
 
     protected string $view = 'filament.resources.outbounds.pages.view-outbound';
@@ -39,7 +47,7 @@ class ViewOutbound extends Page
 
         $this->record = $record->load([
             'project:id,kode_proyek,nama_proyek,status',
-            'items:id,outbound_id,material_id,qty,unit',
+            'items:id,outbound_id,material_id,qty,unit,selected_piece_ids',
             'items.material:id,nama_material,satuan',
         ]);
 
@@ -66,6 +74,85 @@ class ViewOutbound extends Page
                 ->icon('heroicon-o-x-mark')
                 ->color('gray')
                 ->url(OutboundResource::getUrl('index')),
+            Action::make('map_manual_pieces')
+                ->label('Pilih Pieces')
+                ->icon('heroicon-o-clipboard-document-list')
+                ->color('warning')
+                ->visible(fn (): bool => $this->canPrepare() && $this->record->outbound_manual && $this->record->status !== 'taken')
+                ->modalHeading('Pilih pieces untuk outbound manual')
+                ->modalWidth('5xl')
+                ->form(fn (): array => [
+                    Repeater::make('items')
+                        ->label('Material outbound')
+                        ->schema([
+                            Hidden::make('id'),
+                            Hidden::make('material_id'),
+                            Hidden::make('unit'),
+                            TextInput::make('material_name')
+                                ->label('Material')
+                                ->disabled()
+                                ->dehydrated(false),
+                            Select::make('selected_piece_ids')
+                                ->label('Pilih Piece / Item')
+                                ->multiple()
+                                ->searchable()
+                                ->required()
+                                ->options(fn (Get $get): array => $this->manualOutboundPieceOptions(
+                                    (int) ($get('material_id') ?? 0),
+                                    $this->manualOutboundPieceIds($get('selected_piece_ids') ?? []),
+                                ))
+                                ->live()
+                                ->afterStateUpdated(function (Set $set, $state): void {
+                                    $set('qty', $this->manualOutboundSelectedQty($state));
+                                }),
+                            TextInput::make('qty')
+                                ->label('Qty Total Piece')
+                                ->numeric()
+                                ->disabled()
+                                ->dehydrated()
+                                ->required()
+                                ->minValue(0.01),
+                        ])
+                        ->columns(2)
+                        ->default(fn (): array => $this->manualOutboundItemFormRows())
+                        ->addable(false)
+                        ->deletable(false)
+                        ->reorderable(false)
+                        ->minItems(1)
+                        ->required(),
+                ])
+                ->action(function (array $data): void {
+                    $items = $this->normalizeManualOutboundItemRows($data['items'] ?? []);
+
+                    if ($items === null) {
+                        return;
+                    }
+
+                    DB::transaction(function () use ($items): void {
+                        foreach ($items as $row) {
+                            $itemId = (int) ($row['id'] ?? 0);
+
+                            if ($itemId <= 0) {
+                                continue;
+                            }
+
+                            $this->record->items()
+                                ->whereKey($itemId)
+                                ->update([
+                                    'qty' => (string) $row['qty'],
+                                    'unit' => (string) $row['unit'],
+                                    'selected_piece_ids' => $row['selected_piece_ids'],
+                                ]);
+                        }
+                    });
+
+                    Notification::make()
+                        ->title('Pieces outbound manual tersimpan')
+                        ->success()
+                        ->send();
+
+                    $this->record->refresh();
+                }),
             Action::make('mark_ready')
                 ->label('Tandai Siap')
                 ->icon('heroicon-o-check-badge')
@@ -74,6 +161,10 @@ class ViewOutbound extends Page
                 ->requiresConfirmation()
                 ->modalHeading('Tandai outbound siap diambil?')
                 ->action(function (): void {
+                    if (! $this->manualOutboundPiecesAreUsable()) {
+                        return;
+                    }
+
                     if (! $this->canProceedOutbound()) {
                         Notification::make()
                             ->title('Outbound belum bisa diproses')
@@ -133,6 +224,10 @@ class ViewOutbound extends Page
                     ];
                 })
                 ->action(function (array $data): void {
+                    if (! $this->manualOutboundPiecesAreUsable()) {
+                        return;
+                    }
+
                     if (! $this->canProceedOutbound()) {
                         Notification::make()
                             ->title('Konfirmasi ditolak')
@@ -164,7 +259,9 @@ class ViewOutbound extends Page
                             'taken_by' => auth()->id(),
                         ]);
 
-                        if (! $this->record->outbound_manual && $this->record->project_id) {
+                        if ($this->record->outbound_manual) {
+                            $this->markManualOutboundPiecesUsed();
+                        } elseif ($this->record->project_id) {
                             $this->normalizeBookedPiecesBeforeTake((int) $this->record->project_id);
 
                             DB::table('material_pieces')
@@ -231,24 +328,66 @@ class ViewOutbound extends Page
     {
         $this->record->loadMissing([
             'items.material:id,nama_material,satuan,default_roll_length',
+            'project:id,kode_proyek,nama_proyek,status',
             'project.bookedPieces:id,booked_for_project_id,material_id,panjang,status,shelf_location_id',
             'project.bookedPieces.material:id,nama_material,satuan,default_roll_length',
             'project.bookedPieces.shelfLocation:id,kode_lokasi,nama_lokasi',
         ]);
 
         if ($this->record->items->isNotEmpty()) {
+            $selectedIds = $this->record->items
+                ->flatMap(fn ($item) => $this->manualOutboundPieceIds($item->selected_piece_ids ?? []))
+                ->unique()
+                ->values()
+                ->all();
+
+            $selectedPiecesById = empty($selectedIds)
+                ? collect()
+                : MaterialPiece::query()
+                    ->with([
+                        'bookedForProject:id,kode_proyek',
+                        'material:id,nama_material,satuan,default_roll_length',
+                        'shelfLocation:id,kode_lokasi,nama_lokasi',
+                    ])
+                    ->whereIn('id', $selectedIds)
+                    ->get(['id', 'piece_code', 'material_id', 'panjang', 'status', 'shelf_location_id', 'booked_for_project_id'])
+                    ->keyBy('id');
+
             return $this->record->items
-                ->map(fn ($item): array => [
-                    'material' => (string) ($item->material?->nama_material ?? 'Material tidak diketahui'),
-                    'qty' => $this->formatQty((float) $item->qty, (string) ($item->material?->resolveTrackingUnit() ?: $item->unit ?: 'unit')),
-                    'required_qty' => $this->formatQty((float) $item->qty, (string) ($item->material?->resolveTrackingUnit() ?: $item->unit ?: 'unit')),
-                    'provided_qty' => $this->formatQty((float) $item->qty, (string) ($item->material?->resolveTrackingUnit() ?: $item->unit ?: 'unit')),
-                    'shortage_qty' => $this->formatQty(0, (string) ($item->material?->resolveTrackingUnit() ?: $item->unit ?: 'unit')),
-                    'fulfillment_status' => 'Manual',
-                    'racks' => 'Belum dipetakan (outbound manual)',
-                    'is_potongan' => false,
-                    'piece_details' => [],
-                ])
+                ->map(function ($item) use ($selectedPiecesById): array {
+                    $unit = (string) ($item->material?->resolveTrackingUnit() ?: $item->unit ?: 'unit');
+                    $itemLabel = Material::usesDiscreteUnitTrackingFor($unit, $item->material?->default_roll_length) ? 'Item' : 'Piece';
+                    $pieceIds = $this->manualOutboundPieceIds($item->selected_piece_ids ?? []);
+                    $pieces = collect($pieceIds)
+                        ->map(fn (int $id) => $selectedPiecesById->get($id))
+                        ->filter();
+                    $selectedQty = round((float) $pieces->sum('panjang'), 2);
+                    $displayQty = $selectedQty > 0 ? $selectedQty : (float) $item->qty;
+                    $rackText = $pieces
+                        ->map(fn ($piece) => (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-')))
+                        ->filter(fn (string $rack): bool => trim($rack) !== '')
+                        ->unique()
+                        ->values()
+                        ->implode(', ');
+                    $pieceDetails = $pieces
+                        ->map(fn (MaterialPiece $piece): string => $this->manualOutboundPieceDetailLine($piece, $unit, $itemLabel))
+                        ->values()
+                        ->all();
+
+                    return [
+                        'material' => (string) ($item->material?->nama_material ?? 'Material tidak diketahui'),
+                        'qty' => $this->formatQty($displayQty, $unit),
+                        'required_qty' => $this->formatQty((float) $item->qty, $unit),
+                        'provided_qty' => $this->formatQty($displayQty, $unit),
+                        'shortage_qty' => $this->formatQty(0, $unit),
+                        'fulfillment_status' => 'Manual',
+                        'racks' => $rackText !== '' ? $rackText : 'Belum dipetakan (piece belum dipilih)',
+                        'is_potongan' => false,
+                        'type_label' => $pieces->isNotEmpty() ? 'Pieces Dipilih' : 'Utuh',
+                        'piece_badge' => $pieces->isNotEmpty() ? 'Pieces Dipilih' : null,
+                        'piece_details' => $pieceDetails,
+                    ];
+                })
                 ->values()
                 ->all();
         }
@@ -354,6 +493,153 @@ class ViewOutbound extends Page
             ->all();
     }
 
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function manualOutboundItemFormRows(): array
+    {
+        $this->record->loadMissing('items.material:id,nama_material,satuan,default_roll_length');
+
+        return $this->record->items
+            ->map(function ($item): array {
+                $unit = (string) ($item->material?->resolveTrackingUnit() ?: $item->unit ?: 'unit');
+
+                return [
+                    'id' => (int) $item->id,
+                    'material_id' => (int) $item->material_id,
+                    'material_name' => (string) ($item->material?->nama_material ?? 'Material tidak diketahui'),
+                    'unit' => $unit,
+                    'selected_piece_ids' => $this->manualOutboundPieceIds($item->selected_piece_ids ?? []),
+                    'qty' => number_format((float) $item->qty, 2, '.', ''),
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    private function manualOutboundPiecesAreUsable(): bool
+    {
+        if (! $this->record->outbound_manual) {
+            return true;
+        }
+
+        $this->record->loadMissing('items');
+
+        if ($this->record->items->isEmpty()) {
+            Notification::make()
+                ->title('Item outbound belum tersedia')
+                ->body('Tambahkan item outbound manual terlebih dahulu.')
+                ->warning()
+                ->send();
+
+            return false;
+        }
+
+        $missingSelection = $this->record->items
+            ->contains(fn ($item): bool => empty($this->manualOutboundPieceIds($item->selected_piece_ids ?? [])));
+
+        if ($missingSelection) {
+            Notification::make()
+                ->title('Pieces belum dipilih')
+                ->body('Klik tombol Pilih Pieces untuk memetakan barang manual ke piece/rak fisik.')
+                ->warning()
+                ->send();
+
+            return false;
+        }
+
+        $ids = $this->record->items
+            ->flatMap(fn ($item) => $this->manualOutboundPieceIds($item->selected_piece_ids ?? []))
+            ->unique()
+            ->values()
+            ->all();
+
+        $pieces = MaterialPiece::query()
+            ->whereIn('id', $ids)
+            ->get(['id', 'status'])
+            ->keyBy('id');
+
+        $missingIds = collect($ids)
+            ->reject(fn (int $id): bool => $pieces->has($id))
+            ->values()
+            ->all();
+
+        if (! empty($missingIds)) {
+            Notification::make()
+                ->title('Piece tidak ditemukan')
+                ->body('Piece #'.implode(', #', $missingIds).' tidak ada di stok.')
+                ->warning()
+                ->send();
+
+            return false;
+        }
+
+        $invalidPieces = $pieces
+            ->filter(fn (MaterialPiece $piece): bool => ! in_array((string) $piece->status, ['available', 'booked'], true));
+
+        if ($invalidPieces->isNotEmpty()) {
+            Notification::make()
+                ->title('Piece sudah tidak bisa dipakai')
+                ->body('Piece #'.$invalidPieces->keys()->implode(', #').' sudah dipakai/rusak. Pilih ulang pieces outbound manual.')
+                ->warning()
+                ->send();
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private function markManualOutboundPiecesUsed(): void
+    {
+        if (! $this->record->outbound_manual) {
+            return;
+        }
+
+        $this->record->loadMissing('items');
+
+        $ids = $this->record->items
+            ->flatMap(fn ($item) => $this->manualOutboundPieceIds($item->selected_piece_ids ?? []))
+            ->unique()
+            ->values()
+            ->all();
+
+        if (empty($ids)) {
+            return;
+        }
+
+        $pieces = MaterialPiece::query()
+            ->whereIn('id', $ids)
+            ->lockForUpdate()
+            ->get();
+
+        foreach ($pieces as $piece) {
+            $piece->update([
+                'status' => 'used',
+                'used_at' => now(),
+                'booked_for_project_id' => $piece->booked_for_project_id ?: $this->record->project_id,
+                'booked_at' => $piece->booked_at ?: now(),
+            ]);
+        }
+    }
+
+    private function manualOutboundPieceDetailLine(MaterialPiece $piece, string $unit, string $itemLabel): string
+    {
+        $qty = $this->formatQty((float) $piece->panjang, $unit);
+        $rack = (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-'));
+        $code = trim((string) ($piece->piece_code ?: ''));
+        $codeText = $code !== '' ? " ({$code})" : '';
+        $statusText = match ((string) $piece->status) {
+            'available' => 'Available',
+            'booked' => 'Booked'.($piece->bookedForProject?->kode_proyek ? ' - '.$piece->bookedForProject->kode_proyek : ''),
+            'used' => 'Used',
+            'damaged' => 'Rusak',
+            default => ucfirst((string) $piece->status),
+        };
+
+        return "{$itemLabel} #{$piece->id}{$codeText}: {$qty} - Rak {$rack} - {$statusText}";
+    }
+
     private function aiInstructionsByMaterial(): Collection
     {
         if (! $this->record->project_id) {
@@ -398,7 +684,7 @@ class ViewOutbound extends Page
                 $material = (string) ($row['material'] ?? 'Material tidak diketahui');
                 $qty = (string) ($row['qty'] ?? '-');
                 $racks = (string) ($row['racks'] ?? '-');
-                $type = (bool) ($row['is_potongan'] ?? false) ? 'Potongan' : 'Utuh';
+                $type = (string) ($row['type_label'] ?? ((bool) ($row['is_potongan'] ?? false) ? 'Potongan' : 'Utuh'));
                 $status = (string) ($row['fulfillment_status'] ?? '-');
 
                 return [

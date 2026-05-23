@@ -38,3 +38,17 @@ JOIN information_schema.constraint_column_usage ccu
 WHERE tc.constraint_type = 'FOREIGN KEY'
   AND tc.table_schema = 'public'
 ORDER BY tc.table_name, kcu.column_name;
+
+
+SELECT
+    table_name,
+    column_name,
+    data_type,
+    character_maximum_length,
+    numeric_precision,
+    numeric_scale,
+    is_nullable,
+    column_default
+FROM information_schema.columns
+WHERE table_schema = 'public'
+ORDER BY table_name, ordinal_position;

@@ -119,11 +119,16 @@ class TasksTable
             ])
             ->defaultSort('created_at', 'desc')
             ->actions([
-                ViewAction::make(),
+                ViewAction::make()
+                    ->visible(fn (Task $record): bool => ! (
+                        self::isManagerAgingMaterialTask($record)
+                        && ! self::isAgingMaterialTaskApproved($record)
+                    )),
 
                 EditAction::make()
                     ->visible(fn (Task $record) => $record->visualStatus() === 'pending'
                         && self::canHandleTask($record)
+                        && ! self::isManagerAgingMaterialTask($record)
                         && ! in_array($record->type, ['ai_booking_suggestion', 'ai_inbound_allocation_suggestion'], true)),
 
                 Action::make('updateStatus')
@@ -631,6 +636,18 @@ class TasksTable
 
         return $record->related_type === 'project'
             || (int) data_get($record->payload, 'source_ai_task_id', 0) > 0;
+    }
+
+    private static function isManagerAgingMaterialTask(Task $record): bool
+    {
+        return $record->type === 'ai_deadstock_recommendation'
+            && in_array($record->for_role, self::roleAliases('Manager Operasional'), true);
+    }
+
+    private static function isAgingMaterialTaskApproved(Task $record): bool
+    {
+        return (string) data_get($record->payload, 'approval_trail.manager_operasional.status', '') === 'approved'
+            || (string) data_get($record->payload, 'workflow_state', '') === 'approved_for_aging';
     }
 
     private static function roleAliases(string $role): array

@@ -77,7 +77,6 @@ class ProjectTemplateForm
                 Group::make()
                     ->schema([
                         Section::make('Daftar Material Standar')
-                            ->description('Area ini akan scroll ke bawah tanpa ganggu form utama.')
                             ->schema([
                                 Repeater::make('items')
                                     ->relationship('items')

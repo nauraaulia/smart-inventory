@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\ProjectTemplates\Tables;
 
 use Filament\Actions\BulkActionGroup;
+use Filament\Actions\DeleteAction;
 use Filament\Actions\DeleteBulkAction;
 use Filament\Actions\EditAction;
 use Filament\Tables\Columns\IconColumn;
@@ -40,10 +41,20 @@ class ProjectTemplatesTable
                 //
             ])
             ->recordActions([
-                \Filament\Actions\EditAction::make()
+                EditAction::make()
                     ->visible(fn () => auth()->user()?->role === 'Manager Teknik'),
-                \Filament\Actions\DeleteAction::make()
-                    ->visible(fn () => false),
+                DeleteAction::make()
+                    ->label('Delete')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->visible(fn () => auth()->user()?->role === 'Manager Teknik')
+                    ->requiresConfirmation()
+                    ->modalIcon('heroicon-o-trash')
+                    ->modalIconColor('danger')
+                    ->modalHeading('Delete project template')
+                    ->modalDescription('Are you sure you would like to do this?')
+                    ->modalCancelActionLabel('Cancel')
+                    ->modalSubmitActionLabel('Delete'),
             ])
             ->toolbarActions([
                 BulkActionGroup::make([

@@ -89,7 +89,7 @@ class InboundsTable
             ->recordActions([
                 EditAction::make(),
                 DeleteAction::make()
-                    ->label('Hapus')
+                    ->label('Delete')
                     ->icon('heroicon-o-trash')
                     ->color('danger')
                     ->requiresConfirmation()
