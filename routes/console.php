@@ -12,6 +12,10 @@ Schedule::command('ai:sync-standby --minutes=180 --limit=40')
     ->everyMinute()
     ->withoutOverlapping();
 
+Schedule::command('ai:requeue-stuck-booking --minutes=720 --limit=40')
+    ->cron('*/2 * * * *')
+    ->withoutOverlapping();
+
 Schedule::command('project:check-material-readiness')
     ->daily()
     ->withoutOverlapping();

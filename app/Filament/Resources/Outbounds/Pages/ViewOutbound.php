@@ -122,6 +122,16 @@ class ViewOutbound extends Page
                         ->required(),
                 ])
                 ->action(function (array $data): void {
+                    if (! $this->canPrepare()) {
+                        Notification::make()
+                            ->title('Akses ditolak')
+                            ->body('Hanya staff gudang yang dapat memproses outbound.')
+                            ->danger()
+                            ->send();
+
+                        return;
+                    }
+
                     $items = $this->normalizeManualOutboundItemRows($data['items'] ?? []);
 
                     if ($items === null) {
@@ -161,6 +171,16 @@ class ViewOutbound extends Page
                 ->requiresConfirmation()
                 ->modalHeading('Tandai outbound siap diambil?')
                 ->action(function (): void {
+                    if (! $this->canPrepare()) {
+                        Notification::make()
+                            ->title('Akses ditolak')
+                            ->body('Hanya staff gudang yang dapat memproses outbound.')
+                            ->danger()
+                            ->send();
+
+                        return;
+                    }
+
                     if (! $this->manualOutboundPiecesAreUsable()) {
                         return;
                     }
@@ -224,6 +244,16 @@ class ViewOutbound extends Page
                     ];
                 })
                 ->action(function (array $data): void {
+                    if (! $this->canTake()) {
+                        Notification::make()
+                            ->title('Akses ditolak')
+                            ->body('Hanya Manager Teknik yang dapat mengonfirmasi pengambilan.')
+                            ->danger()
+                            ->send();
+
+                        return;
+                    }
+
                     if (! $this->manualOutboundPiecesAreUsable()) {
                         return;
                     }
@@ -720,7 +750,6 @@ class ViewOutbound extends Page
             'Staff Administrasi Gudang',
             'Staff Adm Gudang',
             'Staff Gudang',
-            'Administrator IT',
         ], true);
     }
 

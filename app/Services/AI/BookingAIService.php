@@ -162,8 +162,7 @@ class BookingAIService
 
             FALLBACK_FLOW:
             if ($geminiFailedTotal) {
-                $instruksiAi = $this->parseInstruksiOperasionalDariCatatan($catatanTeknis, $projectId);
-                $tanpaPotonganDariPrompt = (bool) ($instruksiAi['tanpa_potongan'] ?? false);
+                $instruksiAi = $this->buildFallbackInstruksiTanpaManager();
 
                 $hasilAnalisis = $this->buildFallbackAnalysis($projectId, $kebutuhanDelta, $stockData, $instruksiAi);
 
@@ -363,7 +362,7 @@ class BookingAIService
                                 'qty_original' => (float) ($item['qty_original'] ?? $dibutuhkan),
                             ]],
                             $stockData,
-                            $instruksiAi,
+                            $this->buildFallbackInstruksiTanpaManager(),
                         );
 
                         $fallbackRow = (array) ($fallbackRows[0] ?? []);
@@ -410,7 +409,7 @@ class BookingAIService
                                 'qty_original' => (float) ($item['qty_original'] ?? $dibutuhkan),
                             ]],
                             $stockData,
-                            $instruksiAi,
+                            $this->buildFallbackInstruksiTanpaManager(),
                         );
 
                         $fallbackRow = (array) ($fallbackRows[0] ?? []);
@@ -2434,6 +2433,25 @@ PROMPT;
                 'payload' => $payload,
             ]);
         });
+    }
+
+    private function buildFallbackInstruksiTanpaManager(): array
+    {
+        return [
+            'tanpa_potongan' => false,
+            'require_no_joint' => false,
+            'requested_segments' => [],
+            'requested_piece_count' => 0,
+            'ringkas' => 'Fallback sistem: tidak mengikuti instruksi manager.',
+            'alasan' => 'Fallback lokal saat AI eksternal tidak tersedia.',
+            'sumber' => 'fallback_system',
+            'confidence' => 'rendah',
+            'preferensi_sumber' => 'auto',
+            'preferensi_umur_stok' => 'lama',
+            'preferred_piece_ids' => [],
+            'preferred_rack_labels' => [],
+            'preferred_rack_ids' => [],
+        ];
     }
 
     private function buildFallbackAnalysis(int $projectId, array $kebutuhanDelta, array $stockData, array $instruksiAi): array

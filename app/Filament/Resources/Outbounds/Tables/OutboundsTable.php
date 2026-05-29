@@ -126,7 +126,7 @@ class OutboundsTable
             return in_array((string) $record->status, ['ready', 'taken'], true);
         }
 
-        return $role === 'Administrator IT';
+        return false;
     }
 
     public static function requirementsModalContent(Project $record): HtmlString

@@ -183,7 +183,7 @@ class TaskForm
                                     ->dehydrated(false)
                                     ->columnSpanFull(),
                                 Textarea::make('ai_reason')
-                                    ->label('Analisis AI')
+                                    ->label(fn (Get $get): string => self::resolveAiReasonLabel($get))
                                     ->rows(5)
                                     ->disabled()
                                     ->dehydrated(false)
@@ -449,6 +449,17 @@ class TaskForm
         }
 
         return 'unit';
+    }
+
+    private static function resolveAiReasonLabel(Get $get): string
+    {
+        $source = mb_strtolower(trim((string) ($get('ai_reason_source') ?? '')));
+
+        if ($source === '') {
+            return 'Analisis AI';
+        }
+
+        return str_contains($source, 'gemini') ? 'Analisis AI' : 'Sistem';
     }
 
     private static function requiresExplicitPieceSelection(?Task $record): bool

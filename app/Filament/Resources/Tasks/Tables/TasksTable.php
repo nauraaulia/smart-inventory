@@ -204,6 +204,7 @@ class TasksTable
                                     'stock_condition_text' => (string) ($item['stock_condition_text'] ?? '-'),
                                     'purchase_recommendation_text' => (string) ($item['purchase_recommendation_text'] ?? '-'),
                                     'ai_reason' => (string) ($item['ai_reason'] ?? '-'),
+                                    'ai_reason_source' => (string) ($item['ai_reason_source'] ?? ''),
                                     'status' => 'pending',
                                 ];
                             })->values()->all();
@@ -218,6 +219,7 @@ class TasksTable
                                     ->schema([
                                         Hidden::make('material_id')->required(),
                                         Hidden::make('recommended_piece_ids'),
+                                        Hidden::make('ai_reason_source')->dehydrated(false),
                                         TextInput::make('material_name')
                                             ->label('Material')
                                             ->disabled()
@@ -255,7 +257,7 @@ class TasksTable
                                             ->disabled()
                                             ->dehydrated(false),
                                         Textarea::make('ai_reason')
-                                            ->label('Analisis AI')
+                                            ->label(fn (Get $get): string => self::resolveAiReasonLabel($get))
                                             ->rows(5)
                                             ->disabled()
                                             ->dehydrated(false),
@@ -316,7 +318,7 @@ class TasksTable
                                     $length = rtrim(rtrim(number_format((float) $piece->panjang, 2, '.', ''), '0'), '.');
                                     $rack = (string) ($piece->shelfLocation?->kode_lokasi ?: ($piece->shelfLocation?->nama_lokasi ?: '-'));
                                     $source = (string) ($piece->sumber ?: '-');
-                                    $unit = (string) ($piece->material?->satuan ?: 'unit');
+                                    $unit = (string) ($piece->material?->resolveTrackingUnit() ?: $piece->material?->satuan ?: 'unit');
                                     $itemLabel = Material::usesDiscreteUnitTrackingFor($unit, $piece->material?->default_roll_length) ? 'Item' : 'Piece';
                                     $receivedAt = $piece->inbound?->entry_date
                                         ? Carbon::parse($piece->inbound->entry_date)
@@ -611,6 +613,17 @@ class TasksTable
             'approved + rejected' => 'warning',
             default => 'gray',
         };
+    }
+
+    private static function resolveAiReasonLabel(Get $get): string
+    {
+        $source = mb_strtolower(trim((string) ($get('ai_reason_source') ?? '')));
+
+        if ($source === '') {
+            return 'Analisis AI';
+        }
+
+        return str_contains($source, 'gemini') ? 'Analisis AI' : 'Sistem';
     }
 
     private static function canHandleTask(Task $record): bool

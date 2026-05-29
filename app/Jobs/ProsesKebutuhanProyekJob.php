@@ -128,10 +128,17 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
         $fallbackRecovered = false;
         $errorMessage = trim((string) $e->getMessage());
         $isGeminiQuotaOrCooldown = $this->isGeminiQuotaOrCooldown($errorMessage);
+        $retryScheduled = false;
+        $retryMinutes = 0;
+        $fallbackRetryScheduled = false;
+        $fallbackRetryMinutes = 0;
+        $shouldScheduleFallbackRetry = false;
+        $project = null;
+        $kebutuhan = [];
 
         try {
             $project = Project::with('items.material')->find($this->projectId);
-            if ($project && ! $isGeminiQuotaOrCooldown) {
+            if ($project) {
                 $kebutuhan = $project->items->map(fn ($item) => [
                     'material_id' => $item->material_id,
                     'qty' => $item->jumlah_diminta,
@@ -139,7 +146,10 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
                     ->sortBy('material_id')
                     ->values()
                     ->toArray();
+            }
 
+            if ($project && ! $isGeminiQuotaOrCooldown) {
+                $shouldScheduleFallbackRetry = ! empty($kebutuhan);
                 $aiService = new BookingAIService(new GeminiService);
                 // Setelah retry habis, pakai fallback lokal agar task tetap berisi rekomendasi.
                 $aiService->prosesKebutuhanProyek($this->projectId, $kebutuhan, false, 'system_sync');
@@ -157,11 +167,33 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
                     $fallbackRecovered = is_array($detail) && ! empty($detail);
                 }
             }
+
+            if ($project && $isGeminiQuotaOrCooldown && ! empty($kebutuhan)) {
+                $retryMinutes = max(1, (int) env('AI_BOOKING_QUOTA_RETRY_MINUTES', 5));
+                $retryKey = 'ai_booking_quota_retry_'.$this->projectId;
+
+                if (Cache::add($retryKey, now()->toDateTimeString(), now()->addMinutes($retryMinutes))) {
+                    dispatch((new RetryBookingAIJob($this->projectId, $kebutuhan))
+                        ->delay(now()->addMinutes($retryMinutes)));
+                    $retryScheduled = true;
+                }
+            }
         } catch (Throwable $fallbackError) {
             Log::error('Fallback darurat setelah retry gagal tidak berhasil', [
                 'project_id' => $this->projectId,
                 'error' => $fallbackError->getMessage(),
             ]);
+        }
+
+        if ($shouldScheduleFallbackRetry) {
+            $fallbackRetryMinutes = max(1, (int) env('AI_BOOKING_FALLBACK_RETRY_MINUTES', 1));
+            $fallbackRetryKey = 'ai_booking_fallback_retry_'.$this->projectId;
+
+            if (Cache::add($fallbackRetryKey, now()->toDateTimeString(), now()->addMinutes($fallbackRetryMinutes))) {
+                dispatch((new RetryBookingAIJob($this->projectId, $kebutuhan))
+                    ->delay(now()->addMinutes($fallbackRetryMinutes)));
+                $fallbackRetryScheduled = true;
+            }
         }
 
         $task = Task::query()
@@ -178,12 +210,36 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
             data_set($payload, 'ai_error.failed_at', now()->toDateTimeString());
             data_set($payload, 'ai_error.retries', (int) $this->tries);
             data_set($payload, 'last_synced_at', now()->toDateTimeString());
+            if ($retryScheduled && $retryMinutes > 0) {
+                data_set($payload, 'ai_error.retry_after_minutes', $retryMinutes);
+                data_set($payload, 'ai_error.retry_scheduled_at', now()->toDateTimeString());
+            }
+            if ($fallbackRetryScheduled && $fallbackRetryMinutes > 0) {
+                data_set($payload, 'ai_error.fallback_retry_after_minutes', $fallbackRetryMinutes);
+                data_set($payload, 'ai_error.fallback_retry_scheduled_at', now()->toDateTimeString());
+            }
 
             $updateData = ['payload' => $payload];
             if (! $fallbackRecovered) {
-                $updateData['message'] = $isGeminiQuotaOrCooldown
-                    ? 'Gemini terkena quota/rate limit setelah '.(int) $this->tries.' percobaan. Rekomendasi fallback PHP tidak dijalankan agar hasil tetap menunggu Gemini.'
-                    : 'AI gagal setelah '.(int) $this->tries.' percobaan: '.$errorMessage;
+                if ($isGeminiQuotaOrCooldown) {
+                    $suffix = $retryScheduled && $retryMinutes > 0
+                        ? "Sistem akan coba ulang dalam {$retryMinutes} menit. Jika masih gagal, fallback sistem dijalankan."
+                        : 'Sistem akan coba ulang setelah cooldown selesai.';
+                    $updateData['message'] = 'Gemini terkena quota/rate limit setelah '.(int) $this->tries.' percobaan. '.$suffix;
+                } else {
+                    $updateData['message'] = 'AI gagal setelah '.(int) $this->tries.' percobaan: '.$errorMessage;
+                }
+            }
+            if ($fallbackRetryScheduled && $fallbackRetryMinutes > 0) {
+                $retryNote = " Sistem akan coba ulang dalam {$fallbackRetryMinutes} menit.";
+                if (isset($updateData['message'])) {
+                    $updateData['message'] .= $retryNote;
+                } else {
+                    $existingMessage = trim((string) ($task->message ?? ''));
+                    $updateData['message'] = $existingMessage !== ''
+                        ? $existingMessage.$retryNote
+                        : 'Sistem akan coba ulang dalam '.$fallbackRetryMinutes.' menit.';
+                }
             }
 
             $task->update($updateData);
@@ -194,11 +250,21 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
             'tries' => $this->tries,
             'error' => $errorMessage,
             'fallback_skipped' => $isGeminiQuotaOrCooldown,
+            'retry_scheduled' => $retryScheduled,
+            'retry_minutes' => $retryMinutes,
+            'fallback_retry_scheduled' => $fallbackRetryScheduled,
+            'fallback_retry_minutes' => $fallbackRetryMinutes,
         ]);
 
         $project = Project::query()->find($this->projectId, ['id', 'kode_proyek']);
         if ($project && $this->sendNotifications) {
-            $this->notifyGeminiFailed($project, $errorMessage, $isGeminiQuotaOrCooldown);
+            $this->notifyGeminiFailed(
+                $project,
+                $errorMessage,
+                $isGeminiQuotaOrCooldown,
+                $retryScheduled ? $retryMinutes : null,
+                $fallbackRetryScheduled ? $fallbackRetryMinutes : null,
+            );
         }
     }
 
@@ -244,12 +310,22 @@ class ProsesKebutuhanProyekJob implements ShouldQueue
         $this->sendToRelevantUsers($notification);
     }
 
-    private function notifyGeminiFailed(Project $project, string $errorMessage, bool $fallbackSkipped = false): void
+    private function notifyGeminiFailed(Project $project, string $errorMessage, bool $fallbackSkipped = false, ?int $retryMinutes = null, ?int $fallbackRetryMinutes = null): void
     {
         $projectCode = (string) ($project->kode_proyek ?: ('#'.$project->id));
-        $body = $fallbackSkipped
-            ? 'Gemini terkena quota/rate limit. Fallback PHP tidak dijalankan agar rekomendasi menunggu Gemini.'
-            : 'Gemini gagal memproses rekomendasi. Sistem fallback hanya dijalankan untuk error non-quota.';
+        if ($fallbackSkipped) {
+            $body = 'Gemini terkena quota/rate limit.';
+            if ($retryMinutes) {
+                $body .= " Sistem akan coba ulang dalam {$retryMinutes} menit. Jika masih gagal, fallback sistem dijalankan.";
+            } else {
+                $body .= ' Sistem akan coba ulang setelah cooldown selesai.';
+            }
+        } else {
+            $body = 'Gemini gagal memproses rekomendasi. Sistem fallback hanya dijalankan untuk error non-quota.';
+            if ($fallbackRetryMinutes) {
+                $body .= " Sistem akan coba ulang dalam {$fallbackRetryMinutes} menit.";
+            }
+        }
         if ($errorMessage !== '') {
             $body .= ' Detail: '.mb_substr($errorMessage, 0, 180);
         }
