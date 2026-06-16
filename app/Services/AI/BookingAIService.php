@@ -285,12 +285,16 @@ class BookingAIService
                             $qtyBooking = round((float) array_sum($segmentPlan), 2);
                             $qtyPr = max(0, round($dibutuhkan - $qtyBooking, 2));
                             $aksi = $qtyPr > 0.00001 ? 'partial' : 'full_booking';
-                        } else {
+                        } elseif ($qtyBooking > 0.00001) {
                             $shouldUsePureFallback = true;
                         }
                     }
 
-                    if ((bool) ($instruksiAi['require_no_joint'] ?? false) && ! empty($normalizedSegments) && empty($geminiAllocations)) {
+                    if ($qtyBooking > 0.00001
+                        && (bool) ($instruksiAi['require_no_joint'] ?? false)
+                        && ! empty($normalizedSegments)
+                        && empty($geminiAllocations)
+                    ) {
                         $shouldUsePureFallback = true;
                     }
 
@@ -345,7 +349,11 @@ class BookingAIService
 
                     $chosen = $this->attachReasonsToChosenPieces($chosen, $alasanPerPiece);
 
-                    if ((bool) ($instruksiAi['require_no_joint'] ?? false) && ! empty($normalizedSegments) && empty($chosen)) {
+                    if ($qtyBooking > 0.00001
+                        && (bool) ($instruksiAi['require_no_joint'] ?? false)
+                        && ! empty($normalizedSegments)
+                        && empty($chosen)
+                    ) {
                         $shouldUsePureFallback = true;
                     }
 
@@ -399,6 +407,23 @@ class BookingAIService
                         ->unique()
                         ->implode('. ');
                     $geminiReason = implode('. ', array_values(array_filter([$overallReason, $perPieceReasonText, $sisaAnalysis], fn ($segment): bool => trim((string) $segment) !== '')));
+
+                    if ($geminiReason === '' && $aksi === 'full_pr') {
+                        $purchaseReasonSegments = [
+                            data_get($materialGemini, 'purchase_recommendation.reason'),
+                            data_get($materialGemini, 'purchase_recommendation.priority_reason'),
+                            data_get($materialGemini, 'purchase_recommendation.risk_if_delayed'),
+                        ];
+
+                        $geminiReason = collect($purchaseReasonSegments)
+                            ->map(fn ($segment): string => trim((string) $segment))
+                            ->filter(fn (string $segment): bool => $segment !== '')
+                            ->implode('. ');
+
+                        if ($geminiReason === '') {
+                            $geminiReason = "Seluruh kebutuhan {$material->nama_material} direkomendasikan masuk PR karena tidak ada piece yang bisa dibooking.";
+                        }
+                    }
 
                     if ($geminiReason === '') {
                         $fallbackRows = $this->buildFallbackAnalysis(
