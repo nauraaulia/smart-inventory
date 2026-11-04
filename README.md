@@ -84,6 +84,8 @@ Project needs + stock + material pieces + conditions + suppliers
 | Functional testing | Black-box testing of 26 features | **209/209** test scenarios passed |
 | AI feature feasibility | Expert judgment by 7 internal company respondents | **94.81%** feasibility score |
 
+   📄 Read the full [Product Requirements Document (PRD)](docs/PRD.md).
+   
 ## Development process
 
 Built with **Rapid Application Development (RAD)**:
